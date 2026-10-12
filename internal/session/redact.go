@@ -42,10 +42,16 @@ func afterColor(l []byte, i int) bool {
 	return true
 }
 
+// afterEscape reports whether l[:i] ends in a colour reset |r or a link text marker |h
+// (l is lowered, so |R and |H too): raw chat lines and addon text keep these.
+func afterEscape(l []byte, i int) bool {
+	return i >= 2 && l[i-2] == '|' && (l[i-1] == 'r' || l[i-1] == 'h')
+}
+
 // wholeWord reports whether l[i:i+n] has no letter or digit on either side; a colour
-// escape right before it counts as a boundary.
+// escape, colour reset or link text marker right before it counts as a boundary.
 func wholeWord(l []byte, i, n int) bool {
-	left := i == 0 || !isWordByte(l[i-1]) || afterColor(l, i)
+	left := i == 0 || !isWordByte(l[i-1]) || afterColor(l, i) || afterEscape(l, i)
 	return left && (i+n == len(l) || !isWordByte(l[i+n]))
 }
 

@@ -49,7 +49,9 @@ type walkState struct {
 	speed    float32
 	nextBeat time.Time
 	done     chan error
-	onMesh   bool // the end is a navmesh floor point: arriving there settles z
+	onMesh   bool  // the end is a navmesh floor point: arriving there settles z
+	ends     []int // index in pts where each leg (corner to corner) ends; the last is len(pts)-1
+	leg      int   // the leg w.o faces along
 }
 
 func newWalk(pts [][3]float32, speed float32, now time.Time, done chan error) *walkState {
@@ -58,7 +60,7 @@ func newWalk(pts [][3]float32, speed float32, now time.Time, done chan error) *w
 	for i := 1; i < len(pts); i++ {
 		w.cum[i] = w.cum[i-1] + dist3f(pts[i-1], pts[i])
 	}
-	w.o = game.Facing(pts[0][0], pts[0][1], w.to[0], w.to[1])
+	w.setCorners(nil)
 	return w
 }
 
@@ -369,11 +371,13 @@ func (s *Session) WalkTo(ctx context.Context, x, y, z float32) error {
 
 // walkOpts shape one straight walk: limit (yards) and maxTime refuse a walk too long for
 // its caller (0: no bound); via are the ground points on the way (a navmesh leg's samples),
-// walked through in order; onMesh says the end is a navmesh floor point.
+// walked through in order; corners are the indexes in via where the walk turns (a
+// walk_path's corners; see tickTurn); onMesh says the end is a navmesh floor point.
 type walkOpts struct {
 	limit   float64
 	maxTime time.Duration
 	via     [][3]float32
+	corners []int
 	onMesh  bool
 }
 
@@ -383,8 +387,9 @@ type sentinelErr struct{ err, is error }
 func (e sentinelErr) Error() string   { return e.err.Error() }
 func (e sentinelErr) Unwrap() []error { return []error{e.err, e.is} }
 
-// walkStraight is one straight walk to `to`; walk_to and each leg of walk_path go through
-// it. It returns on arrival, or with the reason the walk ended early.
+// walkStraight is one walk to `to`: a straight line for walk_to, a whole planned path,
+// corners and all, for walk_path. It returns on arrival, or with the reason the walk ended
+// early.
 func (s *Session) walkStraight(ctx context.Context, to [3]float32, o walkOpts) error {
 	x, y, z := to[0], to[1], to[2]
 	v, err := s.do(ctx, func() (any, error) {
@@ -412,14 +417,15 @@ func (s *Session) walkStraight(ctx context.Context, to [3]float32, o walkOpts) e
 			return nil, fmt.Errorf("walk_to is for short moves: %.1f yards is over %g, use walk_path or teleport", dist, o.limit)
 		}
 		done := make(chan error, 1)
-		if dist < 0.1 {
-			done <- nil
-			return done, nil
-		}
 		now := s.now()
 		pts := append(append([][3]float32{from}, o.via...), [3]float32{x, y, z})
 		w := newWalk(pts, s.runSpeed, now, done)
+		if w.length() < 0.1 {
+			done <- nil
+			return done, nil
+		}
 		w.onMesh = o.onMesh
+		w.setCorners(o.corners)
 		if dur := w.duration(); o.maxTime > 0 && dur > o.maxTime {
 			return nil, fmt.Errorf("walk_to would take %.0f s at %.1f yd/s, over %s; walk a shorter way or teleport", dur.Seconds(), s.runSpeed, o.maxTime)
 		}
@@ -456,7 +462,8 @@ func (s *Session) walkStraight(ctx context.Context, to [3]float32, o walkOpts) e
 	}
 }
 
-// tickWalk advances a walk: heartbeat every 500 ms, stop at the destination. It reads the
+// tickWalk advances a walk: heartbeat every 500 ms, a facing at each corner, stop at the
+// destination. It reads the
 // clock once, not the tick's send time: a tick read late from a busy loop would place the
 // heartbeat behind the time it carries, and the next step would exceed the run speed.
 func (s *Session) tickWalk() error {
@@ -465,6 +472,9 @@ func (s *Session) tickWalk() error {
 		return nil
 	}
 	now := s.now()
+	if turned, err := s.tickTurn(w, now); turned {
+		return err
+	}
 	if w.arrived(now) {
 		s.walk = nil
 		z := clampZ(w.to[2], s.last, s.peekClock(now), w.speed)

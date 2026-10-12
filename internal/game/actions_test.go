@@ -1,0 +1,79 @@
+package game
+
+import (
+	"bytes"
+	"math"
+	"testing"
+
+	"github.com/pjerra/turtle-agent/internal/packet"
+)
+
+const wolfGUID = packet.GUID(0xF13000012B000001)
+
+func TestSelectionAttackAndCastLayouts(t *testing.T) {
+	if !bytes.Equal(BuildSetSelection(wolfGUID), packet.NewWriter().GUID(wolfGUID).Bytes()) ||
+		!bytes.Equal(BuildAttackSwing(wolfGUID), packet.NewWriter().GUID(wolfGUID).Bytes()) {
+		t.Fatal("selection or swing")
+	}
+	if b := BuildCastSpell(133, wolfGUID); !bytes.Equal(b, packet.NewWriter().U32(133).U16(TargetFlagUnit).PackedGUID(wolfGUID).Bytes()) {
+		t.Fatalf("unit cast % X", b)
+	}
+	if b := BuildCastSpell(2061, 0); !bytes.Equal(b, packet.NewWriter().U32(2061).U16(TargetFlagSelf).Bytes()) {
+		t.Fatalf("self cast % X", b)
+	}
+}
+
+func TestFacing(t *testing.T) {
+	for _, c := range []struct{ x, y, want float32 }{{1, 0, 0}, {0, 1, math.Pi / 2}, {-1, 0, math.Pi}, {0, -1, 3 * math.Pi / 2}} {
+		if got := Facing(0, 0, c.x, c.y); math.Abs(float64(got-c.want)) > 1e-5 {
+			t.Errorf("to (%v,%v): %v want %v", c.x, c.y, got, c.want)
+		}
+	}
+}
+
+func TestTeleportAndNewWorld(t *testing.T) {
+	w := packet.NewWriter().PackedGUID(0x2A).U32(7)
+	WriteMoveInfo(w, MoveInfo{X: 1, Y: 2, Z: 3, O: 4})
+	ack, err := ParseTeleportAck(w.Bytes())
+	if err != nil || ack.GUID != 0x2A || ack.Counter != 7 || ack.Move.Z != 3 {
+		t.Fatalf("%+v %v", ack, err)
+	}
+	if b := BuildTeleportAck(0x2A, 7, 99); !bytes.Equal(b, packet.NewWriter().GUID(0x2A).U32(7).U32(99).Bytes()) {
+		t.Fatalf("% X", b)
+	}
+	nw, err := ParseNewWorld(packet.NewWriter().U32(1).F32(10).F32(20).F32(30).F32(0.5).Bytes())
+	if err != nil || nw != (NewWorld{Map: 1, X: 10, Y: 20, Z: 30, O: 0.5}) {
+		t.Fatalf("%+v %v", nw, err)
+	}
+	if m, err := ParseTransferPending(packet.NewWriter().U32(1).Bytes()); err != nil || m != 1 {
+		t.Fatalf("%v %v", m, err)
+	}
+}
+
+func TestMovementChangeAndAck(t *testing.T) {
+	c, err := ParseMovementChange(packet.NewWriter().PackedGUID(0x2A).U32(3).F32(14).Bytes(), true)
+	if err != nil || c.Counter != 3 || c.Speed != 14 {
+		t.Fatalf("%+v %v", c, err)
+	}
+	speed := float32(14)
+	b := BuildMovementChangeAck(0x2A, 3, MoveInfo{X: 1}, &speed)
+	want := packet.NewWriter().GUID(0x2A).U32(3)
+	WriteMoveInfo(want, MoveInfo{X: 1})
+	if !bytes.Equal(b, want.F32(14).Bytes()) {
+		t.Fatalf("% X", b)
+	}
+	if c, err := ParseMovementChange(packet.NewWriter().PackedGUID(0x2A).U32(4).Bytes(), false); err != nil || c.Counter != 4 {
+		t.Fatalf("root %+v %v", c, err)
+	}
+}
+
+func TestAttackStartStop(t *testing.T) {
+	a, err := ParseAttackStart(packet.NewWriter().GUID(0x2A).GUID(wolfGUID).Bytes())
+	if err != nil || a != (AttackPair{0x2A, wolfGUID}) {
+		t.Fatalf("%+v %v", a, err)
+	}
+	a, err = ParseAttackStop(packet.NewWriter().PackedGUID(wolfGUID).PackedGUID(0x2A).U32(0).Bytes())
+	if err != nil || a != (AttackPair{wolfGUID, 0x2A}) {
+		t.Fatalf("%+v %v", a, err)
+	}
+}

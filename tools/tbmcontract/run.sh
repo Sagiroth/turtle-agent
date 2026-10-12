@@ -4,7 +4,7 @@
 #   run.sh [--events events.json]... 
 #
 # Without arguments: every fixtures/ok-*.txt must match, every fixtures/bad-*.txt must
-# fail. With --events: extract the TBM: lines of each events file (tools/tbmlines) and
+# fail with the mismatches they list. With --events: extract the TBM: lines of each events file (tools/tbmlines) and
 # require a match. Skips (exit 0, clear message) when lua5.1 or the addon is unavailable,
 # unless TBM_CONTRACT_STRICT=1 is set.
 set -eu
@@ -21,8 +21,16 @@ skip() {
 }
 
 command -v "$LUA" >/dev/null 2>&1 || skip "$LUA not found (apt install lua5.1)"
-addon=$("$here/fetch.sh") || skip "addon not cached and not downloadable"
+addon=$("$here/fetch.sh") || { [ -z "${TBM_ADDON_DIR:-}" ] || exit 1; skip "addon not cached and not downloadable"; }
 echo "tbm-contract: addon $(basename "$addon") ($(ls "$addon"/*.lua | wc -l) lua files), $("$LUA" -v 2>&1)"
+
+# mock.lua is a trimmed copy of the addon's tests/regression.lua as it was at this hash. A moved
+# pin or a newer checkout that changed that file may have changed the widget API the addon uses.
+MOCK_SOURCE_SHA256=35bc760de48a725f5dff89f1989a63ed46379bd183b507d073a4c0b6a8de408a
+if [ -f "$addon/tests/regression.lua" ]; then
+	have=$(sha256sum "$addon/tests/regression.lua" | cut -d' ' -f1)
+	[ "$have" = "$MOCK_SOURCE_SHA256" ] || echo "tbm-contract: WARNING tests/regression.lua of the addon changed ($have), mock.lua was copied from $MOCK_SOURCE_SHA256: re-check the mock" >&2
+fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -49,18 +57,25 @@ fi
 for f in "$here"/fixtures/ok-*.txt; do
 	replay "$f" || { echo "tbm-contract: $f should match but does not" >&2; fail=1; }
 done
-# A bad fixture states "# expect-mismatches: N" and must fail with exactly N, so a crash of the
-# driver or a check that stopped working does not pass for a failure.
+# A bad fixture lists one "# expect: <text>" per mismatch it must produce, in any order. The run
+# must print every text and exactly that many mismatches, so a crash of the driver or a check
+# that stopped working does not pass for a failure.
 for f in "$here"/fixtures/bad-*.txt; do
-	want=$(sed -n 's/^# expect-mismatches: *\([0-9][0-9]*\)$/\1/p' "$f")
-	[ -n "$want" ] || { echo "tbm-contract: $f lacks '# expect-mismatches: N'" >&2; fail=1; continue; }
+	want=$(grep -c '^# expect: ' "$f" || true)
+	[ "$want" -gt 0 ] || { echo "tbm-contract: $f lacks '# expect: <text>' lines" >&2; fail=1; continue; }
 	if out=$(replay "$f" 2>&1); then
 		echo "tbm-contract: $f is deliberately broken but passed" >&2
 		fail=1
 		continue
 	fi
 	got=$(echo "$out" | sed -n 's/^FAIL: \([0-9][0-9]*\) mismatch.*/\1/p')
-	if [ "$got" = "$want" ]; then
+	missing=0
+	while IFS= read -r text; do
+		echo "$out" | grep -qF -- "$text" || { echo "tbm-contract: $(basename "$f"): no mismatch says: $text" >&2; missing=1; }
+	done <<EOF
+$(sed -n 's/^# expect: //p' "$f")
+EOF
+	if [ "$got" = "$want" ] && [ "$missing" = 0 ]; then
 		echo "$(basename "$f"): fails as it must ($got mismatches)"
 	else
 		echo "$out" >&2

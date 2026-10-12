@@ -479,8 +479,9 @@ MIT) under a mock of the 1.12 widget API, replays `TBM:` lines as `CHAT_MSG_SYST
 compares the addon's state with what the lines say: `TBM:VERSION`, `CAPS` and `TRANSPORT`, the roster (`ROSTER_*`), CC
 assignments, the claimed list, per-bot `BOTSTATE` (move, loot, aoe, autocc, ... spread), `INV_*` snapshots, and `ACTION_ACK` /
 `ACTION_ERR`. It also fails when the addon refuses a line the protocol allows ("Malformed action response", a roster
-snapshot error), when the addon's chat filter would let a protocol line reach the chat frame, and for a `TBM:` verb it has
-no parser for.
+snapshot error), when the addon's chat filter would let a protocol line reach the chat frame, and for a `TBM:` verb the contract has
+no expectation for. Each mismatch is tagged `[server]` (the line breaks the protocol format), `[addon]` (the addon refuses a
+valid line or stores something else) or `[contract]` (no expectation yet).
 
 ```sh
 make tbm-contract                                # the fixtures: ok-*.txt must match, bad-*.txt must fail
@@ -492,7 +493,9 @@ make tbm-contract EVENTS="run1/events.json"      # replay the TBM: lines of a sa
 `|r` of fields such as `|ready`. The addon is downloaded at the commit pinned in `tools/tbmcontract/fetch.sh` into
 `.cache/` (ignored, never vendored); bump the commit there on purpose. The mock in `tools/tbmcontract/mock.lua` is copied
 from the addon's own `tests/regression.lua` (MIT). Without `lua5.1` or network the target skips with a message
-(`TBM_CONTRACT_STRICT=1` makes that an error); it is not part of `make test`. The expectations are in
+(`TBM_CONTRACT_STRICT=1` makes that an error); it is not part of `make test`. `TBM_ADDON_DIR=/path` uses your own
+checkout of the addon instead (read only, the pin is bypassed, and a directory without the `.toc` is refused rather
+than replaced). `run.sh` warns when the addon's `tests/regression.lua` is not the file `mock.lua` was copied from. The expectations are in
 `tools/tbmcontract/contract.lua`, written from `commands/BotCommands.cpp` and the protocol comments in the addon, not
 copied from its parser.
 
@@ -500,8 +503,8 @@ Fixtures (`tools/tbmcontract/fixtures/`) are scrubbed lines from live build 16/1
 capture has a non-empty roster yet, so `ok-roster-synthetic.txt` is built by hand from the server's format, and says so.
 `bad-known-build16.txt` holds real lines the addon rejects today (an `ACTION_ERR` with an empty intent from the
 `.bot action` usage error, and `ACTION_ACK|behavior mimic|party:mimic|...`, whose scope is neither `party` nor
-`bot:<name>`); `bad-synthetic.txt` is deliberately broken. A bad fixture states `# expect-mismatches: N` and must fail
-with exactly N. Offline only: not run against a live server.
+`bot:<name>`); `bad-synthetic.txt` is deliberately broken. A bad fixture lists one `# expect: <text>` per mismatch it must
+produce and must fail with exactly those. Offline only: not run against a live server.
 
 ## Python
 

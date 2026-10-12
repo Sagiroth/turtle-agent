@@ -8,7 +8,18 @@ ADDON_COMMIT=6a3802f641414ad0f8d3b0fb40ee3c0b5a468534
 ADDON_REPO=Sagiroth/TortoiseBotsManager
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-dir=${TBM_ADDON_DIR:-$root/.cache/tbmcontract/addon-$ADDON_COMMIT}
+# TBM_ADDON_DIR points at your own checkout of the addon. It is only read, never replaced or
+# deleted, and it bypasses the pin above.
+if [ -n "${TBM_ADDON_DIR:-}" ]; then
+	if [ ! -f "$TBM_ADDON_DIR/TortoiseBotsManager.toc" ]; then
+		echo "tbm-contract: TBM_ADDON_DIR=$TBM_ADDON_DIR has no TortoiseBotsManager.toc; not touching it" >&2
+		exit 3
+	fi
+	echo "tbm-contract: using TBM_ADDON_DIR=$TBM_ADDON_DIR, the pinned commit $ADDON_COMMIT is bypassed" >&2
+	echo "$TBM_ADDON_DIR"
+	exit 0
+fi
+dir=$root/.cache/tbmcontract/addon-$ADDON_COMMIT
 if [ -f "$dir/TortoiseBotsManager.toc" ]; then
 	echo "$dir"
 	exit 0

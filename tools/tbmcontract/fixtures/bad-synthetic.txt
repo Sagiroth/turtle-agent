@@ -1,4 +1,15 @@
-# expect-mismatches: 12
+# expect: [server] ROSTER_BEGIN said 2 rows, 1 arrived
+# expect: [server] ROSTER row breaks the protocol
+# expect: [addon] addon rejected the line as an error (unexpected_end)
+# expect: [server] CC_ASSIGN row is not name|<raid mark> (got "Alpha|banana")
+# expect: [addon] addon rejected the line as an error (unexpected_cc_end)
+# expect: [server] BOTSTATE pair "loot" of Alpha is not key=value
+# expect: [server] ACTION_ACK breaks the protocol, the addon shows 'Malformed action response': 5 fields
+# expect: [server] ACTION_ACK breaks the protocol, the addon shows 'Malformed action response': count "many"
+# expect: [server] INV_END is not bot|free|total for Alpha
+# expect: [addon] ChatFrame_OnEvent lets the protocol line through
+# expect: [contract] no expectation for TBM:FROBNICATE
+# expect: [contract] no expectation for TBM:ACTION_ACKeady
 # DELIBERATELY BROKEN. Every line below must be reported; if one passes, the contract has lost a check.
 # a roster that says 2 rows and sends 1
 system	TBM:ROSTER_BEGIN|2

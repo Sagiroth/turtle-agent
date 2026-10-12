@@ -8,9 +8,14 @@
 --   system<TAB><text>                       a CHAT_MSG_SYSTEM line
 --   addon<TAB><CHANNEL><TAB><text>          a CHAT_MSG_ADDON line with prefix TBM
 -- tools/tbmlines writes this from an events file. Prints one line per mismatch and exits 1
--- if there is any. The expectations below are an independent reading of the protocol
--- (commands/BotCommands.cpp in TortoiseBots, and the comment block above
--- TB.ParseBotPanelMessage in the addon's Comms.lua), not a copy of the addon's parser.
+-- if there is any. Each mismatch is tagged with its cause:
+--   [server]   the line breaks the protocol format (a malformed pair the addon skips silently
+--              is one of these)
+--   [addon]    the addon refuses a valid line or stores something else than it says
+--   [contract] this driver has no expectation for that verb
+-- The expectations below are an independent reading of the protocol (commands/BotCommands.cpp
+-- in TortoiseBots, and the comment block above TB.ParseBotPanelMessage in the addon's
+-- Comms.lua), not a copy of the addon's parser.
 
 local addonDir, linesFile = arg[1], arg[2]
 if not addonDir or not linesFile then
@@ -35,7 +40,7 @@ local TB = assert(TortoiseBots, "addon did not create TortoiseBots")
 local coreFrame = assert(H.frames["TortoiseBotsManagerCoreFrame"], "core lifecycle frame missing")
 
 local function fire(frame, ev, a1, a2, a3, a4)
-    event, arg1, arg2, arg3, arg4 = ev, a1, a2, a3, a4
+    this, event, arg1, arg2, arg3, arg4 = frame, ev, a1, a2, a3, a4 -- 1.12 handlers read globals
     return pcall(frame.scripts.OnEvent, frame)
 end
 local ok, err = fire(coreFrame, "ADDON_LOADED", "TortoiseBotsManager")
@@ -83,33 +88,40 @@ local MARKS = { skull = 1, cross = 1, square = 1, moon = 1, triangle = 1, diamon
 local ONLINE = { online = 1, ["in world"] = 1, in_world = 1 }
 
 local mismatches, lineNo, current = {}, 0, nil
-local function bad(fmt, ...)
-    local msg = string.format(fmt, ...)
+-- Every mismatch says whose fault it is:
+--   [server]   the line breaks the protocol format (bad count, field, value)
+--   [addon]    the addon refuses a valid line or stores something other than what it says
+--   [contract] this driver has no expectation for the line (a protocol change to model)
+local function bad(tag, fmt, ...)
+    local msg = string.format("[%s] ", tag) .. string.format(fmt, ...)
     local shown = current or "?"
     if #shown > 140 then shown = shown:sub(1, 140) .. "..." end
     mismatches[#mismatches + 1] = string.format("%s:%d: %s\n      %s", linesFile, lineNo, shown, msg)
 end
+local function badS(...) return bad("server", ...) end
+local function badA(...) return bad("addon", ...) end
+local function badC(...) return bad("contract", ...) end
 local function expect(what, got, want)
-    if got ~= want then bad("%s: addon has %s, server meant %s", what, show(got), show(want)) end
+    if got ~= want then badA("%s: addon has %s, server meant %s", what, show(got), show(want)) end
 end
 local function expectMap(what, got, want)
     if type(got) ~= "table" then
-        bad("%s: addon has nothing, server meant a state", what)
+        badA("%s: addon has nothing, server meant a state", what)
         return
     end
     for k, v in pairs(want) do
-        if got[k] ~= v then bad("%s.%s: addon has %s, server meant %s", what, k, show(got[k]), show(v)) end
+        if got[k] ~= v then badA("%s.%s: addon has %s, server meant %s", what, k, show(got[k]), show(v)) end
     end
     for k, v in pairs(got) do
-        if want[k] == nil then bad("%s.%s: addon has %s, server sent no such key", what, k, show(v)) end
+        if want[k] == nil then badA("%s.%s: addon has %s, server sent no such key", what, k, show(v)) end
     end
 end
 local function setEq(what, got, want)
     for k in pairs(want) do
-        if not got[k] then bad("%s: missing %s", what, k) end
+        if not got[k] then badA("%s: missing %s", what, k) end
     end
     for k in pairs(got) do
-        if not want[k] then bad("%s: unexpected %s", what, k) end
+        if not want[k] then badA("%s: unexpected %s", what, k) end
     end
 end
 
@@ -131,14 +143,14 @@ function V.CAPS(f, rest)
     for k in pairs(TB._serverCaps or {}) do got[k] = true end
     setEq("capabilities", got, want)
     for k in pairs(want) do
-        if not TB.HasServerCapability(k) then bad("HasServerCapability(%s) is false", k) end
+        if not TB.HasServerCapability(k) then badA("HasServerCapability(%s) is false", k) end
     end
 end
 
 function V.TRANSPORT(f, rest)
     local want = trim(rest):lower()
     if want ~= "party" and want ~= "none" then
-        bad("server sent transport %q, protocol allows party or none", want)
+        badS("the server sent transport %q, protocol allows party or none", want)
         return
     end
     expect("addon command channel", TB.AddonCommandChannel(), want == "party" and "PARTY" or nil)
@@ -146,28 +158,29 @@ end
 
 function V.ROSTER_BEGIN(f)
     O.roster = { expected = tonumber(f[1]), rows = {}, names = {}, ok = #f == 1 and isnum(f[1]) }
-    if not O.roster.ok then bad("malformed ROSTER_BEGIN") end
+    if not O.roster.ok then badS("malformed ROSTER_BEGIN") end
 end
 
 function V.ROSTER(f)
     local b = O.roster
-    if not b then bad("ROSTER row outside ROSTER_BEGIN/END") return end
+    if not b then badS("ROSTER row outside ROSTER_BEGIN/END") return end
     local guid, name, class, state, group, loc = f[1], f[2], f[3], f[4], f[5], f[6]
-    if #f ~= 6 or not isnum(guid) or trim(name or "") == "" or not isnum(class)
+    -- the addon takes 6 fields, or 7 with a CC mark (Roster.lua), and any non-empty guid
+    if (#f ~= 6 and #f ~= 7) or trim(guid or "") == "" or trim(name or "") == "" or not isnum(class)
         or trim(state or "") == "" or (group ~= "0" and group ~= "1") or trim(loc or "") == "" then
-        bad("server ROSTER row breaks the 6-field protocol (guid|name|class|state|grouped|location)")
+        badS("ROSTER row breaks the protocol (guid|name|class|state|grouped|location[|ccmark])")
         b.ok = false
         return
     end
     local n = normName(name)
     if b.names[n] then
-        bad("duplicate ROSTER row for %s", n)
+        badS("duplicate ROSTER row for %s", n)
         b.ok = false
         return
     end
     b.names[n] = true
     b.rows[#b.rows + 1] = { guid = guid, name = n, class = tonumber(class), state = state:lower(),
-        group = group == "1", loc = loc }
+        group = group == "1", loc = loc, hasMark = #f == 7, mark = f[7] and trim(f[7]):lower() }
 end
 
 function V.ROSTER_END(f)
@@ -175,7 +188,7 @@ function V.ROSTER_END(f)
     O.roster = nil
     if not b or not b.ok then return end
     if #b.rows ~= b.expected then
-        bad("ROSTER_BEGIN said %d rows, %d arrived", b.expected, #b.rows)
+        badS("ROSTER_BEGIN said %d rows, %d arrived", b.expected, #b.rows)
         return
     end
     O.rosterRows = b.rows
@@ -186,7 +199,7 @@ function V.ROSTER_END(f)
         want[r.name] = true
         local e = TB.GetRosterEntry(r.name)
         if not e then
-            bad("roster row %s was not stored", r.name)
+            badA("roster row %s was not stored", r.name)
         else
             local w = "roster " .. r.name
             expect(w .. " guid", e.guid, r.guid)
@@ -194,6 +207,7 @@ function V.ROSTER_END(f)
             expect(w .. " serverState", e.serverState, r.state)
             expect(w .. " group", e.group, r.group)
             expect(w .. " location", e.location, r.loc ~= "-" and r.loc or nil)
+            if r.hasMark then expect(w .. " cc mark", e.ccMark, MARKS[r.mark or ""] and r.mark or nil) end
         end
     end
     for _, row in ipairs(TB.GetDisplayRows("")) do got[row.name] = true end
@@ -202,10 +216,10 @@ end
 
 function V.ROSTER_ERROR(f)
     -- the roster response is over; the addon keeps the error for the UI
-    if #f ~= 2 then bad("ROSTER_ERROR needs code|message") return end
+    if #f ~= 2 then badS("ROSTER_ERROR needs code|message") return end
     local e = TB.GetRosterSnapshotError()
     if not e then
-        bad("ROSTER_ERROR left no GetRosterSnapshotError")
+        badA("ROSTER_ERROR left no GetRosterSnapshotError")
     else
         expect("roster error code", e.code, trim(f[1]))
     end
@@ -213,21 +227,21 @@ end
 
 function V.CC_ASSIGN_BEGIN(f)
     O.cc = { expected = tonumber(f[1]), rows = {}, names = {}, ok = #f == 1 and isnum(f[1]) }
-    if not O.cc.ok then bad("malformed CC_ASSIGN_BEGIN") end
+    if not O.cc.ok then badS("malformed CC_ASSIGN_BEGIN") end
 end
 
 function V.CC_ASSIGN(f)
     local b = O.cc
-    if not b then bad("CC_ASSIGN row outside CC_ASSIGN_BEGIN/END") return end
+    if not b then badS("CC_ASSIGN row outside CC_ASSIGN_BEGIN/END") return end
     local mark = f[2] and f[2]:lower()
     if #f ~= 2 or trim(f[1]) == "" or not MARKS[mark or ""] then
-        bad("server CC_ASSIGN row is not name|<raid mark> (got %q)", table.concat(f, "|"))
+        badS("CC_ASSIGN row is not name|<raid mark> (got %q)", table.concat(f, "|"))
         b.ok = false
         return
     end
     local n = normName(f[1])
     if b.names[n] then
-        bad("duplicate CC_ASSIGN row for %s", n)
+        badS("duplicate CC_ASSIGN row for %s", n)
         b.ok = false
         return
     end
@@ -240,7 +254,7 @@ function V.CC_ASSIGN_END(f)
     O.cc = nil
     if not b or not b.ok then return end
     if #b.rows ~= b.expected then
-        bad("CC_ASSIGN_BEGIN said %d rows, %d arrived", b.expected, #b.rows)
+        badS("CC_ASSIGN_BEGIN said %d rows, %d arrived", b.expected, #b.rows)
         return
     end
     for _, r in ipairs(b.rows) do
@@ -256,21 +270,21 @@ end
 
 function V.CLAIMED_BEGIN(f)
     O.claimed = { expected = tonumber(f[1]), rows = {}, names = {}, ok = #f == 1 and isnum(f[1]) }
-    if not O.claimed.ok then bad("malformed CLAIMED_BEGIN") end
+    if not O.claimed.ok then badS("malformed CLAIMED_BEGIN") end
 end
 
 function V.CLAIMED(f)
     local b = O.claimed
-    if not b then bad("CLAIMED row outside CLAIMED_BEGIN/END") return end
-    if #f ~= 8 or not isnum(f[1]) or trim(f[2]) == "" or not isnum(f[3]) or not isnum(f[4])
+    if not b then badS("CLAIMED row outside CLAIMED_BEGIN/END") return end
+    if #f ~= 8 or trim(f[1]) == "" or trim(f[2]) == "" or not isnum(f[3]) or not isnum(f[4])
         or trim(f[5]) == "" or (f[6] ~= "0" and f[6] ~= "1") or (f[8] ~= "0" and f[8] ~= "1") then
-        bad("server CLAIMED row breaks the 8-field protocol (guid|name|class|level|state|grouped|location|gearLocked)")
+        badS("CLAIMED row breaks the 8-field protocol (guid|name|class|level|state|grouped|location|gearLocked)")
         b.ok = false
         return
     end
     local n = normName(f[2])
     if b.names[n] then
-        bad("duplicate CLAIMED row for %s", n)
+        badS("duplicate CLAIMED row for %s", n)
         b.ok = false
         return
     end
@@ -284,14 +298,14 @@ function V.CLAIMED_END(f)
     O.claimed = nil
     if not b or not b.ok then return end
     if #b.rows ~= b.expected then
-        bad("CLAIMED_BEGIN said %d rows, %d arrived", b.expected, #b.rows)
+        badS("CLAIMED_BEGIN said %d rows, %d arrived", b.expected, #b.rows)
         return
     end
     expect("claimed bots stored", #TB.GetClaimedBots(""), #b.rows)
     for _, r in ipairs(b.rows) do
         local e = TB.GetClaimedEntry(r.name)
         if not e then
-            bad("claimed row %s was not stored", r.name)
+            badA("claimed row %s was not stored", r.name)
         else
             local w = "claimed " .. r.name
             expect(w .. " guid", e.guid, r.guid)
@@ -308,14 +322,14 @@ end
 -- BOTSTATE: name|key=value,key=value,...
 local function botStateRow(f)
     if #f ~= 2 or trim(f[1]) == "" then
-        bad("server BOTSTATE is not name|key=value,... (got %q)", table.concat(f, "|"))
+        badS("BOTSTATE is not name|key=value,... (got %q)", table.concat(f, "|"))
         return nil
     end
     local want = {}
     for pair in f[2]:gmatch("[^,]+") do
         local k, v = pair:match("^%s*([%w_]+)=(%S*)%s*$")
         if not k then
-            bad("BOTSTATE pair %q of %s is not key=value", pair, f[1])
+            badS("BOTSTATE pair %q of %s is not key=value (the addon skips it silently)", pair, f[1])
             return nil
         end
         want[k:lower()] = v:lower()
@@ -325,7 +339,7 @@ end
 
 function V.BOTSTATE_BEGIN(f)
     O.bot = { expected = tonumber(f[1]), rows = {}, ok = #f == 1 and isnum(f[1]) }
-    if not O.bot.ok then bad("malformed BOTSTATE_BEGIN") end
+    if not O.bot.ok then badS("malformed BOTSTATE_BEGIN") end
 end
 
 function V.BOTSTATE(f)
@@ -342,7 +356,7 @@ function V.BOTSTATE_END(f)
     O.bot = nil
     if not b or not b.ok then return end
     if #b.rows ~= b.expected then
-        bad("BOTSTATE_BEGIN said %d rows, %d arrived", b.expected, #b.rows)
+        badS("BOTSTATE_BEGIN said %d rows, %d arrived", b.expected, #b.rows)
         return
     end
     local want, got = {}, {}
@@ -358,14 +372,14 @@ end
 function V.INV_BEGIN(f)
     O.inv = { name = normName(f[1] or ""), money = tonumber(f[2]), eq = {}, items = {},
         ok = #f == 2 and trim(f[1]) ~= "" and isnum(f[2]) }
-    if not O.inv.ok then bad("malformed INV_BEGIN (want bot|copper)") end
+    if not O.inv.ok then badS("malformed INV_BEGIN (want bot|copper)") end
 end
 
 function V.INV_EQ(f)
     local b = O.inv
-    if not b then bad("INV_EQ outside INV_BEGIN/END") return end
+    if not b then badS("INV_EQ outside INV_BEGIN/END") return end
     if #f ~= 4 or not (isnum(f[1]) and isnum(f[2]) and isnum(f[3]) and isnum(f[4])) then
-        bad("server INV_EQ is not slot|item|durability|max")
+        badS("INV_EQ is not slot|item|durability|max")
         b.ok = false
         return
     end
@@ -374,9 +388,9 @@ end
 
 function V.INV_ITEM(f)
     local b = O.inv
-    if not b then bad("INV_ITEM outside INV_BEGIN/END") return end
+    if not b then badS("INV_ITEM outside INV_BEGIN/END") return end
     if #f ~= 5 or not (isnum(f[1]) and isnum(f[2]) and isnum(f[3]) and isnum(f[4])) then
-        bad("server INV_ITEM is not bag|slot|item|count|flags")
+        badS("INV_ITEM is not bag|slot|item|count|flags")
         b.ok = false
         return
     end
@@ -391,12 +405,12 @@ function V.INV_END(f)
     O.inv = nil
     if not b or not b.ok then return end
     if #f ~= 3 or normName(f[1]) ~= b.name or not isnum(f[2]) or not isnum(f[3]) then
-        bad("server INV_END is not bot|free|total for %s", b.name)
+        badS("INV_END is not bot|free|total for %s", b.name)
         return
     end
     local inv = TB.GetInventory(b.name)
     if not inv then
-        bad("inventory of %s was not stored", b.name)
+        badA("inventory of %s was not stored", b.name)
         return
     end
     local w = "inventory " .. b.name
@@ -406,7 +420,7 @@ function V.INV_END(f)
     for slot, e in pairs(b.eq) do
         local g = inv.equipped and inv.equipped[slot]
         if not g then
-            bad("%s: equipped slot %d missing", w, slot)
+            badA("%s: equipped slot %d missing", w, slot)
         else
             expect(w .. " slot " .. slot .. " item", g.id, e.id)
             expect(w .. " slot " .. slot .. " durability", g.durability, e.durability)
@@ -414,7 +428,7 @@ function V.INV_END(f)
         end
     end
     for slot in pairs(inv.equipped or {}) do
-        if not b.eq[slot] then bad("%s: equipped slot %d not sent", w, slot) end
+        if not b.eq[slot] then badA("%s: equipped slot %d not sent", w, slot) end
     end
     expect(w .. " item count", #(inv.items or {}), #b.items)
     for i, e in ipairs(b.items) do
@@ -442,12 +456,12 @@ function V.ACTION_ACK(f)
         problem = "empty executor (the server sends '-' for none)"
     end
     if problem then
-        bad("server ACTION_ACK breaks the protocol, the addon shows 'Malformed action response': %s", problem)
+        badS("ACTION_ACK breaks the protocol, the addon shows 'Malformed action response': %s", problem)
         return
     end
     local a = TB.lastActionAck
     if not a then
-        bad("addon kept no ACK (lastActionAck is nil; lastActionError=%s)",
+        badA("addon kept no ACK (lastActionAck is nil; lastActionError=%s)",
             TB.lastActionError and TB.lastActionError.code or "nil")
         return
     end
@@ -468,12 +482,12 @@ function V.ACTION_ERR(f)
         problem = "empty code"
     end
     if problem then
-        bad("server ACTION_ERR breaks the protocol, the addon shows 'Malformed action response': %s", problem)
+        badS("ACTION_ERR breaks the protocol, the addon shows 'Malformed action response': %s", problem)
         return
     end
     local e = TB.lastActionError
     if not e then
-        bad("addon kept no error (lastActionError is nil)")
+        badA("addon kept no error (lastActionError is nil)")
         return
     end
     expect("ERR intent", e.intent, f[1])
@@ -504,20 +518,26 @@ for raw in fh:lines() do
         seen = {}
         local ok, err
         if kind == "system" then
-            -- the client shows the line through the chat filters first
-            if text:find("TBM:", 1, true) and not H.chatFilters.CHAT_MSG_SYSTEM(nil, nil, text) then
-                bad("addon chat filter lets the protocol line through to the chat frame")
+            -- the 1.12 client has no message filters: the addon hooks ChatFrame_OnEvent, which the chat
+            -- frame calls with the event globals set; a protocol line must not reach the original
+            if text:find("TBM:", 1, true) then
+                event, arg1 = "CHAT_MSG_SYSTEM", text
+                H.resetChatPassed()
+                ChatFrame_OnEvent()
+                if H.chatPassed() then
+                    badA("ChatFrame_OnEvent lets the protocol line through to the chat frame")
+                end
             end
             ok, err = fire(commsFrame, "CHAT_MSG_SYSTEM", text)
         else
             ok, err = fire(commsFrame, "CHAT_MSG_ADDON", "TBM", text, channel, "Server")
         end
         if not ok then
-            bad("addon raised a Lua error: %s", tostring(err))
+            badA("addon raised a Lua error: %s", tostring(err))
         elseif text:sub(1, 4) == "TBM:" then
             local verb, rest = text:match("^TBM:([%w_]+)(.*)$")
             if not verb then
-                bad("not a TBM:<VERB> line")
+                badS("not a TBM:<VERB> line")
             else
                 byVerb[verb] = (byVerb[verb] or 0) + 1
                 rest = rest:sub(1, 1) == "|" and rest:sub(2) or rest
@@ -525,9 +545,9 @@ for raw in fh:lines() do
                 local handled = seen.roster and seen.roster.handled or seen.action and seen.action.handled
                     or seen.panel and seen.panel.handled or verb == "VERSION" or verb == "CAPS" or verb == "TRANSPORT"
                 if not handler then
-                    bad("no expectation for TBM:%s (new protocol line?); addon handled it: %s", verb, show(handled and true or false))
+                    badC("no expectation for TBM:%s (new protocol line?); addon handled it: %s", verb, show(handled and true or false))
                 else
-                    if not handled then bad("addon did not recognise TBM:%s", verb) end
+                    if not handled then badA("addon did not recognise TBM:%s", verb) end
                     local before = #mismatches
                     handler(split(rest, "|"), rest)
                     -- a line the protocol allows must not be refused by the addon
@@ -535,10 +555,10 @@ for raw in fh:lines() do
                         local rk = seen.roster and seen.roster.kind
                         if rk == "error" and verb ~= "ROSTER_ERROR" then
                             local d = seen.roster.data
-                            bad("addon rejected the line as an error (%s)", d and d.code or (TB.GetRosterSnapshotError() or {}).code or "?")
+                            badA("addon rejected the line as an error (%s)", d and d.code or (TB.GetRosterSnapshotError() or {}).code or "?")
                         end
                         if seen.action and seen.action.kind == "error" and verb == "ACTION_ACK" then
-                            bad("addon rejected the ACK as malformed")
+                            badA("addon rejected the ACK as malformed")
                         end
                     end
                 end

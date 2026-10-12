@@ -107,8 +107,8 @@ UISpecialFrames = {}
 SlashCmdList = {}
 local defaultChatMessages = {}
 DEFAULT_CHAT_FRAME = { AddMessage = function(self, msg) table.insert(defaultChatMessages, msg) end }
-local chatFilters = {}
-function ChatFrame_AddMessageEventFilter(eventName, filter) chatFilters[eventName] = filter end
+-- The 1.12 client has no ChatFrame_AddMessageEventFilter (the addon says so in Core.lua), so it is
+-- not defined here: the addon hooks ChatFrame_OnEvent, and the stub below records what gets through.
 local chatEventPassed = false
 function ChatFrame_OnEvent() chatEventPassed = true end
 GameTooltip = {
@@ -161,7 +161,8 @@ function FauxScrollFrame_OnVerticalScroll() end
 
 return {
     frames = frames,
-    chatFilters = chatFilters,
+    chatPassed = function() return chatEventPassed end,
+    resetChatPassed = function() chatEventPassed = false end,
     sent = sent,
     addonSent = addonSent,
     defaultChatMessages = defaultChatMessages,

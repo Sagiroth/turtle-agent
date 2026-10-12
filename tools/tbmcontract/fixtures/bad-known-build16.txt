@@ -1,4 +1,6 @@
-# expect-mismatches: 3
+# expect: [server] ACTION_ERR breaks the protocol, the addon shows 'Malformed action response': empty intent
+# expect: [server] ACTION_ACK breaks the protocol, the addon shows 'Malformed action response': scope "party:mimic"
+# expect: [server] ACTION_ACK breaks the protocol, the addon shows 'Malformed action response': scope "raid:mimic"
 # Real lines the build 16/17 server sends that the TBM addon rejects as "Malformed action response":
 # an ACTION_ERR with an empty intent (the .bot action usage error, BotCommands.cpp:2697) and the party:/raid: scope
 # of "behavior mimic" (BotCommands.cpp:2486). The contract must fail here; when server or addon is fixed, move

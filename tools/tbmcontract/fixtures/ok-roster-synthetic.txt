@@ -7,7 +7,7 @@ system	TBM:VERSION|2026-10-12-v17
 system	TBM:ROSTER_BEGIN|3
 system	TBM:ROSTER|101|Alpha|8|online|1|The Barrens
 system	TBM:ROSTER|102|Bravo|5|offline|0|-
-system	TBM:ROSTER|103|Charlie|11|online|1|Crossroads
+system	TBM:ROSTER|103|Charlie|11|online|1|Crossroads|-
 system	TBM:ROSTER_END
 system	TBM:CC_ASSIGN_BEGIN|1
 system	TBM:CC_ASSIGN|Alpha|moon

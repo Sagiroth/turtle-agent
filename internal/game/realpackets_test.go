@@ -16,9 +16,8 @@ import (
 // account in the test settings files, and none of the packets carries a player name (the only
 // text is NPC gossip and a vendor's goods).
 //
-// No capture holds a trainer list, a quest panel, an SMSG_LOOT_RESPONSE window or a force
-// speed change (the runs never opened those), so those parsers are still tested only against
-// gametest packets; see seeds_test.go.
+// The trainer list, quest panels, loot window and force-speed packets are in
+// realpackets_live_test.go (the live run of #61).
 
 // agent2.cap #1392: a class-choice menu of eight options
 var realGossipClasses = mustHex("17093D2F730130F1FFFFFF000800000000000000000057617272696F72000100" +

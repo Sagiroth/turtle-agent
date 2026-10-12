@@ -386,8 +386,12 @@ speed change. `dismount` cancels the mount aura with `CMSG_CANCEL_AURA` (1.12 ha
 remembers the one new buff that appeared in the same update as the mount display; with several, or after a login while
 mounted, `dismount` asks for `spell_id`.
 
-Not yet exercised on a live server (see the pull request for the live steps): the unit tests use packets built from the core's
-source, not a capture.
+Run live (m910q, build 17, #61): `use_item` food and drink (Food and Drink aura, `stand_state` sit), `loot` (by name, `too_far`
+refusal, `loot_take` one slot, `all` and `money`), `mount` by spell and `dismount`. A vanilla mount item (a bridle) is not a mount
+but a use-to-learn item: `use_item` teaches the mount spell and the item is consumed, so `mount` with an `item_entry` ends in
+the "not mounted" error (turtle-agent#64); learn it, then `mount` with the `spell_id`. The packets of the trainer list, the quest
+panels, the loot window and the forced run speed are tested against bytes from that run
+(`internal/game/realpackets_live_test.go`).
 
 ## Unit positions
 

@@ -153,8 +153,9 @@ taken as it is. The agent answers the server's movement orders the way the 1.12 
   lands with `MSG_MOVE_FALL_LAND` back at the starting height. `status.falling` is true in the air, and `walk_to` and
   `face` are refused (with the time left) until the landing. Session events `knocked_back` and `landed` bracket the
   flight. `walk_to` is refused the same way while rooted or moved by the server (fear, charm);
-- water walking, hover and feather fall are acked with their apply flag and kept in later movement; feather fall slows
-  a knockback's descent.
+- water walking, hover and feather fall are acked with their apply flag and kept in later movement. Feather fall holds
+  a knockback's arc to 7 yd/s up and down, the server's bound under it; applied or removed mid-flight, it restarts the
+  arc from where it is, at the speed it has, from the ack on.
 
 Every walk and facing packet is checked against the server anticheat's distance bound for the time since the last one
 (run speed across and up or down, so no step can trip `OVERSPEED_Z`); a walk that would break it stops where the server

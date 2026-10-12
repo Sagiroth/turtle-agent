@@ -131,3 +131,26 @@ func TestFallPhysics(t *testing.T) {
 		t.Fatal("a fall that starts downwards has no flight")
 	}
 }
+
+// FallSpeed and FallTimeTo restart a fall mid-air: the speed reached, and when a body with
+// that speed has dropped a given distance (FallDrop's inverse).
+func TestFallRestart(t *testing.T) {
+	for _, c := range []struct{ v0, term, drop float64 }{
+		{-15, game.TerminalVelocity, 0}, {-15, game.TerminalVelocity, 4}, {4.3, game.TerminalSafeFall, 5.35},
+		{0, game.TerminalVelocity, 200}, {20, game.TerminalSafeFall, 10}, {-7, game.TerminalSafeFall, 0},
+	} {
+		tt := game.FallTimeTo(c.drop, c.v0, c.term)
+		if d := game.FallDrop(tt, c.v0, c.term); math.Abs(d-c.drop) > 1e-6 {
+			t.Fatalf("%+v: after %v s dropped %v", c, tt, d)
+		}
+	}
+	if v := game.FallSpeed(1, -15, game.TerminalVelocity); math.Abs(v-(game.Gravity-15)) > 1e-9 {
+		t.Fatalf("speed %v", v)
+	}
+	if v := game.FallSpeed(10, 0, game.TerminalSafeFall); v != game.TerminalSafeFall {
+		t.Fatalf("capped speed %v", v)
+	}
+	if game.FallTimeTo(-1, 3, game.TerminalVelocity) != 0 {
+		t.Fatal("a target above a falling body is reached at once")
+	}
+}

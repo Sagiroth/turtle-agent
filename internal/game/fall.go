@@ -39,3 +39,26 @@ func FallLandTime(v0, term float64) float64 {
 	}
 	return up + term/Gravity + (h-capH)/term
 }
+
+// FallSpeed is the downward speed t seconds into a fall that left with v0, capped at term.
+func FallSpeed(t, v0, term float64) float64 {
+	return math.Min(math.Min(v0, term)+Gravity*math.Max(t, 0), term)
+}
+
+// FallTimeTo is when a body that left with downward speed v0 (capped at term) has dropped
+// drop yards; 0 when it is already there or, falling, can never rise to it.
+func FallTimeTo(drop, v0, term float64) float64 {
+	v0 = math.Min(v0, term)
+	if v0 < 0 { // up to the apex, then down from rest
+		up := -v0 / Gravity
+		return up + FallTimeTo(drop+v0*v0/(2*Gravity), 0, term)
+	}
+	if drop <= 0 {
+		return 0
+	}
+	tTerm := (term - v0) / Gravity
+	if dTerm := tTerm * (v0 + tTerm*Gravity/2); drop > dTerm {
+		return tTerm + (drop-dTerm)/term
+	}
+	return (-v0 + math.Sqrt(v0*v0+2*Gravity*drop)) / Gravity
+}

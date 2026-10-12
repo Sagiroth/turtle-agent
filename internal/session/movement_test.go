@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"math"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +43,11 @@ func stepWithin(t *testing.T, i int, a, b game.MoveInfo, run float64) {
 	switch {
 	case a.Flags&game.MoveMaskMoving == 0:
 	case a.Flags&(game.MoveJumping|game.MoveFallingFar) != 0:
-		dxy, dz = float64(a.JumpXYSpeed)*dt, game.TerminalVelocity*dt
+		term := game.TerminalVelocity
+		if a.Flags&game.MoveSafeFall != 0 { // Movement.cpp:875-881
+			term = game.TerminalSafeFall
+		}
+		dxy, dz = float64(a.JumpXYSpeed)*dt, term*dt
 	default:
 		dxy, dz = run*dt, run*dt
 	}
@@ -315,7 +320,8 @@ func TestToggleOrdersAcked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lm, want := readMove(land.Body), game.FallLandTime(-12, game.TerminalSafeFall); math.Abs(float64(lm.FallTime)-want*1000) > 1 {
+	// Under feather fall the arc also rises no faster than 7 yd/s (Movement.cpp:874-881).
+	if lm, want := readMove(land.Body), game.FallLandTime(-7, game.TerminalSafeFall); math.Abs(float64(lm.FallTime)-want*1000) > 1 {
 		t.Fatalf("feather-fall landing after %d ms, want %.0f", lm.FallTime, want*1000)
 	}
 	h.send(opcode.SMSGMoveNormalFall, gametest.MovementOrder(me.GUID, 31))
@@ -330,4 +336,44 @@ func TestToggleOrdersAcked(t *testing.T) {
 			t.Fatal("acked another unit's hover")
 		}
 	}
+}
+
+// Review fix 1: feather fall acked mid-flight. From the ack on the server bounds the fall by
+// 7 yd/s (Movement.cpp:874-881), so the arc restarts from where it is with the speed it has,
+// capped at 7, and every later beat stays inside that bound.
+func TestFeatherFallMidFlight(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	h.send(opcode.SMSGMoveKnockBack, gametest.KnockBack(me.GUID, 40, 1, 0, 3, -15))
+	ack, _ := ackMove(t, h.expect(opcode.CMSGMoveKnockBackAck), 40)
+	time.Sleep(time.Second - 5*time.Millisecond)
+	h.send(opcode.SMSGMoveFeatherFall, gametest.MovementOrder(me.GUID, 41))
+	ff := h.expect(opcode.CMSGMoveFeatherFallAck)
+	land, err := h.srv.Expect(opcode.MSGMoveFallLand, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmi, _ := ackMove(t, ff, 41)
+	if fmi.Flags != game.MoveJumping|game.MoveSafeFall || fmi.Z <= me.Z {
+		t.Fatalf("feather-fall ack in the air %+v", fmi)
+	}
+	steps := []game.MoveInfo{ack, fmi}
+	for _, p := range h.srv.Skipped() {
+		if p.Op == opcode.MSGMoveHeartbeat {
+			steps = append(steps, readMove(p.Body))
+		}
+	}
+	sort.Slice(steps, func(i, j int) bool { return steps[i].Time < steps[j].Time })
+	lm := readMove(land.Body)
+	steps = append(steps, lm)
+	if len(steps) < 5 {
+		t.Fatalf("%d steps", len(steps))
+	}
+	for i := 1; i < len(steps); i++ {
+		stepWithin(t, i, steps[i-1], steps[i], defaultRunSpeed)
+	}
+	if lm.Z != me.Z || lm.Flags != game.MoveSafeFall {
+		t.Fatalf("landing %+v", lm)
+	}
+	h.logout()
 }

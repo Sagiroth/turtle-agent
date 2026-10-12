@@ -80,20 +80,50 @@ func (s *Session) serverPosition(p [3]float32, zKnown bool) {
 }
 
 // fallState is a knockback flight: a ballistic arc from where the server threw the player.
+// A feather-fall order mid-flight restarts the arc from where it is (restart).
 type fallState struct {
-	kb       game.KnockBack
-	from     [3]float32
-	start    time.Time
-	land     time.Duration // back at the starting height, the ground assumed
-	term     float64
+	kb       game.KnockBack // direction, xy speed, and the jump values every packet echoes
+	began    time.Time      // the knockback; the MovementInfo fall time counts from here
+	groundZ  float32        // the ground assumed: the height the flight started at
+	from     [3]float32     // where the current arc starts
+	start    time.Time      // and when
+	v0, term float64        // its downward speed then (negative: up) and the speed cap
+	land     time.Time      // back at groundZ
 	nextBeat time.Time
 }
 
+// arc starts the current arc at from and start with downward speed v0 under the cap term.
+// The speed is held to the cap both ways: with MoveSafeFall the server bounds a step up or
+// down by 7 yd/s (Movement.cpp:874-881).
+func (f *fallState) arc(from [3]float32, start time.Time, v0, term float64) {
+	f.from, f.start, f.term = from, start, term
+	f.v0 = max(min(v0, term), -term)
+	d := time.Duration(game.FallTimeTo(float64(from[2]-f.groundZ), f.v0, term) * float64(time.Second))
+	f.land = start.Add(d)
+	if limit := f.began.Add(maxFlight); f.land.After(limit) {
+		f.land = limit
+	}
+}
+
+// restart continues the flight from where it is at now, at the speed it has, under a new
+// cap: the fall a feather-fall order changes mid-air.
+func (f *fallState) restart(now time.Time, term float64) {
+	t := min(max(now.Sub(f.start), 0), f.land.Sub(f.start)).Seconds()
+	f.arc(f.at(now), now, game.FallSpeed(t, f.v0, f.term), term)
+}
+
 func (f *fallState) at(now time.Time) [3]float32 {
-	t := min(max(now.Sub(f.start), 0), f.land).Seconds()
+	t := min(max(now.Sub(f.start), 0), f.land.Sub(f.start)).Seconds()
 	xy := float64(f.kb.XYSpeed) * t
 	return [3]float32{f.from[0] + f.kb.Cos*float32(xy), f.from[1] + f.kb.Sin*float32(xy),
-		f.from[2] - float32(game.FallDrop(t, float64(f.kb.ZSpeed), f.term))}
+		f.from[2] - float32(game.FallDrop(t, f.v0, f.term))}
+}
+
+func fallTerm(toggles uint32) float64 {
+	if toggles&game.MoveSafeFall != 0 {
+		return game.TerminalSafeFall
+	}
+	return game.TerminalVelocity
 }
 
 // syncFall moves s.pos to where the flight is at now.
@@ -122,13 +152,9 @@ func (s *Session) onKnockBack(body []byte) error {
 	}
 	now := time.Now()
 	s.stopWalk(errors.New("knocked back by the server; walk stopped"), false)
-	term := game.TerminalVelocity
-	if s.toggles&game.MoveSafeFall != 0 {
-		term = game.TerminalSafeFall
-	}
-	land := min(time.Duration(game.FallLandTime(float64(k.ZSpeed), term)*float64(time.Second)), maxFlight)
 	from := s.last.pos
-	s.fall = &fallState{kb: k, from: from, start: now, land: land, term: term, nextBeat: now.Add(500 * time.Millisecond)}
+	s.fall = &fallState{kb: k, began: now, groundZ: from[2], nextBeat: now.Add(500 * time.Millisecond)}
+	s.fall.arc(from, now, float64(k.ZSpeed), fallTerm(s.toggles))
 	s.mu.Lock()
 	s.pos[0], s.pos[1], s.pos[2] = from[0], from[1], from[2]
 	s.falling = true
@@ -138,7 +164,7 @@ func (s *Session) onKnockBack(body []byte) error {
 		return &fatalError{err}
 	}
 	s.emit(events.Event{Kind: events.KindSession, Data: map[string]any{"state": "knocked_back", "x": from[0], "y": from[1], "z": from[2],
-		"speed_xy": k.XYSpeed, "speed_z": k.ZSpeed, "flight_ms": land.Milliseconds()}})
+		"speed_xy": k.XYSpeed, "speed_z": k.ZSpeed, "flight_ms": s.fall.land.Sub(now).Milliseconds()}})
 	return nil
 }
 
@@ -151,15 +177,15 @@ func (s *Session) tickFall() error {
 		return nil
 	}
 	now := time.Now()
-	if end := f.start.Add(f.land); !now.Before(end) {
-		p := f.at(end)
+	if !now.Before(f.land) {
+		p := f.at(f.land)
 		s.fall = nil
 		s.mu.Lock()
 		s.pos[0], s.pos[1], s.pos[2] = p[0], p[1], p[2]
 		s.falling, s.zUnknown = false, true
 		mi := s.moveInfoAt(s.currentFlags(), now)
 		s.mu.Unlock()
-		mi.FallTime = uint32(f.land.Milliseconds())
+		mi.FallTime = uint32(f.land.Sub(f.began).Milliseconds())
 		if err := s.sendMove(opcode.MSGMoveFallLand, mi, game.BuildMovement(mi)); err != nil {
 			return err
 		}
@@ -197,7 +223,8 @@ var toggleOrders = map[uint16]toggleOrder{
 // toggleHandler acks a toggle order with its counter, the MovementInfo with the flag as
 // now applied, and the apply u32 the server matches against the order
 // (MovementHandler.cpp:543-558, Unit.cpp:7437-7449). The flag stays in later movement, as
-// a real client keeps it; a flight already under way keeps the fall speed it started with.
+// a real client keeps it. Feather fall applied or removed mid-flight restarts the arc under
+// the new speed cap, which the server applies from this ack on (Movement.cpp:874-881).
 func (s *Session) toggleHandler(o toggleOrder) handler {
 	return func(body []byte) error {
 		c, err := game.ParseMovementChange(body, false)
@@ -215,6 +242,10 @@ func (s *Session) toggleHandler(o toggleOrder) handler {
 		}
 		now := time.Now()
 		s.syncWalk(now)
+		if f := s.fall; f != nil && o.flag == game.MoveSafeFall {
+			f.restart(now, fallTerm(s.toggles))
+			s.syncWalk(now)
+		}
 		s.mu.Lock()
 		mi := s.moveInfoAt(s.currentFlags(), now)
 		s.mu.Unlock()

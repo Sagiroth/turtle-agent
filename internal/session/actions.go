@@ -111,7 +111,7 @@ func (s *Session) clock() uint32 { return s.clockAt(time.Now()) }
 func (s *Session) moveInfoAt(flags uint32, now time.Time) game.MoveInfo {
 	m := game.MoveInfo{Flags: flags, Time: s.clockAt(now), X: s.pos[0], Y: s.pos[1], Z: s.pos[2], O: s.pos[3]}
 	if f := s.fall; f != nil && flags&game.MoveJumping != 0 {
-		m.FallTime = uint32(max(now.Sub(f.start), 0).Milliseconds())
+		m.FallTime = uint32(max(now.Sub(f.began), 0).Milliseconds())
 		m.JumpZSpeed, m.JumpCos, m.JumpSin, m.JumpXYSpeed = f.kb.ZSpeed, f.kb.Cos, f.kb.Sin, f.kb.XYSpeed
 	}
 	return m
@@ -149,7 +149,7 @@ func (s *Session) syncWalk(now time.Time) {
 // airborne refuses an action the player cannot take in the air.
 func (s *Session) airborne(what string) error {
 	if f := s.fall; f != nil {
-		return fmt.Errorf("in the air after a knockback; %s waits for the landing in %.1f s", what, time.Until(f.start.Add(f.land)).Seconds())
+		return fmt.Errorf("in the air after a knockback; %s waits for the landing in %.1f s", what, time.Until(f.land).Seconds())
 	}
 	return nil
 }

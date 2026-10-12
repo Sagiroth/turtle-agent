@@ -133,3 +133,40 @@ func TestChannelMethods(t *testing.T) {
 		t.Fatalf("%v", out)
 	}
 }
+
+func TestGossipMethods(t *testing.T) {
+	r := newRig(t)
+	const npc = "0xF130001F4A000123"
+	got := make(chan map[string]any, 1)
+	go func() { got <- r.call("gossip_hello", `{"guid":"`+npc+`","wait_ms":2000}`) }()
+	r.expectBody(opcode.CMSGGossipHello, packet.NewWriter().GUID(0xF130001F4A000123).Bytes())
+	r.srv.Send(opcode.SMSGGossipMessage, gametest.GossipMessage(0xF130001F4A000123, 907,
+		[]game.GossipOption{{Text: "Hire a companion"}, {Icon: 6, Coded: true, Text: "Enter a code"}}, nil))
+	r.expect(opcode.CMSGCreatureQuery)
+	r.srv.Send(opcode.SMSGCreatureQueryResponse, packet.NewWriter().U32(0x1F4A).CString("Bot Recruiter").U8(0).U8(0).U8(0).CString("").
+		U32(0).U32(7).U32(0).U32(0).U32(0).U32(0).U32(1).U8(0).U8(0).Bytes())
+	out := <-got
+	ev, ok := out["result"].(map[string]any)["event"].(map[string]any)
+	if !ok || ev["kind"] != "gossip" || ev["source"] != "Bot Recruiter" {
+		t.Fatalf("%v", out)
+	}
+	opts := ev["data"].(map[string]any)["options"].([]any)
+	if len(opts) != 2 || opts[1].(map[string]any)["coded"] != true || opts[0].(map[string]any)["text"] != "Hire a companion" {
+		t.Fatalf("%v", opts)
+	}
+	go func() { got <- r.call("gossip_select", `{"guid":"`+npc+`","option":1,"code":"42","wait_ms":2000}`) }()
+	r.expectBody(opcode.CMSGGossipSelectOption, packet.NewWriter().GUID(0xF130001F4A000123).U32(1).CString("42").Bytes())
+	r.srv.Send(opcode.SMSGGossipComplete, nil)
+	if ev, ok := (<-got)["result"].(map[string]any)["event"].(map[string]any); !ok || ev["kind"] != "gossip_complete" {
+		t.Fatalf("%v", ev)
+	}
+	if out := r.call("gossip_select", `{"guid":"`+npc+`","option":0}`); errCode(out) != rpc.CodeGame {
+		t.Fatalf("select after complete: %v", out)
+	}
+	// No wait: the result has the cursor and no event.
+	out = r.call("gossip_hello", `{"guid":"`+npc+`"}`)
+	if res := out["result"].(map[string]any); res["event"] != nil || res["since"] == nil {
+		t.Fatalf("%v", out)
+	}
+	r.expect(opcode.CMSGGossipHello)
+}

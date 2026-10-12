@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/pjerra/turtle-agent/internal/events"
+	"github.com/pjerra/turtle-agent/internal/packet"
 	"github.com/pjerra/turtle-agent/internal/rpc"
 	"github.com/pjerra/turtle-agent/internal/session"
 	"github.com/pjerra/turtle-agent/internal/tbm"
@@ -31,6 +32,20 @@ type handshakeParams struct {
 type channelParams struct {
 	Name     string `json:"name"`
 	Password string `json:"password,omitempty"`
+}
+
+type gossipParams struct {
+	GUID   packet.GUID `json:"guid"`
+	Option uint32      `json:"option"`
+	Code   string      `json:"code,omitempty"`
+	WaitMS int         `json:"wait_ms,omitempty"`
+}
+
+// gossipResult is the log cursor before the request and, with wait_ms, the first gossip
+// or gossip_complete event after it (nil when none arrived in time).
+type gossipResult struct {
+	Since uint64        `json:"since"`
+	Event *events.Event `json:"event"`
 }
 
 type sinceResult struct {
@@ -70,6 +85,35 @@ func registerSocialMethods(srv *rpc.Server, s *session.Session) {
 	srv.Register("leave_channel", rpc.Typed(func(ctx context.Context, p channelParams) (empty, error) {
 		return empty{}, rpcErr(s.LeaveChannel(ctx, p.Name))
 	}))
+	srv.Register("gossip_hello", rpc.Typed(func(ctx context.Context, p gossipParams) (gossipResult, error) {
+		res := gossipResult{Since: log.Last()}
+		if err := s.GossipHello(ctx, p.GUID); err != nil {
+			return res, rpcErr(err)
+		}
+		res.Event = nextGossip(ctx, log, res.Since, p.WaitMS)
+		return res, nil
+	}))
+	srv.Register("gossip_select", rpc.Typed(func(ctx context.Context, p gossipParams) (gossipResult, error) {
+		res := gossipResult{Since: log.Last()}
+		if err := s.GossipSelect(ctx, p.GUID, p.Option, p.Code); err != nil {
+			return res, rpcErr(err)
+		}
+		res.Event = nextGossip(ctx, log, res.Since, p.WaitMS)
+		return res, nil
+	}))
+}
+
+// nextGossip waits up to waitMS for the first gossip or gossip_complete event after since;
+// waitMS 0 does not look at all.
+func nextGossip(ctx context.Context, log *events.Log, since uint64, waitMS int) *events.Event {
+	if waitMS <= 0 {
+		return nil
+	}
+	q := events.Query{Since: since, Kinds: []string{events.KindGossip, events.KindGossipComplete}, Limit: 1}
+	if p := readEvents(ctx, log, q, waitMS); len(p.Events) > 0 {
+		return &p.Events[0]
+	}
+	return nil
 }
 
 // sendTBM sends one TBM command on the addon's chat transport (".bot <command>" as say)

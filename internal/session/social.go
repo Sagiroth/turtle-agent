@@ -2,15 +2,20 @@ package session
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/game"
 	"github.com/pjerra/turtle-agent/internal/opcode"
+	"github.com/pjerra/turtle-agent/internal/packet"
 )
 
 // registerSocial installs the chat channel and gossip handlers.
 func (s *Session) registerSocial() {
 	s.handlers[opcode.SMSGChannelNotify] = s.onChannelNotify
+	s.handlers[opcode.SMSGGossipMessage] = s.onGossipMessage
+	s.handlers[opcode.SMSGGossipComplete] = s.onGossipComplete
 }
 
 // JoinChannel joins a chat channel (CMSG_JOIN_CHANNEL); the server answers with
@@ -54,5 +59,71 @@ func (s *Session) onChannelNotify(body []byte) error {
 		e.Data["old_flags"], e.Data["new_flags"] = n.OldFlags, n.NewFlags
 	}
 	s.emit(e)
+	return nil
+}
+
+// GossipHello talks to an NPC (CMSG_GOSSIP_HELLO). The menu comes back as a gossip event;
+// the server answers nothing when the NPC is out of reach (NPCHandler.cpp:375-380 at 187af78).
+func (s *Session) GossipHello(ctx context.Context, npc packet.GUID) error {
+	if npc == 0 {
+		return errors.New("gossip: no NPC guid")
+	}
+	return s.send(ctx, opcode.CMSGGossipHello, game.BuildGossipHello(npc))
+}
+
+// GossipSelect picks an option of the open menu (CMSG_GOSSIP_SELECT_OPTION). Like the
+// client it only clicks what the last SMSG_GOSSIP_MESSAGE showed, and sends code only, and
+// always, for a coded option, because the core reads the code by its own copy of the menu
+// (NPCHandler.cpp:405-420 at 187af78).
+func (s *Session) GossipSelect(ctx context.Context, npc packet.GUID, option uint32, code string) error {
+	_, err := s.do(ctx, func() (any, error) {
+		if err := s.inWorld(); err != nil {
+			return nil, err
+		}
+		if s.gossip == nil {
+			return nil, errors.New("gossip: no menu is open; call gossip_hello first")
+		}
+		if s.gossip.NPC != npc {
+			return nil, fmt.Errorf("gossip: the open menu is from %s, not %s", s.gossip.NPC, npc)
+		}
+		o, ok := s.gossip.Option(option)
+		if !ok {
+			return nil, fmt.Errorf("gossip: the menu has no option %d (%d options)", option, len(s.gossip.Options))
+		}
+		if code != "" && !o.Coded {
+			return nil, fmt.Errorf("gossip: option %d takes no code", option)
+		}
+		return nil, s.conn.WritePacket(opcode.CMSGGossipSelectOption, game.BuildGossipSelectOption(npc, option, code, o.Coded))
+	})
+	return err
+}
+
+func (s *Session) onGossipMessage(body []byte) error {
+	m, err := game.ParseGossipMessage(body)
+	if err != nil {
+		return err
+	}
+	s.gossip = &m
+	// Fresh maps for the event: Data is never shared with session state.
+	opts := make([]map[string]any, len(m.Options))
+	for i, o := range m.Options {
+		opts[i] = map[string]any{"index": o.Index, "icon": o.Icon, "coded": o.Coded, "text": o.Text}
+	}
+	quests := make([]map[string]any, len(m.Quests))
+	for i, q := range m.Quests {
+		quests[i] = map[string]any{"id": q.ID, "icon": q.Icon, "level": q.Level, "title": q.Title}
+	}
+	s.emit(events.Event{Kind: events.KindGossip, SourceGUID: m.NPC,
+		Data: map[string]any{"text_id": m.TextID, "options": opts, "quests": quests}})
+	return nil
+}
+
+func (s *Session) onGossipComplete([]byte) error {
+	var npc packet.GUID
+	if s.gossip != nil {
+		npc = s.gossip.NPC
+	}
+	s.gossip = nil
+	s.emit(events.Event{Kind: events.KindGossipComplete, SourceGUID: npc})
 	return nil
 }

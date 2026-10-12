@@ -83,3 +83,21 @@ func ChannelModeChange(channel string, player packet.GUID, oldFlags, newFlags ui
 func ChannelPlayerBy(notice uint8, channel string, target, source packet.GUID) []byte {
 	return packet.NewWriter().U8(notice).CString(channel).GUID(target).GUID(source).Bytes()
 }
+
+// GossipMessage is PlayerMenu::SendGossipMenu (GossipDef.cpp:156-221): the options are
+// numbered by their position, as the core numbers them.
+func GossipMessage(npc packet.GUID, textID uint32, options []game.GossipOption, quests []game.GossipQuest) []byte {
+	w := packet.NewWriter().GUID(npc).U32(textID).U32(uint32(len(options)))
+	for i, o := range options {
+		coded := uint8(0)
+		if o.Coded {
+			coded = 1
+		}
+		w.U32(uint32(i)).U8(o.Icon).U8(coded).CString(o.Text)
+	}
+	w.U32(uint32(len(quests)))
+	for _, q := range quests {
+		w.U32(q.ID).U32(q.Icon).U32(q.Level).CString(q.Title)
+	}
+	return w.Bytes()
+}

@@ -168,6 +168,16 @@ func (r redactor) scrubValue(v any) any {
 			t[k] = r.scrubValue(x)
 		}
 		return t
+	case []map[string]any: // gossip options and quests
+		for _, m := range t {
+			r.scrubValue(m)
+		}
+		return t
+	case []any:
+		for i, x := range t {
+			t[i] = r.scrubValue(x)
+		}
+		return t
 	}
 	return v
 }

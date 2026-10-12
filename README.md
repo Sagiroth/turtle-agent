@@ -53,6 +53,13 @@ When the settings file holds exactly one account, leave the account name off (`l
 
 Ctrl-C logs out cleanly. If the server refuses the logout (in combat), the agent retries for 35 s; a second Ctrl-C quits.
 
+A logout, from Ctrl-C, `--stay` or the `logout` RPC, always ends the process at once (no disconnect grace window):
+- `SMSG_LOGOUT_COMPLETE`: outcome `complete`, exit 0.
+- The server closes the socket instead (seen intermittently on Tortoise 1.18.1 for a GM, in the open world and
+  inside instances; the server's char.log still records the logout): outcome `closed_by_server`, exit 0, session
+  state `logged_out`, and the final `session` event carries `data.outcome`.
+- No answer within 30 s: the agent closes the socket, the RPC answers -32004, exit 6; the character may stay in world.
+
 ## CLI
 
 ```
@@ -121,7 +128,7 @@ browser (`Origin` header) and other `Host` names are refused.
 | `join_channel` / `leave_channel` | `name`, `password` / `name` | |
 | `gossip_hello` | `guid`, `wait_ms` | `since`, `event` (the menu, with `wait_ms`) |
 | `gossip_select` | `guid`, `option`, `code` (coded options only), `wait_ms` | `since`, `event` (next menu or `gossip_complete`) |
-| `logout` | | |
+| `logout` | | `outcome` (`complete` or `closed_by_server`); the reply is written before the process exits |
 
 Events have `seq`, `time`, `kind`, `source`, `target`, `spell_id`, `amount`, `crit`, `text`, `party` and `data`.
 Kinds cover chat, system, whispers, melee, spell damage, periodic ticks, heals, energize, spell start/go/miss/fail,

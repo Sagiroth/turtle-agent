@@ -101,6 +101,12 @@ type equipParams struct {
 	Slot      *uint8 `json:"slot,omitempty"`
 }
 
+// logoutResult says how the logout ended: "complete" (SMSG_LOGOUT_COMPLETE) or
+// "closed_by_server" (the server closed the socket instead; issues #9, #18).
+type logoutResult struct {
+	Outcome string `json:"outcome"`
+}
+
 // registerMethods wires the spec's JSON-RPC methods (v1) to the session; later
 // milestones add their methods at the end of registerMethodsFor.
 func registerMethods(srv *rpc.Server, s *session.Session) {
@@ -128,8 +134,9 @@ func registerMethodsFor(srv *rpc.Server, cur func() *session.Session) {
 	srv.Register("chat_log", rpc.Typed(func(ctx context.Context, p chatLogParams) (events.Page, error) {
 		return readEvents(ctx, log, events.Query{Since: p.Since, Kinds: events.ChatKinds, Limit: p.Limit}, p.WaitMS), nil
 	}))
-	srv.Register("logout", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) {
-		return empty{}, rpcErr(cur().Logout(ctx))
+	srv.Register("logout", rpc.Typed(func(ctx context.Context, _ empty) (logoutResult, error) {
+		outcome, err := cur().Logout(ctx)
+		return logoutResult{Outcome: string(outcome)}, rpcErr(err)
 	}))
 	srv.Register("invite", rpc.Typed(func(ctx context.Context, p nameParams) (empty, error) {
 		return empty{}, rpcErr(cur().Invite(ctx, p.Name))
@@ -250,7 +257,7 @@ func rpcErr(err error) error {
 		// context.Canceled: the client went away or the agent is shutting down. ErrWrite: the
 		// socket died under a write, before Run has noticed the close (review M1).
 		return &rpc.Error{Code: rpc.CodeDisconnected, Message: err.Error()}
-	case errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, session.ErrLogoutTimeout):
 		return &rpc.Error{Code: rpc.CodeTimeout, Message: err.Error()}
 	case errors.As(err, &le):
 		return &rpc.Error{Code: rpc.CodeGame, Message: err.Error(), Data: map[string]any{"reason": le.Reason}}

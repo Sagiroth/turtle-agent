@@ -487,6 +487,7 @@ func (s *Session) tickWalk() error {
 		} else {
 			s.zUnknown = s.zUnknown || math.Abs(float64(w.to[2]-w.pts[0][2])) > 0.5
 		}
+		s.walkDist = w.walked(now) // the whole path, as walk_path counts an arrival
 		mi := s.moveInfoAt(s.currentFlags(), now)
 		s.mu.Unlock()
 		if err := s.checkStep(mi); err != nil {
@@ -524,7 +525,8 @@ func (s *Session) abortWalk(w *walkState, reason error) error {
 }
 
 // stopWalk ends a walk early; sendStop is false when the server moved the player. The
-// stop is sent from where the walk has got to and carries MoveRoot while rooted.
+// stop is sent from where the walk has got to and carries MoveRoot while rooted. walkDist
+// records how far along the path the walk got, for walk_path.
 func (s *Session) stopWalk(reason error, sendStop bool) {
 	w := s.walk
 	if w == nil {
@@ -534,9 +536,8 @@ func (s *Session) stopWalk(reason error, sendStop bool) {
 	if sendStop {
 		s.syncWalk(now)
 	}
-	end := w.at(now)
 	s.mu.Lock()
-	s.walkEnd = &end
+	s.walkDist = w.walked(now)
 	s.mu.Unlock()
 	s.walk = nil
 	if sendStop {

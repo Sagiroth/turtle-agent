@@ -149,20 +149,15 @@ func (s *Session) WalkPath(ctx context.Context, x, y, z float32) (WalkReport, er
 		if len(path.Points) > 1 {
 			pts, corners := polyline(planned, path)
 			s.mu.Lock()
-			s.walkEnd = nil
+			s.walkDist = 0
 			s.mu.Unlock()
 			err := s.walkStraight(ctx, pts[len(pts)-1], walkOpts{via: pts[1 : len(pts)-1], corners: corners, onMesh: true})
 			_, after := s.where()
-			// A server move (fear, charge, teleport) is not walked: count up to where the walk was stopped.
-			walkedTo := after
-			if isInterruption(err) {
-				s.mu.Lock()
-				if s.walkEnd != nil {
-					walkedTo = navmesh.Vec3(*s.walkEnd)
-				}
-				s.mu.Unlock()
-			}
-			rep.Walked += along(pts, walkedTo)
+			// How far along the path the walk got, as stopWalk or the arrival recorded it: a server
+			// move (fear, charge, teleport) is not walked past the point where it stopped the walk.
+			s.mu.Lock()
+			rep.Walked += float32(s.walkDist)
+			s.mu.Unlock()
 			st := TraceStep{Kind: "walk", From: &planned, To: &pts[len(pts)-1]}
 			if err != nil {
 				st.Text = err.Error()
@@ -284,28 +279,6 @@ func polyline(from navmesh.Vec3, path navmesh.Path) (pts [][3]float32, corners [
 	return pts, corners
 }
 
-// along is how far along the polyline pts the point nearest p is (3D yards from pts[0]).
-func along(pts [][3]float32, p navmesh.Vec3) float32 {
-	best, at, cum := math.Inf(1), 0.0, 0.0
-	for i := 1; i < len(pts); i++ {
-		a, b := pts[i-1], pts[i]
-		seg := dist3f(a, b)
-		t := 0.0
-		if seg > 1e-9 {
-			for k := range 3 {
-				t += float64(p[k]-a[k]) * float64(b[k]-a[k])
-			}
-			t = min(max(t/(seg*seg), 0), 1)
-		}
-		q := [3]float32{a[0] + (b[0]-a[0])*float32(t), a[1] + (b[1]-a[1])*float32(t), a[2] + (b[2]-a[2])*float32(t)}
-		if d := dist3f(q, p); d < best {
-			best, at = d, cum+t*seg
-		}
-		cum += seg
-	}
-	return float32(at)
-}
-
 // minTurn (radians) is the least change of facing at a corner worth a MSG_MOVE_SET_FACING.
 const minTurn = 0.01
 
@@ -353,7 +326,9 @@ func (w *walkState) facing(k int) float32 {
 // packet (Movement.cpp:521-605: the run speed times the client-time gap since the last
 // packet, checked by checkStep; no other check for a facing), which a point reached along
 // the path at the run speed keeps, as the straight line to it is no longer than the path.
-// The next heartbeat comes 500 ms after it. It reports whether it sent (or aborted the walk).
+// A turn under minTurn from the facing last sent is not sent, and the next turn is measured
+// from that same facing, so small corners add up to one. The next heartbeat comes 500 ms after
+// a turn it sends. It reports whether it sent (or aborted the walk).
 func (s *Session) tickTurn(w *walkState, now time.Time) (bool, error) {
 	leg := w.legAt(w.walked(now))
 	if leg == w.leg {
@@ -361,11 +336,14 @@ func (s *Session) tickTurn(w *walkState, now time.Time) (bool, error) {
 	}
 	o := w.facing(leg)
 	w.leg = leg
-	d := math.Abs(float64(o - w.o))
+	w.o = o
+	s.mu.Lock()
+	sent := s.pos[3] // the facing the server has from the last packet
+	s.mu.Unlock()
+	d := math.Abs(float64(o - sent))
 	if d > math.Pi {
 		d = 2*math.Pi - d
 	}
-	w.o = o
 	if w.arrived(now) || d < minTurn { // the stop carries the last leg's facing
 		return false, nil
 	}

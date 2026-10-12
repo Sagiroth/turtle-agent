@@ -34,6 +34,7 @@ const (
 	KindAttackStop  = "attack_stop"
 	KindAttackError = "attack_error"
 	KindParseError  = "parse_error"
+	KindRaidMark    = "raid_mark" // MSG_RAID_TARGET_UPDATE: a raid icon set on or cleared from a unit
 )
 
 // ChatKinds is what the chat_log method returns.

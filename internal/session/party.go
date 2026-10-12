@@ -33,6 +33,8 @@ type PartyInfo struct {
 	Leader        packet.GUID   `json:"leader,omitempty"`
 	Members       []PartyMember `json:"members"`
 	PendingInvite string        `json:"pending_invite,omitempty"`
+	// Marks are the group's raid icons by name (skull, cross, ...), from MSG_RAID_TARGET_UPDATE.
+	Marks map[string]packet.GUID `json:"marks,omitempty"`
 }
 
 func (s *Session) registerParty() {
@@ -55,6 +57,15 @@ func (s *Session) Party() PartyInfo {
 	s.mu.Lock()
 	p := s.party
 	p.Members = append([]PartyMember{}, s.party.Members...)
+	p.Marks = nil
+	for i, g := range s.marks {
+		if g != 0 {
+			if p.Marks == nil {
+				p.Marks = map[string]packet.GUID{}
+			}
+			p.Marks[game.RaidIconName(uint8(i))] = g
+		}
+	}
 	s.mu.Unlock()
 	for i := range p.Members {
 		m := &p.Members[i]
@@ -202,6 +213,9 @@ func (s *Session) onGroupList(body []byte) error {
 		}
 	}
 	s.party = next
+	if !next.InGroup { // out of the group: its icons are gone with it
+		s.marks = [game.RaidIconCount]packet.GUID{}
+	}
 	s.mu.Unlock()
 	for _, m := range joined {
 		s.names.setPlayer(m.GUID, m.Name)
@@ -218,6 +232,7 @@ func (s *Session) onGroupList(body []byte) error {
 func (s *Session) clearParty(why string) {
 	s.mu.Lock()
 	s.party = PartyInfo{PendingInvite: s.party.PendingInvite}
+	s.marks = [game.RaidIconCount]packet.GUID{}
 	s.mu.Unlock()
 	s.emit(events.Event{Kind: events.KindParty, Data: map[string]any{"event": why}})
 }

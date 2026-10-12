@@ -78,6 +78,12 @@ type pointParams struct {
 	Map *int    `json:"map,omitempty"`
 }
 
+type markParams struct {
+	GUID packet.GUID `json:"guid,omitempty"`
+	Name string      `json:"name,omitempty"`
+	Icon string      `json:"icon"` // skull, cross, square, moon, triangle, diamond, circle, star or clear
+}
+
 // registerMethods wires the spec's JSON-RPC methods (v1) to the session; later
 // milestones add their methods at the end of this function.
 func registerMethods(srv *rpc.Server, s *session.Session) {
@@ -139,6 +145,10 @@ func registerMethods(srv *rpc.Server, s *session.Session) {
 			m = *p.Map
 		}
 		return empty{}, rpcErr(s.Teleport(ctx, p.X, p.Y, p.Z, m))
+	}))
+	srv.Register("mark", rpc.Typed(func(ctx context.Context, p markParams) (session.MarkResult, error) {
+		res, err := s.Mark(ctx, p.GUID, p.Name, p.Icon)
+		return res, rpcErr(err)
 	}))
 }
 

@@ -454,3 +454,52 @@ func TestActionMethodShapes(t *testing.T) {
 		t.Fatalf("teleport %v", out["error"])
 	}
 }
+
+// eventually polls call until ok accepts its result.
+func (r *agentRig) eventually(method, params string, ok func(map[string]any) bool) map[string]any {
+	r.t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		out := r.call(method, params)
+		if ok(out) {
+			return out
+		}
+		if time.Now().After(deadline) {
+			r.t.Fatalf("%s %s: %v", method, params, out)
+		}
+	}
+}
+
+func TestMarkMethod(t *testing.T) {
+	r := newRig(t)
+	const wolf packet.GUID = 0xF13000012B000001
+	if out := r.call("mark", `{"guid":"0xF13000012B000001","icon":"skull"}`); errCode(out) != rpc.CodeGame {
+		t.Fatalf("mark outside a group: %v", out)
+	}
+	r.srv.Send(opcode.SMSGGroupList, gametest.GroupList(0x2A, game.GroupMember{Name: "Gorm", GUID: 0x30, Status: game.MemberOnline}))
+	r.expect(opcode.CMSGRequestPartyMemberStats)
+	if out := r.call("mark", `{"guid":"0xF13000012B000001","icon":"bone"}`); errCode(out) != rpc.CodeGame {
+		t.Fatalf("bad icon: %v", out)
+	}
+	res := make(chan map[string]any, 1)
+	go func() { res <- r.call("mark", `{"guid":"0xF13000012B000001","icon":"skull"}`) }()
+	p, err := r.srv.Expect(opcode.MSGRaidTargetUpdate, 2*time.Second)
+	if err != nil || !bytes.Equal(p.Body, game.BuildRaidTargetUpdate(7, wolf)) {
+		t.Fatalf("% X %v", p.Body, err)
+	}
+	r.srv.Send(opcode.MSGRaidTargetUpdate, gametest.RaidTargetDelta(7, wolf))
+	r.expect(opcode.CMSGCreatureQuery) // the event waits for the wolf's name
+	r.wolfName()
+	if out := <-res; out["error"] != nil || out["result"].(map[string]any)["icon"] != "skull" || out["result"].(map[string]any)["guid"] != "0xF13000012B000001" {
+		t.Fatalf("%v", out)
+	}
+	if m := r.call("party", "{}")["result"].(map[string]any)["marks"].(map[string]any); m["skull"] != "0xF13000012B000001" {
+		t.Fatalf("party marks %v", m)
+	}
+	out := r.eventually("events", `{"since":0,"kinds":["raid_mark"]}`, func(m map[string]any) bool {
+		return len(m["result"].(map[string]any)["events"].([]any)) == 1
+	})
+	e := out["result"].(map[string]any)["events"].([]any)[0].(map[string]any)
+	if d := e["data"].(map[string]any); d["action"] != "set" || d["icon"] != "skull" || e["target"] != "Young Wolf" || e["target_guid"] != "0xF13000012B000001" {
+		t.Fatalf("%v", e)
+	}
+}

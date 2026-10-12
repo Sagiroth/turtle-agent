@@ -107,7 +107,7 @@ func (s *Session) LootWindow(ctx context.Context) (*LootWindow, error) {
 }
 
 // OpenLoot opens the loot of a dead creature (CMSG_LOOT), given by guid or by name (the
-// nearest dead unit whose name contains it), and waits up to wait for the server's window. The core checks the reach itself (LootHandler.cpp:414-440,
+// nearest dead lootable unit whose name contains it), and waits up to wait for the server's window. The core checks the reach itself (LootHandler.cpp:414-440,
 // Player.cpp:9286-9305) and answers a refusal with a reason, which this returns as an
 // error. A window with nothing in it is closed again at once, as the client does.
 func (s *Session) OpenLoot(ctx context.Context, g packet.GUID, name string, wait time.Duration) (*LootWindow, error) {
@@ -129,26 +129,30 @@ func (s *Session) OpenLoot(ctx context.Context, g packet.GUID, name string, wait
 		return nil, err
 	}
 	seq := v.(uint64)
-	if err := s.awaitLoot(ctx, wait, func() bool { return s.loot.seq > seq }); err != nil {
+	// The answer and the window are taken in the same step: an empty window is released at
+	// once, and by a later step the window would be gone.
+	var a lootAnswer
+	var win *LootWindow
+	if err := s.awaitLoot(ctx, wait, func() bool {
+		if s.loot.seq <= seq {
+			return false
+		}
+		a, win = s.loot.last, windowOf(s.loot.win)
+		return true
+	}); err != nil {
 		return nil, fmt.Errorf("no loot window from the server within %s: %w", wait, err)
 	}
-	v, err = s.do(ctx, func() (any, error) {
-		a := s.loot.last
-		switch {
-		case a.refused:
-			return nil, fmt.Errorf("loot refused: %s (%s)", game.LootErrorText(a.err), game.LootErrorName(a.err))
-		case a.released:
-			return nil, errors.New("the server closed the loot at once: nothing to loot there, out of reach, or already looted")
-		}
-		return windowOf(s.loot.win), nil
-	})
-	if err != nil {
-		return nil, err
+	switch {
+	case a.refused:
+		return nil, fmt.Errorf("loot refused: %s (%s)", game.LootErrorText(a.err), game.LootErrorName(a.err))
+	case a.released:
+		return nil, errors.New("the server closed the loot at once: nothing to loot there, out of reach, or already looted")
 	}
-	return v.(*LootWindow), nil
+	return win, nil
 }
 
-// pickCorpse returns g, or the nearest dead unit whose name contains name.
+// pickCorpse returns g, or the nearest dead unit with loot (UNIT_DYNFLAG_LOOTABLE) whose
+// name contains name.
 func (s *Session) pickCorpse(g packet.GUID, name string) (packet.GUID, error) {
 	if g != 0 {
 		return g, nil
@@ -157,11 +161,11 @@ func (s *Session) pickCorpse(g packet.GUID, name string) (packet.GUID, error) {
 		return 0, errors.New("loot needs a guid or a name")
 	}
 	for _, u := range s.Units(objects.Filter{Name: name, Limit: math.MaxInt}) {
-		if u.Dead {
+		if u.Dead && s.store.Field(u.GUID, objects.UnitDynamicFlags)&objects.DynFlagLootable != 0 {
 			return u.GUID, nil
 		}
 	}
-	return 0, fmt.Errorf("no dead unit named %q nearby", name)
+	return 0, fmt.Errorf("no lootable dead unit named %q nearby", name)
 }
 
 // awaitLoot runs ready on the owner loop until it is true, for at most wait. The error

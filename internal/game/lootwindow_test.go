@@ -54,6 +54,36 @@ func TestParseLootResponse(t *testing.T) {
 	}
 }
 
+// One item, written out byte by byte from Player::SendLoot and operator<<(LootView) (guid,
+// type 1, money 253, one item: slot 0, item 2589, count 1, display 7, suffix 0, property 0,
+// slot type 0), so the builder in gametest is not the only witness of the layout.
+func TestParseLootResponseHex(t *testing.T) {
+	body := []byte{
+		0x01, 0x00, 0x00, 0x2B, 0x01, 0x00, 0x30, 0xF1, // guid 0xF13000012B000001
+		0x01,                   // LOOT_CORPSE
+		0xFD, 0x00, 0x00, 0x00, // money
+		0x01,                   // item count
+		0x00,                   // slot
+		0x1D, 0x0A, 0x00, 0x00, // item 2589
+		0x01, 0x00, 0x00, 0x00, // count
+		0x07, 0x00, 0x00, 0x00, // display id
+		0x00, 0x00, 0x00, 0x00, // random suffix
+		0x00, 0x00, 0x00, 0x00, // random property
+		0x00, // slot type
+	}
+	l, err := game.ParseLootResponse(body)
+	want := game.LootResponse{GUID: 0xF13000012B000001, Type: 1, Money: 253, Items: []game.LootItem{{Item: 2589, Count: 1, DisplayID: 7}}}
+	if err != nil || !reflect.DeepEqual(l, want) {
+		t.Fatalf("%+v %v", l, err)
+	}
+	if !bytes.Equal(gametest.LootResponse(want.GUID, 1, 253, gametest.LootSlot{Item: 2589, Count: 1, Display: 7}), body) {
+		t.Fatal("gametest.LootResponse differs from the hex fixture")
+	}
+	if game.LootErrorName(15) != "already_pickpocketed" || game.LootErrorName(16) != "not_while_shapeshifted" {
+		t.Fatal("loot error names")
+	}
+}
+
 func TestParseLootNotices(t *testing.T) {
 	if g, err := game.ParseLootRelease(gametest.LootRelease(corpse)); err != nil || g != corpse {
 		t.Fatalf("%s %v", g, err)

@@ -17,7 +17,10 @@ import (
 
 // mountState follows the player's own mount. Owner loop only.
 type mountState struct {
-	auras  []uint32 // the spells whose auras appeared with the mount display; dismount cancels these
+	aura   uint32   // the aura that appeared with the mount display, when exactly one did; dismount cancels it
+	cands  []uint32 // the auras that appeared with it when there were several: dismount needs a spell_id
+	fail   string   // why the newest cast of the player failed
+	failed uint64   // counts failed casts of the player
 	result *uint32  // the newest SMSG_MOUNTRESULT, nil until one arrives
 	seq    uint64   // counts SMSG_MOUNTRESULT and SMSG_DISMOUNTRESULT
 	wakes  notifier
@@ -29,7 +32,8 @@ func (s *Session) registerUseItem() {
 }
 
 // UseItem uses an item from the bags with CMSG_USE_ITEM, as a right-click does: food,
-// drink, potions, scrolls, a mount item, a container. ref picks the item as for Equip (an
+// drink, potions, scrolls, a mount item. A lootable item (a clam, a lockbox) opens with
+// CMSG_OPEN_ITEM in 1.12, which is not covered. ref picks the item as for Equip (an
 // entry searches the backpack, then the bags). target is the unit it is used on; 0 uses
 // it on the player itself, which is also how the client uses an item with no target
 // selected. The server answers through spell events (spell_start, aura_applied,
@@ -82,7 +86,7 @@ func (s *Session) Mount(ctx context.Context, ref MountRef, wait time.Duration) (
 		return MountInfo{}, errors.New("mount needs an item_entry (or bag and slot), or a spell_id")
 	}
 	info := MountInfo{Via: "item"}
-	var seq uint64
+	var seq, failed uint64
 	_, err := s.do(ctx, func() (any, error) {
 		if err := s.inWorld(); err != nil {
 			return nil, err
@@ -90,7 +94,7 @@ func (s *Session) Mount(ctx context.Context, ref MountRef, wait time.Duration) (
 		if s.Mounted() {
 			return nil, errors.New("already mounted")
 		}
-		seq, s.mount.result = s.mount.seq, nil
+		seq, failed, s.mount.result = s.mount.seq, s.mount.failed, nil
 		if ref.Spell != 0 {
 			info.Via = "spell"
 			return nil, s.conn.WritePacket(opcode.CMSGCastSpell, game.BuildCastSpell(ref.Spell, 0))
@@ -105,9 +109,9 @@ func (s *Session) Mount(ctx context.Context, ref MountRef, wait time.Duration) (
 		return MountInfo{}, err
 	}
 	err = s.await(ctx, wait, &s.mount.wakes, func() bool {
-		return s.Mounted() || (s.mount.seq > seq && s.mount.result != nil && *s.mount.result != mountResultOK)
+		return s.Mounted() || s.mount.failed > failed || (s.mount.seq > seq && s.mount.result != nil && *s.mount.result != mountResultOK)
 	})
-	return s.mountInfo(ctx, info, err, "mounted")
+	return s.mountInfo(ctx, info, err, "mounted", failed)
 }
 
 // mountResultOK is UnitMountResult MOUNTRESULT_OK (UnitDefines.h:591).
@@ -115,8 +119,9 @@ const mountResultOK uint32 = 10
 
 // Dismount cancels the mount aura with CMSG_CANCEL_AURA (1.12 has no separate dismount
 // packet) and waits up to wait for the display to clear. The aura is the one that appeared
-// with the mount display; spell names it when the mount came before the agent saw it (a
-// login while mounted).
+// with the mount display, when only one did; spell names it when the mount came before the
+// agent saw it (a login while mounted) or several auras came with it. The spell data to tell
+// the mount aura (SPELL_AURA_MOUNTED) apart is not available to the agent.
 func (s *Session) Dismount(ctx context.Context, spell uint32, wait time.Duration) (MountInfo, error) {
 	_, err := s.do(ctx, func() (any, error) {
 		if err := s.inWorld(); err != nil {
@@ -125,34 +130,36 @@ func (s *Session) Dismount(ctx context.Context, spell uint32, wait time.Duration
 		if !s.Mounted() {
 			return nil, errors.New("not mounted")
 		}
-		spells := s.mount.auras
-		if spell != 0 {
-			spells = []uint32{spell}
+		if spell == 0 {
+			spell = s.mount.aura
 		}
-		if len(spells) == 0 {
+		switch {
+		case spell != 0:
+		case len(s.mount.cands) > 0:
+			return nil, fmt.Errorf("several auras appeared with the mount (spells %v); pass the mount's spell_id", s.mount.cands)
+		default:
 			return nil, errors.New("the mount aura is unknown (mounted before the agent saw it); pass its spell_id")
 		}
-		for _, sp := range spells {
-			if err := s.conn.WritePacket(opcode.CMSGCancelAura, game.BuildCancelAura(sp)); err != nil {
-				return nil, err
-			}
-		}
-		return nil, nil
+		return nil, s.conn.WritePacket(opcode.CMSGCancelAura, game.BuildCancelAura(spell))
 	})
 	if err != nil {
 		return MountInfo{}, err
 	}
 	err = s.await(ctx, wait, &s.mount.wakes, func() bool { return !s.Mounted() })
-	return s.mountInfo(ctx, MountInfo{}, err, "dismounted")
+	return s.mountInfo(ctx, MountInfo{}, err, "dismounted", 0)
 }
 
 // mountInfo fills in the state after a wait. A wait that ran out is an error saying the
-// player did not reach want.
-func (s *Session) mountInfo(ctx context.Context, info MountInfo, waitErr error, want string) (MountInfo, error) {
+// player did not reach want; failed is the failed-cast count when a mount began.
+func (s *Session) mountInfo(ctx context.Context, info MountInfo, waitErr error, want string, failed uint64) (MountInfo, error) {
 	if waitErr != nil && !errors.Is(waitErr, context.DeadlineExceeded) {
 		return MountInfo{}, waitErr
 	}
+	var failReason string
 	v, _ := s.do(ctx, func() (any, error) {
+		if want == "mounted" && s.mount.failed > failed {
+			failReason = s.mount.fail
+		}
 		info.DisplayID = s.store.Field(s.selfGUID(), objects.UnitMountDisplay)
 		info.Mounted = info.DisplayID != 0
 		if want == "mounted" && s.mount.result != nil {
@@ -168,9 +175,19 @@ func (s *Session) mountInfo(ctx context.Context, info MountInfo, waitErr error, 
 		if info.Result != "" && info.Result != "ok" {
 			reason = "the server answered " + info.Result
 		}
+		if failReason != "" {
+			reason = "the cast failed: " + failReason
+		}
 		return info, fmt.Errorf("not %s: %s", want, reason)
 	}
 	return info, nil
+}
+
+// noteCastFailed records a failed cast of the player and wakes a mount that waits on it.
+func (s *Session) noteCastFailed(reason string) {
+	s.mount.fail = reason
+	s.mount.failed++
+	s.mount.wakes.wake()
 }
 
 func (s *Session) onMountResult(body []byte) error {
@@ -204,10 +221,11 @@ func (s *Session) selfChanges(c objects.Change, auras []uint32) {
 	switch c.Kind {
 	case objects.ChangeMount:
 		mounted := c.New != 0
-		if mounted {
-			s.mount.auras = auras
-		} else {
-			s.mount.auras = nil
+		s.mount.aura, s.mount.cands = 0, nil
+		if mounted && len(auras) == 1 {
+			s.mount.aura = auras[0]
+		} else if mounted {
+			s.mount.cands = auras
 		}
 		s.emit(events.Event{Kind: events.KindMount, SourceGUID: c.GUID, Data: map[string]any{"mounted": mounted, "display_id": c.New}})
 		s.mount.wakes.wake()

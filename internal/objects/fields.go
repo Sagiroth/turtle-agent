@@ -39,6 +39,9 @@ const (
 	UnitFlagNotSelectable    uint32 = 0x02000000
 )
 
+// Unit dynamic flags (SharedDefines.h:1327).
+const DynFlagLootable uint32 = 0x0001
+
 // Type ids (ObjectGuid.h:35-42).
 const (
 	TypeItem       uint8 = 1

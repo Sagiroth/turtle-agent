@@ -63,7 +63,7 @@ func LootSlotTypeName(t uint8) string {
 // LootTakeable says a slot of this type can be sent to CMSG_AUTOSTORE_LOOT_ITEM.
 func LootTakeable(slotType uint8) bool { return slotType == LootSlotAllow || slotType == LootSlotOwner }
 
-// LootErrorName is a LootError (LootMgr.h:85-98), the reason of a refused SMSG_LOOT_RESPONSE.
+// LootErrorName is a LootError (LootMgr.h:85-99), the reason of a refused SMSG_LOOT_RESPONSE.
 func LootErrorName(e uint8) string {
 	switch e {
 	case 0:
@@ -88,6 +88,10 @@ func LootErrorName(e uint8) string {
 		return "master_unique_item"
 	case 14:
 		return "master_other"
+	case 15:
+		return "already_pickpocketed"
+	case 16:
+		return "not_while_shapeshifted"
 	}
 	return fmt.Sprintf("error_%d", e)
 }
@@ -107,6 +111,10 @@ func LootErrorText(e uint8) string {
 		return "must be standing to loot"
 	case 9:
 		return "cannot loot while stunned"
+	case 15:
+		return "its pockets were already picked"
+	case 16:
+		return "cannot do that while shapeshifted"
 	}
 	return LootErrorName(e)
 }

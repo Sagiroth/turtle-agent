@@ -47,7 +47,7 @@ const (
 	KindChannelNotify  = "channel_notify"
 	KindGossip         = "gossip"          // SMSG_GOSSIP_MESSAGE: an NPC's menu
 	KindGossipComplete = "gossip_complete" // SMSG_GOSSIP_COMPLETE: the menu closed
-	// The loot window of a corpse (or a container opened with use_item), data.guid in source.
+	// The loot window of a corpse, its guid in source.
 	KindLootOpen       = "loot_open"        // SMSG_LOOT_RESPONSE: the window with its money and items
 	KindLootError      = "loot_error"       // SMSG_LOOT_RESPONSE refused: data.reason
 	KindLootTaken      = "loot_taken"       // SMSG_LOOT_REMOVED: a slot left the window

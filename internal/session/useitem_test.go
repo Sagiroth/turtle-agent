@@ -221,3 +221,45 @@ func TestDismountNeedsTheAuraWhenUnknown(t *testing.T) {
 	h.send(opcode.SMSGUpdateObject, selfValues(map[uint16]uint32{objects.UnitMountDisplay: 0}))
 	h.logout()
 }
+
+// Several auras arriving with the mount display: dismount will not guess which one to cancel.
+func TestDismountWithSeveralNewAuras(t *testing.T) {
+	ctx := context.Background()
+	h := start(t, Options{})
+	h.enterWorld()
+	h.send(opcode.SMSGUpdateObject, ownInventory(nil, nil))
+	waitFor(t, func() bool { return h.s.Store().Field(me.GUID, objects.UnitHealth) == 100 })
+	h.send(opcode.SMSGUpdateObject, selfValues(map[uint16]uint32{objects.UnitMountDisplay: 14337, objects.UnitAura + 5: 458, objects.UnitAura + 6: 2000}))
+	waitFor(t, h.s.Mounted)
+	if _, err := h.s.Dismount(ctx, 0, time.Second); err == nil || !strings.Contains(err.Error(), "several auras") || !strings.Contains(err.Error(), "2000") {
+		t.Fatalf("%v", err)
+	}
+	if p, err := h.srv.Expect(opcode.CMSGCancelAura, 100*time.Millisecond); err == nil {
+		t.Fatalf("sent % X", p.Body)
+	}
+	go func() { h.s.Dismount(ctx, 458, 2*time.Second) }()
+	h.expect(opcode.CMSGCancelAura)
+	h.send(opcode.SMSGUpdateObject, selfValues(map[uint16]uint32{objects.UnitMountDisplay: 0}))
+	h.logout()
+}
+
+// The player's own failed cast ends a mount at once, with the server's reason.
+func TestMountEndsOnCastFailure(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	h.send(opcode.SMSGUpdateObject, ownInventory(nil, nil))
+	waitFor(t, func() bool { return h.s.Store().Field(me.GUID, objects.UnitHealth) == 100 })
+	done := make(chan error, 1)
+	began := time.Now()
+	go func() {
+		_, err := h.s.Mount(context.Background(), MountRef{Spell: 458}, 10*time.Second)
+		done <- err
+	}()
+	h.expect(opcode.CMSGCastSpell)
+	h.send(opcode.SMSGCastResult, packet.NewWriter().U32(458).U8(2).U8(66).Bytes())
+	err := <-done
+	if err == nil || !strings.Contains(err.Error(), "SpellCastResult 66") || time.Since(began) > 5*time.Second {
+		t.Fatalf("%v after %s", err, time.Since(began))
+	}
+	h.logout()
+}

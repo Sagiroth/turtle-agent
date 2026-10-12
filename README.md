@@ -189,7 +189,7 @@ or replies.
 
 ## Items, loot and mounts
 
-`use_item` sends `CMSG_USE_ITEM` for an item in the backpack or a bag, as a right-click does. An `item_entry` picks the first
+`use_item` sends `CMSG_USE_ITEM` for an item in the backpack or a bag, as a right-click does. It targets yourself or a unit only: no item or game-object targets yet (poisons, enchants, lockpicking). An on-use trinket or other equipped item is used from bag 255 and its equipment slot (the core refuses an item that needs equipping anywhere else, `SpellHandler.cpp:78-85`); `inventory` lists the bags and backpack only, so pass `bag` 255 and the slot yourself. An `item_entry` picks the first
 item with that entry (backpack first); `bag`/`slot` pick one place (see `inventory` with `bags`). Without `target` the item is
 used on yourself (target mask 0), which is what the client sends with nothing selected; the agent does not fall back to the
 current target the way `cast` does. The server answers through the usual events: `spell_start`/`spell_go`, `aura_applied`
@@ -198,7 +198,7 @@ current target the way `cast` does. The server answers through the usual events:
 
 `loot` opens a corpse with `CMSG_LOOT` and waits for `SMSG_LOOT_RESPONSE`. The server checks reach, facing and permission and
 answers a refusal with a reason (`too_far`, `didnt_kill`, `locked`, `not_standing`, ...), which `loot` returns as an error. Only
-dead creatures and corpses open this way; chests, containers and herbs are not covered. Each item has a `slot_type`: only
+dead creatures and corpses open this way (`name` needs the corpse to be lootable, `UNIT_DYNFLAG_LOOTABLE`); chests, lootable items (`CMSG_OPEN_ITEM`) and herbs are not covered. Each item has a `slot_type`: only
 `allow_loot` and `owner` can be taken; `roll_ongoing` (a group roll is running, answer it with `roll`), `master` and `locked`
 cannot, and `loot_take` refuses a single slot of those and skips them with `all`. `loot_take` sends
 `CMSG_AUTOSTORE_LOOT_ITEM` per slot, and `CMSG_LOOT_MONEY` for the money (`all` takes both), then waits up to `wait_ms` for
@@ -208,12 +208,12 @@ cannot, and `loot_take` refuses a single slot of those and skips them with `all`
 window now open, or null.
 
 `mount` uses a mount item (`CMSG_USE_ITEM`) or casts a mount spell on yourself, then waits for the mount display
-(`UNIT_FIELD_MOUNTDISPLAYID`). It errors when already mounted, or when the display does not appear in time, naming what to
-read (`spell_fail`, `inventory_error` and `mount_result` events). A mount is a cast, so the time is the cast time (up to a few seconds)
+(`UNIT_FIELD_MOUNTDISPLAYID`). It errors when already mounted, when the player's own cast fails (at once, with the reason), or when the display does not
+appear in time, naming what to read (`spell_fail`, `inventory_error` and `mount_result` events). A mount is a cast, so the time is the cast time (up to a few seconds)
 plus latency. `walk_to` and `walk_path` work while mounted: the server sets the mounted run speed, and the agent acks it like any
-speed change. `dismount` cancels the mount aura with `CMSG_CANCEL_AURA` (1.12 has no separate dismount packet). The aura is the
-one that appeared in the same update as the mount display; after a login while mounted it is unknown, and `dismount` asks for
-`spell_id`.
+speed change. `dismount` cancels the mount aura with `CMSG_CANCEL_AURA` (1.12 has no separate dismount packet). The agent cannot tell which aura is the mount's, so it
+remembers the one new buff that appeared in the same update as the mount display; with several, or after a login while
+mounted, `dismount` asks for `spell_id`.
 
 Not yet exercised on a live server (see the pull request for the live steps): the unit tests use packets built from the core's
 source, not a capture.

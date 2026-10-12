@@ -188,7 +188,8 @@ func TestLootClosesWhenEmpty(t *testing.T) {
 	// A corpse with nothing on it opens and is released at once.
 	done = openLoot(t, h, "")
 	h.send(opcode.SMSGLootResponse, gametest.LootResponse(wolfGUID, game.LootCorpse, 0))
-	if r := <-done; r.err != nil || len(r.w.Items) != 0 {
+	h.send(opcode.SMSGLootReleaseResponse, gametest.LootRelease(wolfGUID)) // right behind it: the window is gone by the time the caller looks
+	if r := <-done; r.err != nil || r.w == nil || len(r.w.Items) != 0 {
 		t.Fatalf("%+v %v", r.w, r.err)
 	}
 	h.expect(opcode.CMSGLootRelease)
@@ -233,7 +234,7 @@ func TestLootRefusedAndNotFound(t *testing.T) {
 	if _, err := h.s.OpenLoot(ctx, 0, "", time.Second); err == nil || !strings.Contains(err.Error(), "guid or a name") {
 		t.Fatalf("%v", err)
 	}
-	if _, err := h.s.OpenLoot(ctx, 0, "dragon", time.Second); err == nil || !strings.Contains(err.Error(), "no dead unit") {
+	if _, err := h.s.OpenLoot(ctx, 0, "dragon", time.Second); err == nil || !strings.Contains(err.Error(), "no lootable dead unit") {
 		t.Fatalf("%v", err)
 	}
 	h.logout()
@@ -245,11 +246,17 @@ func TestLootRefusedAndNotFound(t *testing.T) {
 // loot by name picks the nearest dead unit, not a living one of that name.
 func TestLootByName(t *testing.T) {
 	h := lootRig(t)
-	if _, err := h.s.OpenLoot(context.Background(), 0, "young wolf", 50*time.Millisecond); err == nil || !strings.Contains(err.Error(), "no dead unit") {
+	if _, err := h.s.OpenLoot(context.Background(), 0, "young wolf", 50*time.Millisecond); err == nil || !strings.Contains(err.Error(), "no lootable dead unit") {
 		t.Fatalf("a living wolf: %v", err)
 	}
 	h.send(opcode.SMSGUpdateObject, valuesUpdate(wolfGUID, map[uint16]uint32{objects.UnitHealth: 0}))
 	waitFor(t, func() bool { us := h.s.Units(objects.Filter{Name: "young wolf"}); return len(us) == 1 && us[0].Dead })
+	// Dead but nothing to loot (no UNIT_DYNFLAG_LOOTABLE): not picked.
+	if _, err := h.s.OpenLoot(context.Background(), 0, "young wolf", 50*time.Millisecond); err == nil || !strings.Contains(err.Error(), "no lootable dead unit") {
+		t.Fatalf("an empty corpse: %v", err)
+	}
+	h.send(opcode.SMSGUpdateObject, valuesUpdate(wolfGUID, map[uint16]uint32{objects.UnitDynamicFlags: objects.DynFlagLootable}))
+	waitFor(t, func() bool { return h.s.Store().Field(wolfGUID, objects.UnitDynamicFlags) == 1 })
 	done := make(chan openResult, 1)
 	go func() {
 		w, err := h.s.OpenLoot(context.Background(), 0, "young wolf", 2*time.Second)

@@ -1,6 +1,8 @@
 package session
 
 import (
+	"fmt"
+
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/game"
 	"github.com/pjerra/turtle-agent/internal/opcode"
@@ -114,6 +116,7 @@ func (s *Session) onCastResult(body []byte) error {
 		return err
 	}
 	s.emit(events.Event{Kind: events.KindSpellFail, SourceGUID: s.selfGUID(), SpellID: c.SpellID, Data: map[string]any{"reason": c.Reason}})
+	s.noteCastFailed(fmt.Sprintf("SpellCastResult %d", c.Reason))
 	return nil
 }
 
@@ -123,6 +126,9 @@ func (s *Session) onSpellFailedOther(body []byte) error {
 		return err
 	}
 	s.emit(events.Event{Kind: events.KindSpellFail, SourceGUID: c.Caster, SpellID: c.SpellID, Data: map[string]any{"reason": "interrupted"}})
+	if c.Caster == s.selfGUID() {
+		s.noteCastFailed("interrupted")
+	}
 	return nil
 }
 

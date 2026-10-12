@@ -72,10 +72,13 @@ type Options struct {
 	// logged with the names known so far; 0: 2 s.
 	NamesWait time.Duration
 	Store     *objects.Store // nil: a new store
-	// Redact lists secrets (the account name, the password) the server may echo back, as
-	// in a .pinfo reply. They are replaced with "<redacted>" in event text, names and
-	// string data (ASCII case-insensitive), and a packet holding one is never hex-dumped.
-	Redact []string
+	// Redact lists account names the server may echo back, as in a .pinfo reply, and
+	// RedactAnywhere passwords. They are replaced with "<redacted>" in event text, names
+	// and string data (ASCII case-insensitive; account names on whole words only, so a
+	// character named after its account keeps its name, passwords anywhere), and a packet
+	// holding one is never hex-dumped.
+	Redact         []string
+	RedactAnywhere []string
 }
 
 // maxLoginRetries bounds the retries after SMSG_CHARACTER_LOGIN_FAILED code 1. With the
@@ -200,7 +203,7 @@ func New(conn *worldconn.Conn, opts Options) *Session {
 		conn: conn, opts: opts, log: opts.Log, logger: opts.Logger,
 		handlers: map[uint16]handler{}, reqs: make(chan request), done: make(chan struct{}),
 		ready: make(chan struct{}), start: time.Now(), state: StatusConnecting, unknown: map[uint16]int{},
-		names: newNameCache(), store: opts.Store, runSpeed: defaultRunSpeed, redact: newRedactor(opts.Redact),
+		names: newNameCache(), store: opts.Store, runSpeed: defaultRunSpeed, redact: newRedactor(opts.Redact, opts.RedactAnywhere),
 	}
 	s.register()
 	return s
@@ -237,6 +240,9 @@ func (s *Session) Ready() <-chan struct{} { return s.ready }
 func (s *Session) Done() <-chan struct{} { return s.done }
 
 func (s *Session) Log() *events.Log { return s.log }
+
+// Redact scrubs the session's secrets (Options.Redact, Options.RedactAnywhere) out of text.
+func (s *Session) Redact(text string) string { return s.redact.scrub(text) }
 
 func (s *Session) State() Status {
 	s.mu.Lock()

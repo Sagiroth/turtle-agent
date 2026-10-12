@@ -169,7 +169,7 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// The server can echo the account name back (a .pinfo reply): events and the stderr
 	// log never carry it, nor the password (ruling P10, review I3).
 	s := session.New(conn, session.Options{Character: character, Log: log, Logger: stderr,
-		Redact: []string{ticket.Account, account, password}})
+		Redact: []string{ticket.Account, account}, RedactAnywhere: []string{password}})
 	runErr := make(chan error, 1)
 	go func() { runErr <- s.Run(context.Background()) }()
 	select {
@@ -178,7 +178,7 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "in world: %s guid=%s map=%d x=%.1f y=%.1f z=%.1f\n", info.Character, info.GUID, info.Map, info.X, info.Y, info.Z)
 	case err := <-runErr:
 		// Ready never closes when login fails; Run's result says why.
-		return sessionExit(err, stderr)
+		return sessionExit(s, err, stderr)
 	case <-ctx.Done():
 		conn.Close()
 		<-runErr
@@ -209,7 +209,7 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		case <-ctx.Done():
 			return logoutAndWait(s, conn, runErr, stderr)
 		case err := <-runErr:
-			code := sessionExit(err, stderr)
+			code := sessionExit(s, err, stderr)
 			if err == nil || served == nil {
 				return code // a logout through the RPC: done at once
 			}
@@ -248,7 +248,7 @@ func logoutAndWait(s *session.Session, conn *worldconn.Conn, runErr <-chan error
 		var le *session.LogoutError
 		if !errors.As(err, &le) {
 			if err != nil {
-				fmt.Fprintln(stderr, "logout:", err)
+				fmt.Fprintln(stderr, "logout:", s.Redact(err.Error()))
 			}
 			break
 		}
@@ -262,7 +262,7 @@ func logoutAndWait(s *session.Session, conn *worldconn.Conn, runErr <-chan error
 		}
 		select {
 		case err := <-runErr:
-			return sessionExit(err, stderr)
+			return sessionExit(s, err, stderr)
 		case <-time.After(logoutRetryEvery):
 		}
 	}
@@ -270,7 +270,7 @@ func logoutAndWait(s *session.Session, conn *worldconn.Conn, runErr <-chan error
 	// error (a lost connection, no SMSG_LOGOUT_COMPLETE in time) it may not.
 	select {
 	case err := <-runErr:
-		return sessionExit(err, stderr)
+		return sessionExit(s, err, stderr)
 	case <-time.After(5 * time.Second):
 		fmt.Fprintln(stderr, "logout: timed out")
 		return closeAndExit(conn, runErr, exitDisconnected)
@@ -285,12 +285,14 @@ func closeAndExit(conn *worldconn.Conn, runErr <-chan error, code int) int {
 	return code
 }
 
-func sessionExit(err error, stderr io.Writer) int {
+// sessionExit maps Run's result to an exit code. The error is scrubbed like the session's
+// own lastErr before it reaches the stderr log.
+func sessionExit(s *session.Session, err error, stderr io.Writer) int {
 	if err == nil {
 		fmt.Fprintln(stderr, "logout: complete")
 		return exitOK
 	}
-	fmt.Fprintln(stderr, "session:", err)
+	fmt.Fprintln(stderr, "session:", s.Redact(err.Error()))
 	if errors.Is(err, session.ErrDisconnected) {
 		return exitDisconnected
 	}

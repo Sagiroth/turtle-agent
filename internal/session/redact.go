@@ -11,28 +11,52 @@ import (
 const redactedMark = "<redacted>"
 
 // redactor scrubs secrets the server echoes back (the account name in a .pinfo reply,
-// ruling P10) out of events and diagnostics. Matching is ASCII case-insensitive and on
-// whole words: a secret is only matched where no letter or digit adjoins it, so a
-// character named after its account (account HARNESS, character Harnessb) keeps its name.
-type redactor struct{ needles [][]byte }
+// ruling P10) out of events and diagnostics, ASCII case-insensitive. Account names match
+// on whole words only: no letter or digit may adjoin them, so a character named after
+// its account (account HARNESS, character Harnessb) keeps its name. Passwords, long and
+// random, match anywhere.
+type redactor struct{ needles []needle }
+
+type needle struct {
+	b        []byte // lowered
+	anywhere bool   // match as a plain substring, not only as a whole word
+}
 
 func isWordByte(c byte) bool {
 	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9'
 }
 
-// wholeWord reports whether l[i:i+n] has no letter or digit on either side.
-func wholeWord(l []byte, i, n int) bool {
-	return (i == 0 || !isWordByte(l[i-1])) && (i+n == len(l) || !isWordByte(l[i+n]))
+func isHex(c byte) bool { return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' }
+
+// afterColor reports whether l[:i] ends in a WoW colour escape, |c plus 8 hex digits
+// (l is lowered): the text after it starts a new word.
+func afterColor(l []byte, i int) bool {
+	if i < 10 || l[i-10] != '|' || l[i-9] != 'c' {
+		return false
+	}
+	for _, c := range l[i-8 : i] {
+		if !isHex(c) {
+			return false
+		}
+	}
+	return true
 }
 
-// index returns the first whole-word match of n in l at or after from, or -1.
-func index(l, n []byte, from int) int {
-	for from <= len(l)-len(n) {
-		j := bytes.Index(l[from:], n)
+// wholeWord reports whether l[i:i+n] has no letter or digit on either side; a colour
+// escape right before it counts as a boundary.
+func wholeWord(l []byte, i, n int) bool {
+	left := i == 0 || !isWordByte(l[i-1]) || afterColor(l, i)
+	return left && (i+n == len(l) || !isWordByte(l[i+n]))
+}
+
+// index returns the first match of n in l at or after from, or -1.
+func index(l []byte, n needle, from int) int {
+	for from <= len(l)-len(n.b) {
+		j := bytes.Index(l[from:], n.b)
 		if j < 0 {
 			return -1
 		}
-		if wholeWord(l, from+j, len(n)) {
+		if n.anywhere || wholeWord(l, from+j, len(n.b)) {
 			return from + j
 		}
 		from += j + 1
@@ -40,20 +64,28 @@ func index(l, n []byte, from int) int {
 	return -1
 }
 
-func newRedactor(secrets []string) redactor {
+// newRedactor matches words (account names) as whole words and anywhere (passwords) as
+// plain substrings.
+func newRedactor(words, anywhere []string) redactor {
 	var r redactor
-	for _, s := range secrets {
+	add := func(s string, any bool) {
 		if s == "" {
-			continue
+			return
 		}
 		n := asciiLower([]byte(s))
-		dup := false
-		for _, have := range r.needles {
-			dup = dup || bytes.Equal(have, n)
+		for i, have := range r.needles {
+			if bytes.Equal(have.b, n) {
+				r.needles[i].anywhere = have.anywhere || any
+				return
+			}
 		}
-		if !dup {
-			r.needles = append(r.needles, n)
-		}
+		r.needles = append(r.needles, needle{b: n, anywhere: any})
+	}
+	for _, s := range words {
+		add(s, false)
+	}
+	for _, s := range anywhere {
+		add(s, true)
 	}
 	return r
 }
@@ -78,14 +110,14 @@ func (r redactor) contains(b []byte) bool {
 	}
 	l := asciiLower(b)
 	for _, n := range r.needles {
-		if bytes.Contains(l, n) {
+		if bytes.Contains(l, n.b) {
 			return true
 		}
 	}
 	return false
 }
 
-// scrub replaces every run of bytes covered by a whole-word secret with redactedMark;
+// scrub replaces every run of bytes covered by a secret with redactedMark;
 // overlapping or adjacent matches merge into one mark.
 func (r redactor) scrub(s string) string {
 	if len(r.needles) == 0 || s == "" {
@@ -98,7 +130,7 @@ func (r redactor) scrub(s string) string {
 			if hit == nil {
 				hit = make([]bool, len(l))
 			}
-			for k := i; k < i+len(n); k++ {
+			for k := i; k < i+len(n.b); k++ {
 				hit[k] = true
 			}
 		}

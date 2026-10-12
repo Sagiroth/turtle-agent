@@ -11,27 +11,35 @@ import (
 )
 
 func TestRedactorScrub(t *testing.T) {
-	r := newRedactor([]string{"Harness", "", "pw-secret", "HARNESS"})
+	r := newRedactor([]string{"Harness", "", "HARNESS"}, []string{"pw-secret", ""})
 	for in, want := range map[string]string{
-		"":                             "",
-		"nothing here":                 "nothing here",
-		"Account: HARNESS (id 5)":      "Account: <redacted> (id 5)",
-		"harness and hArNeSs":          "<redacted> and <redacted>",
-		"x pw-secret,harness y":        "x <redacted>,<redacted> y",
-		"Harnessb is the character":    "Harnessb is the character", // a name made from the account stays
-		"xharness harness2 pw-secrets": "xharness harness2 pw-secrets",
-		"'harness's'":                  "'<redacted>'s'",
-		"(HARNESS)":                    "(<redacted>)",
-		"PW-SECRET in upper case":      "<redacted> in upper case",
-		"ünïcödé harness ünïcödé":      "ünïcödé <redacted> ünïcödé",
-		"harnes s is not a full match": "harnes s is not a full match",
+		"":                          "",
+		"nothing here":              "nothing here",
+		"Account: HARNESS (id 5)":   "Account: <redacted> (id 5)",
+		"harness and hArNeSs":       "<redacted> and <redacted>",
+		"x pw-secret,harness y":     "x <redacted>,<redacted> y",
+		"Harnessb is the character": "Harnessb is the character", // a name made from the account stays
+		"xharness harness2":         "xharness harness2",
+		"xpw-secretx":               "x<redacted>x", // a password matches anywhere
+		"Hunter2pw-SECRETs":         "Hunter2<redacted>s",
+		// A colour escape right before the account name is a word boundary (LANG_SYSTEMMESSAGE 3).
+		"|cffffff00HARNESS logged in|r": "|cffffff00<redacted> logged in|r",
+		"|cff00ff00HARNESS|r":           "|cff00ff00<redacted>|r",
+		"|CFF00FF00harness|r":           "|CFF00FF00<redacted>|r",
+		"|cff00ff0zHARNESS|r":           "|cff00ff0zHARNESS|r", // not an escape: z is no hex digit
+		"x|cff00ff00HARNESSb":           "x|cff00ff00HARNESSb",
+		"'harness's'":                   "'<redacted>'s'",
+		"(HARNESS)":                     "(<redacted>)",
+		"PW-SECRET in upper case":       "<redacted> in upper case",
+		"ünïcödé harness ünïcödé":       "ünïcödé <redacted> ünïcödé",
+		"harnes s is not a full match":  "harnes s is not a full match",
 	} {
 		if got := r.scrub(in); got != want {
 			t.Errorf("scrub(%q) = %q, want %q", in, got, want)
 		}
 	}
-	if len(r.needles) != 2 {
-		t.Fatalf("needles %q", r.needles)
+	if len(r.needles) != 2 || r.needles[0].anywhere || !r.needles[1].anywhere {
+		t.Fatalf("needles %+v", r.needles)
 	}
 	if !r.contains([]byte("..HaRnEsS..")) || r.contains([]byte("harnes")) || (redactor{}).contains([]byte("harness")) {
 		t.Fatal("contains")
@@ -42,7 +50,7 @@ func TestRedactorScrub(t *testing.T) {
 // log, and a packet holding it is never hex-dumped to the stderr log.
 func TestEchoedAccountNameIsRedacted(t *testing.T) {
 	var logBuf bytes.Buffer
-	h := start(t, Options{Logger: &logBuf, Redact: []string{"TESTACC", "pw-secret"}})
+	h := start(t, Options{Logger: &logBuf, Redact: []string{"TESTACC"}, RedactAnywhere: []string{"pw-secret"}})
 	h.enterWorld()
 	h.send(opcode.SMSGMessagechat, chatBody(game.ChatSystem, 0, "Player Harnessb (guid 42) Account: testacc (id 5) GMLevel: 3"))
 	h.send(opcode.SMSGNotification, []byte("TestAcc pw-secret")) // no terminating NUL: a parse error

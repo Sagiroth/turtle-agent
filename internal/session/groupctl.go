@@ -36,6 +36,7 @@ type groupMember struct {
 	Name      string
 	Subgroup  int // 1-based; 0 in a party
 	Assistant bool
+	Online    bool
 }
 
 // findMember resolves the member a call names by guid or by name (case-insensitive). The
@@ -45,11 +46,11 @@ func findMember(p PartyInfo, self packet.GUID, selfName string, g packet.GUID, n
 		return groupMember{}, errors.New("needs a group member's guid or name")
 	}
 	if g == self || (g == 0 && strings.EqualFold(name, selfName)) {
-		return groupMember{GUID: self, Name: selfName, Subgroup: p.Subgroup, Assistant: p.Assistant}, nil
+		return groupMember{GUID: self, Name: selfName, Subgroup: p.Subgroup, Assistant: p.Assistant, Online: true}, nil
 	}
 	for _, m := range p.Members {
 		if (g != 0 && m.GUID == g) || (g == 0 && strings.EqualFold(m.Name, name)) {
-			return groupMember{GUID: m.GUID, Name: m.Name, Subgroup: m.Subgroup, Assistant: m.Assistant}, nil
+			return groupMember{GUID: m.GUID, Name: m.Name, Subgroup: m.Subgroup, Assistant: m.Assistant, Online: m.Online}, nil
 		}
 	}
 	if g != 0 {
@@ -106,7 +107,7 @@ func (s *Session) awaitGroup(ctx context.Context, what string, done func(PartyIn
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return fmt.Errorf("%s: no SMSG_GROUP_LIST showing it within %s: the server ignores a group command it refuses (check your rank and the group)", what, s.opts.MarkWait)
+			return fmt.Errorf("%s: no SMSG_GROUP_LIST showing it within %s: the server ignores a group command it refuses (check your rank and the group; in a battleground the core refuses removing members)", what, s.opts.MarkWait)
 		}
 	}
 }
@@ -134,6 +135,9 @@ func (s *Session) Promote(ctx context.Context, g packet.GUID, name string) error
 		if err != nil {
 			return nil, nil, err
 		}
+		if !m.Online { // the core returns early without a Player object (GroupHandler.cpp:343-345)
+			return nil, nil, fmt.Errorf("%s is offline", m.Name)
+		}
 		done := func(p PartyInfo) bool { return p.Leader == m.GUID }
 		if m.GUID == self {
 			return nil, done, nil // already the leader
@@ -150,7 +154,7 @@ func (s *Session) Assistant(ctx context.Context, g packet.GUID, name string, cle
 			return nil, nil, err
 		}
 		if !p.Raid {
-			return nil, nil, errors.New("needs a raid: convert_raid first (Group.h:287)")
+			return nil, nil, errors.New("needs a raid: convert_raid first")
 		}
 		m, err := findMember(p, self, selfName, g, name)
 		if err != nil {
@@ -251,7 +255,7 @@ func (s *Session) Disband(ctx context.Context) error {
 		if err := needLeader(p, self); err != nil {
 			return nil, nil, err
 		}
-		members := p.Members
+		members := p.Members // a snapshot: someone who joins meanwhile stays
 		send := func() error {
 			for _, m := range members {
 				if err := s.conn.WritePacket(opcode.CMSGGroupUninviteGuid, game.BuildGroupUninviteGUID(m.GUID)); err != nil {

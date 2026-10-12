@@ -137,11 +137,13 @@ A chat or system line whose colour codes were stripped keeps the original in `da
 
 Group control (`promote`, `assistant`, `convert_raid`, `raid_move`, `disband`): the server drops a group command it
 refuses without a reply, so each call checks the rank it can see (leader, or assistant for `raid_move`), sends the
-packet and waits up to 2 s for the group list that shows the change; it errors at once without the rank or outside a
-raid, and after 2 s with "no SMSG_GROUP_LIST". A call that finds the group already in the wanted state (already
+packet and waits up to the `MarkWait` setting (default 2 s) for the group list that shows the change; it errors at once without the rank or outside a
+raid, and on timeout with "no SMSG_GROUP_LIST". A call that finds the group already in the wanted state (already
 leader, already a raid, flag already set, already in the subgroup) succeeds without sending. `subgroup` counts 1-8 as
 the raid frame does (the wire counts 0-7); `party` reports it only for a raid. `promote` needs the target online
-(`HandleGroupSetLeaderOpcode`, GroupHandler.cpp:334-352). Not verified against a live server.
+(`HandleGroupSetLeaderOpcode`, GroupHandler.cpp:334-352); an offline member errors before anything is sent.
+`disband` works from the member list it holds when called: someone who joins meanwhile stays in the group, and in
+a battleground the core refuses removing members (`CanUninviteFromGroup`), so it times out there. Not verified against a live server.
 
 Addons, channels and NPCs:
 

@@ -134,6 +134,11 @@ func TestPromoteRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	noSetLeader(t, h)
+	// The core ignores a promote of an offline member (GroupHandler.cpp:343-345): refused before sending.
+	groupList(h, game.GroupParty, 0, me.GUID, member("Gorm", 0x30, 0, false), game.GroupMember{Name: "Lia", GUID: liaGUID})
+	waitFor(t, func() bool { return len(h.s.Party().Members) == 2 })
+	failWith(t, asyncErr(func() error { return h.s.Promote(context.Background(), 0, "Lia") }), "Lia is offline")
+	noSetLeader(t, h)
 	h.logout()
 }
 

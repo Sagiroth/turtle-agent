@@ -84,7 +84,7 @@ func worldSessions(t *testing.T, tk *auth.Ticket, scripts ...func(srv *worldtest
 		}
 		res <- errors.Join(errs...)
 	}()
-	return settingsFile(t, `{"realmd":"127.0.0.1:1","world_addr":"`+ln.Addr().String()+`","rpc":"127.0.0.1:0","accounts":{"harness":"`+safetyPassword+`"}}`), res
+	return settingsFile(t, `{"realmd":"127.0.0.1:1","world_addr":"`+ln.Addr().String()+`","rpc":"127.0.0.1:0","rpc_token":"`+testRPCToken+`","accounts":{"harness":"`+safetyPassword+`"}}`), res
 }
 
 func reconnectTicket() *auth.Ticket {

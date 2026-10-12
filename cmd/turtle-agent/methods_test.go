@@ -58,6 +58,7 @@ func newRigAt(t *testing.T, opts session.Options, pos [3]float32) *agentRig {
 	r.s = session.New(conn, opts)
 	go func() { r.run <- r.s.Run(context.Background()) }()
 	srv := rpc.NewServer()
+	srv.DisableAuth() // the method tests are about the methods; login tests cover the token
 	registerMethods(srv, r.s)
 	r.ts = httptest.NewServer(srv.Handler())
 	t.Cleanup(r.ts.Close)

@@ -45,7 +45,7 @@ users can read):
 ```
 
 Only `realmd` and `accounts` are required. `rpc` must be a loopback address. `realm` and `world_addr` override what the
-realm list returns; `bots`, `spot` and `test_spell` are optional hints for scripts. `mmaps_dir` is a folder holding
+realm list returns; `rpc_token` and `rpc_auth` set the [RPC authentication](#rpc-authentication); `bots`, `spot` and `test_spell` are optional hints for scripts. `mmaps_dir` is a folder holding
 copies of the server's navmesh files, for `path_to` and `walk_path` (see [Navmesh walking](#navmesh-walking)), and to
 land falls and knockbacks on the ground (see [Falling](#falling-and-knockbacks)).
 
@@ -131,7 +131,44 @@ the flag (status stays up for 30 s, then exit 6). `--reconnect` cannot be combin
 ## JSON-RPC API
 
 JSON-RPC 2.0 over HTTP POST on the loopback address (`Content-Type: application/json`, no batches). Requests from a
-browser (`Origin` header) and other `Host` names are refused.
+browser (`Origin` header) and other `Host` names are refused (403). Every call must also carry the bearer token, see
+[RPC authentication](#rpc-authentication); without it the answer is a bare `401 unauthorized`.
+
+### RPC authentication
+
+Loopback binding keeps other machines and browsers out, not other local processes (or, under WSL2, probably Windows
+processes through localhost forwarding; inferred, not tested). Any of them could otherwise drive the character,
+`gm` commands included. So every call needs `Authorization: Bearer <token>`:
+
+- At start the agent makes a random token (32 bytes from `crypto/rand`, 43 characters) and writes it, mode 0600, to
+  `rpc-<port>.token` in the **folder of the settings file** (`~/.config/turtle-agent/rpc-8765.token` for the default
+  settings and port; the port is the one actually bound, so `--rpc 127.0.0.1:0` works too). The startup line
+  `rpc: calls need the token in <file>` names the file, never the token. The file is removed at exit; after a crash a
+  stale one stays until the next start on that port replaces it (a client that reads it meanwhile gets 401). The
+  agent removes the file only while it still holds its own token, so a restart on the same port keeps its new file;
+  it refuses to write into a world-writable folder, and fleet refuses to read a token file that is a symlink, not a
+  regular file, or readable by group or others (clients should do the same).
+- Or set the token yourself: `"rpc_token": "<16+ visible ASCII characters>"` in the settings file. No file is written then,
+  and every agent started from that settings file (a whole fleet) shares the token.
+- A missing or wrong token, a wrong scheme or an empty one gets `401` with the body `unauthorized` and nothing else; the
+  check runs before the body is read or the method looked up, and compares SHA-256 digests in constant time. The
+  loopback, `Host`, `Origin` and `Sec-Fetch-Site` checks stay in front of it.
+- Transition switch: `"rpc_auth": "off"` in the settings file turns the check off (default `"on"`). The agent then writes no
+  file and says on stderr that authentication is OFF. It is for old scripts that cannot send a header yet; remove it
+  once they can. `rpc_auth: "off"` together with an `rpc_token` is refused.
+
+curl (the file ends in a newline; `$(...)` drops it):
+
+```sh
+TOKEN=$(cat ~/.config/turtle-agent/rpc-8765.token)
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"status"}' http://127.0.0.1:8765/rpc
+rpc() { curl -s -H "Authorization: Bearer $(cat ~/.config/turtle-agent/rpc-${PORT:-8765}.token)" \
+  -H 'Content-Type: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":${2:-{\}}}" "http://127.0.0.1:${PORT:-8765}/rpc"; echo; }
+```
+
+Python (`urllib`): read the token file, strip it, and add `"Authorization": "Bearer " + token` to the request headers.
 
 | Method | Params | Result |
 | --- | --- | --- |
@@ -484,6 +521,9 @@ bin/turtle-agent fleet --config fleet.json --settings other.json --stagger 3s --
   fleet file, on a command line or in output. Every account in the fleet file must exist in the settings file.
 - `rpc` must be a loopback address with a fixed port (no port 0), and ports and characters must be distinct. The
   supervisor polls each port's `status` method.
+- RPC tokens: each child generates its own and writes `rpc-<port>.token` next to the settings file (one file per member
+  port); the supervisor reads the right one for each poll. With `rpc_token` in the settings file every child shares that
+  token. Clients of a fleet read the file of the member they talk to.
 - Children start `--stagger` apart (default 2 s, realmd throttles logins). When all are `in_world` the supervisor prints a
   table of character, RPC address and state; each child's log goes to stderr with a `[Character]` prefix.
 - Ctrl-C (or SIGTERM) sends one interrupt to every child so they all log out cleanly; a child that has not exited after 60 s
@@ -530,7 +570,10 @@ produce and must fail with exactly those. Offline only: not run against a live s
 
 The companion test harness (wow-play-harness, not public yet) has a `HeadlessClient` that wraps this API
 with the same calls as its real-client backend (`chat`, `gm`, `state`, `tail_chat`, `tail_combat_log`,
-`fight_report`, `live_lines`), plus MCP tools and a scripted fight (`tools/headless_mvp.py`).
+`fight_report`, `live_lines`), plus MCP tools and a scripted fight (`tools/headless_mvp.py`). There is no Python
+client in this repository; since the RPC needs a token, that client must send it (see
+[RPC authentication](#rpc-authentication)): read `rpc-<port>.token` from the settings folder (or take an `rpc_token`
+you set).
 
 ## Layout
 

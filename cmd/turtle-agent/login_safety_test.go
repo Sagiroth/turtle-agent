@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -16,9 +18,11 @@ import (
 	"time"
 
 	"github.com/pjerra/turtle-agent/internal/auth"
+	"github.com/pjerra/turtle-agent/internal/config"
 	"github.com/pjerra/turtle-agent/internal/game"
 	"github.com/pjerra/turtle-agent/internal/opcode"
 	"github.com/pjerra/turtle-agent/internal/packet"
+	"github.com/pjerra/turtle-agent/internal/rpc"
 	"github.com/pjerra/turtle-agent/internal/worldconn/worldtest"
 )
 
@@ -92,7 +96,7 @@ func worldScript(t *testing.T, script func(srv *worldtest.Server) error) (cfg st
 			return script(srv)
 		}()
 	}()
-	return settingsFile(t, `{"realmd":"127.0.0.1:1","world_addr":"`+ln.Addr().String()+`","rpc":"127.0.0.1:0","accounts":{"harness":"`+safetyPassword+`"}}`), res
+	return settingsFile(t, `{"realmd":"127.0.0.1:1","world_addr":"`+ln.Addr().String()+`","rpc":"127.0.0.1:0","rpc_token":"`+testRPCToken+`","accounts":{"harness":"`+safetyPassword+`"}}`), res
 }
 
 // answerLogouts answers each CMSG_LOGOUT_REQUEST with the next reason (0: accepted and
@@ -170,10 +174,20 @@ func TestRefusedLogoutRetriesUntilAccepted(t *testing.T) {
 	}
 }
 
+// testRPCToken is the rpc_token of the settings worldScript and the reconnect tests write;
+// rpcCall sends it.
+const testRPCToken = "test-rpc-token-0123456789"
+
 func rpcCall(t *testing.T, addr, method, params string) map[string]any {
 	t.Helper()
 	body := `{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":` + params + `}`
-	resp, err := http.Post("http://"+addr+"/rpc", "application/json", strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/rpc", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testRPCToken)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil
 	}
@@ -317,4 +331,134 @@ func TestSecondInterruptKills(t *testing.T) {
 	if ws, ok := ee.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGINT {
 		t.Fatalf("child did not die of SIGINT: %v", err)
 	}
+}
+
+// Without an rpc_token in the settings the agent generates one: rpc-<port>.token next to the
+// settings file, mode 0600, required on every call and removed again at exit.
+func TestLoginGeneratesRPCTokenFile(t *testing.T) {
+	setTimings(t, 35*time.Second, 2*time.Second, 20*time.Second)
+	cfg, done := worldScript(t, func(srv *worldtest.Server) error {
+		time.Sleep(300 * time.Millisecond)
+		return nil
+	})
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, []byte(strings.Replace(string(raw), `"rpc_token":"`+testRPCToken+`",`, "", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stderr syncBuffer
+	codeC, exited := make(chan int, 1), make(chan struct{})
+	go func() {
+		defer close(exited)
+		codeC <- run(ctx, []string{"login", "--config", cfg, "harness", "Harnessb"}, &bytes.Buffer{}, &stderr)
+	}()
+	t.Cleanup(func() { cancel(); <-exited })
+	var addr string
+	deadline := time.Now().Add(5 * time.Second)
+	for addr == "" && time.Now().Before(deadline) {
+		if _, rest, ok := strings.Cut(stderr.String(), "rpc: listening on http://"); ok {
+			addr, _, _ = strings.Cut(rest, "/rpc")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if addr == "" {
+		t.Fatalf("no rpc address: %q", stderr.String())
+	}
+	_, port, _ := net.SplitHostPort(addr)
+	path := filepath.Join(filepath.Dir(cfg), "rpc-"+port+".token")
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("token file %v: %v", info, err)
+	}
+	tok, err := rpc.ReadTokenFile(path)
+	if err != nil || len(tok) < config.MinTokenLen {
+		t.Fatalf("token %q: %v", tok, err)
+	}
+	if strings.Contains(stderr.String(), tok) || !strings.Contains(stderr.String(), path) {
+		t.Fatalf("stderr must name the file and never the token: %q", stderr.String())
+	}
+	call := func(auth string) (int, string) {
+		req, _ := http.NewRequest(http.MethodPost, "http://"+addr+"/rpc", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"status"}`))
+		req.Header.Set("Content-Type", "application/json")
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	if code, body := call(""); code != http.StatusUnauthorized || strings.Contains(body, "state") {
+		t.Fatalf("no token: %d %q", code, body)
+	}
+	if code, _ := call("Bearer " + tok + "x"); code != http.StatusUnauthorized {
+		t.Fatalf("wrong token: %d", code)
+	}
+	if code, body := call("Bearer " + tok); code != http.StatusOK || !strings.Contains(body, `"state"`) {
+		t.Fatalf("right token: %d %q", code, body)
+	}
+	// The fleet supervisor finds the same token through the settings dir.
+	if got := fleetToken(config.Settings{}, cfg, addr); got != tok {
+		t.Fatalf("fleetToken %q, want the file's token", got)
+	}
+	<-done
+	cancel()
+	<-exited
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("token file left behind: %v", err)
+	}
+}
+
+func TestLoginAuthOffServesWithoutToken(t *testing.T) {
+	setTimings(t, 35*time.Second, 2*time.Second, 20*time.Second)
+	cfg, done := worldScript(t, func(srv *worldtest.Server) error {
+		time.Sleep(300 * time.Millisecond)
+		return nil
+	})
+	raw, _ := os.ReadFile(cfg)
+	if err := os.WriteFile(cfg, []byte(strings.Replace(string(raw), `"rpc_token":"`+testRPCToken+`"`, `"rpc_auth":"off"`, 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stderr syncBuffer
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		run(ctx, []string{"login", "--config", cfg, "harness", "Harnessb"}, &bytes.Buffer{}, &stderr)
+	}()
+	t.Cleanup(func() { cancel(); <-exited })
+	var addr string
+	deadline := time.Now().Add(5 * time.Second)
+	for addr == "" && time.Now().Before(deadline) {
+		if _, rest, ok := strings.Cut(stderr.String(), "rpc: listening on http://"); ok {
+			addr, _, _ = strings.Cut(rest, "/rpc")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if addr == "" {
+		t.Fatalf("no rpc address: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "authentication is OFF") {
+		t.Fatalf("no warning: %q", stderr.String())
+	}
+	if m, _ := filepath.Glob(filepath.Join(filepath.Dir(cfg), "rpc-*.token")); len(m) != 0 {
+		t.Fatalf("token file written with auth off: %v", m)
+	}
+	resp, err := http.Post("http://"+addr+"/rpc", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"status"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	<-done
 }

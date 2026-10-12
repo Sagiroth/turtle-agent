@@ -24,7 +24,7 @@ command -v "$LUA" >/dev/null 2>&1 || skip "$LUA not found (apt install lua5.1)"
 addon=$("$here/fetch.sh") || { [ -z "${TBM_ADDON_DIR:-}" ] || exit 1; skip "addon not cached and not downloadable"; }
 echo "tbm-contract: addon $(basename "$addon") ($(ls "$addon"/*.lua | wc -l) lua files), $("$LUA" -v 2>&1)"
 
-# mock.lua is a trimmed copy of the addon's tests/regression.lua as it was at this hash. A moved
+# internal/addonhost/lua/mock.lua is a trimmed copy of the addon's tests/regression.lua as it was at this hash. A moved
 # pin or a newer checkout that changed that file may have changed the widget API the addon uses.
 MOCK_SOURCE_SHA256=35bc760de48a725f5dff89f1989a63ed46379bd183b507d073a4c0b6a8de408a
 if [ -f "$addon/tests/regression.lua" ]; then

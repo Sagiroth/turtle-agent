@@ -344,7 +344,7 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	} else {
 		srv.SetToken(rpcToken)
 	}
-	registerMethodsFor(srv, cur.Load)
+	closeMethods := registerMethodsFor(srv, cur.Load, methodOptions{AddonDir: st.TBMAddonDir})
 	rctx, stopRPC := context.WithCancel(context.Background())
 	served := make(chan error, 1)
 	go func() { served <- rpc.Serve(rctx, ln, srv.Handler()) }()
@@ -353,6 +353,7 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		if served != nil {
 			<-served
 		}
+		closeMethods() // after the last call: the addon host and its sidecar
 	}()
 	fmt.Fprintf(stderr, "rpc: listening on http://%s/rpc\n", ln.Addr())
 

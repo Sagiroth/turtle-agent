@@ -24,7 +24,8 @@ if not addonDir or not linesFile then
 end
 local scriptDir = (arg[0]:match("^(.*)/[^/]*$")) or "."
 
-local H = dofile(scriptDir .. "/mock.lua")
+-- The mock is shared with the addon host (internal/addonhost), which embeds it.
+local H = dofile(scriptDir .. "/../../internal/addonhost/lua/mock.lua")
 
 -- Load the addon the way the client does: the .toc file order, then ADDON_LOADED.
 local toc = assert(io.open(addonDir .. "/TortoiseBotsManager.toc", "r"), "addon .toc not found in " .. addonDir)

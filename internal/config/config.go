@@ -42,6 +42,9 @@ type Settings struct {
 	// MmapsDir holds copies of the server's data/mmaps files (NNN.mmap, NNNyyxx.mmtile)
 	// for path_to and walk_path. A leading ~/ is the home folder.
 	MmapsDir string `json:"mmaps_dir,omitempty"`
+	// TBMAddonDir is the TortoiseBotsManager checkout addon_start runs (default: the pinned copy
+	// tools/tbmcontract/fetch.sh keeps under the working directory). A leading ~/ is the home folder.
+	TBMAddonDir string `json:"tbm_addon_dir,omitempty"`
 	// Addons overrides the addon list sent at world login (default: a stock 1.12.1 client's
 	// Blizzard_* set). It must include the four fingerprint addons, see worldconn.StockAddons.
 	Addons []string `json:"addons,omitempty"`
@@ -95,9 +98,11 @@ func Load(path string) (Settings, error) {
 	if s.RPC == "" {
 		s.RPC = DefaultRPC
 	}
-	if rest, ok := strings.CutPrefix(s.MmapsDir, "~/"); ok {
-		if home, err := os.UserHomeDir(); err == nil {
-			s.MmapsDir = filepath.Join(home, rest)
+	for _, p := range []*string{&s.MmapsDir, &s.TBMAddonDir} {
+		if rest, ok := strings.CutPrefix(*p, "~/"); ok {
+			if home, err := os.UserHomeDir(); err == nil {
+				*p = filepath.Join(home, rest)
+			}
 		}
 	}
 	if err := s.validate(); err != nil {

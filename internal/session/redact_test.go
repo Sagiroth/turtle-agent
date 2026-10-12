@@ -7,6 +7,7 @@ import (
 
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/game"
+	"github.com/pjerra/turtle-agent/internal/game/gametest"
 	"github.com/pjerra/turtle-agent/internal/opcode"
 )
 
@@ -28,11 +29,18 @@ func TestRedactorScrub(t *testing.T) {
 		"|CFF00FF00harness|r":           "|CFF00FF00<redacted>|r",
 		"|cff00ff0zHARNESS|r":           "|cff00ff0zHARNESS|r", // not an escape: z is no hex digit
 		"x|cff00ff00HARNESSb":           "x|cff00ff00HARNESSb",
-		"'harness's'":                   "'<redacted>'s'",
-		"(HARNESS)":                     "(<redacted>)",
-		"PW-SECRET in upper case":       "<redacted> in upper case",
-		"ünïcödé harness ünïcödé":       "ünïcödé <redacted> ünïcödé",
-		"harnes s is not a full match":  "harnes s is not a full match",
+		// So are a colour reset and a link's text marker (review: data.raw and addon text keep them).
+		"Account:|rHARNESS (id 5)":     "Account:|r<redacted> (id 5)",
+		"|Hplayer:HARNESS|hHARNESS|h":  "|Hplayer:<redacted>|h<redacted>|h",
+		"|RHARNESS and |HHARNESS":      "|R<redacted> and |H<redacted>",
+		"x|nHARNESS":                   "x|n<redacted>",
+		"x|rHARNESSb":                  "x|rHARNESSb",
+		"rHARNESS hHARNESS":            "rHARNESS hHARNESS", // no pipe: a plain word
+		"'harness's'":                  "'<redacted>'s'",
+		"(HARNESS)":                    "(<redacted>)",
+		"PW-SECRET in upper case":      "<redacted> in upper case",
+		"ünïcödé harness ünïcödé":      "ünïcödé <redacted> ünïcödé",
+		"harnes s is not a full match": "harnes s is not a full match",
 	} {
 		if got := r.scrub(in); got != want {
 			t.Errorf("scrub(%q) = %q, want %q", in, got, want)
@@ -75,5 +83,24 @@ func TestEchoedAccountNameIsRedacted(t *testing.T) {
 	}
 	if !strings.Contains(logBuf.String(), "SMSG_NOTIFICATION") || !strings.Contains(logBuf.String(), "no dump") || strings.Contains(logBuf.String(), "00000000") {
 		t.Fatalf("log %q", logBuf.String())
+	}
+}
+
+// Review fix: the raw line (data.raw) and addon text keep "|r" and "|h…|h" escapes, which
+// must not hide an account name from the whole-word match.
+func TestRawAndAddonTextAreRedacted(t *testing.T) {
+	h := start(t, Options{Redact: []string{"TESTACC"}})
+	h.enterWorld()
+	h.send(opcode.SMSGMessagechat, gametest.ChatPacket(game.ChatSystem, 0, 0, "", 0, "",
+		"|cff00ff00Account:|r|Hplayer:TESTACC|hTESTACC|h (id 5)", 0))
+	h.send(opcode.SMSGMessagechat, gametest.AddonMessage(me.GUID, "TBM", "INFO|rTESTACC|hTestAcc", 0))
+	h.logout()
+	sys := ofKind(h.s.Log(), events.KindSystem)
+	if len(sys) != 1 || sys[0].Data["raw"] != "|cff00ff00Account:|r|Hplayer:<redacted>|h<redacted>|h (id 5)" ||
+		sys[0].Text != "Account:<redacted> (id 5)" {
+		t.Fatalf("system %+v", sys)
+	}
+	if a := ofKind(h.s.Log(), events.KindAddon); len(a) != 1 || a[0].Text != "INFO|r<redacted>|h<redacted>" {
+		t.Fatalf("addon %+v", a)
 	}
 }

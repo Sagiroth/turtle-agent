@@ -52,11 +52,12 @@ var chatNames = map[ChatType]string{
 	ChatHardcore: "hardcore",
 }
 
-// sendable are the types HandleMessagechatOpcode reads as [target,] message (ChatHandler.cpp:276-300).
+// sendable are the types HandleMessagechatOpcode reads as [target or channel,] message
+// (ChatHandler.cpp:264-307 at 187af78).
 var sendable = map[ChatType]bool{
 	ChatSay: true, ChatParty: true, ChatRaid: true, ChatGuild: true, ChatOfficer: true, ChatYell: true,
 	ChatWhisper: true, ChatEmote: true, ChatRaidLeader: true, ChatRaidWarning: true, ChatBattleground: true,
-	ChatBattlegroundLeader: true, ChatHardcore: true,
+	ChatBattlegroundLeader: true, ChatHardcore: true, ChatChannel: true,
 }
 
 func (t ChatType) String() string {
@@ -73,10 +74,11 @@ func ChatTypeByName(name string) (ChatType, error) {
 			return t, nil
 		}
 	}
-	return 0, fmt.Errorf("chat type %q cannot be sent; use say, party, raid, guild, officer, yell, whisper, emote, raid_leader, raid_warning, battleground, battleground_leader or hardcore", name)
+	return 0, fmt.Errorf("chat type %q cannot be sent; use say, party, raid, guild, officer, yell, whisper, emote, raid_leader, raid_warning, battleground, battleground_leader, hardcore or channel", name)
 }
 
-// BuildMessageChat lays out CMSG_MESSAGECHAT (ChatHandler.cpp:176-300).
+// BuildMessageChat lays out CMSG_MESSAGECHAT (ChatHandler.cpp:176-307 at 187af78); to is
+// the whisper target or, for ChatChannel, the channel name.
 func BuildMessageChat(t ChatType, to, text string) ([]byte, error) {
 	if text == "" {
 		return nil, errors.New("chat: empty message")
@@ -91,6 +93,12 @@ func BuildMessageChat(t ChatType, to, text string) ([]byte, error) {
 	if t == ChatWhisper {
 		if to == "" {
 			return nil, errors.New("chat: a whisper needs a target name")
+		}
+		w.CString(to)
+	}
+	if t == ChatChannel {
+		if to == "" {
+			return nil, errors.New("chat: a channel message needs the channel name in to")
 		}
 		w.CString(to)
 	}

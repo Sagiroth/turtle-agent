@@ -4,9 +4,9 @@
 
 A headless World of Warcraft client for **vanilla 1.12 / Turtle WoW 1.18.1** servers (login build 7272, world build 5875).
 One process logs one character in, with no game window, and exposes it over a local JSON-RPC API. Use it to drive a
-test character from scripts or AI agents: chat and GM commands, party, units around you, target, attack, cast, short
-walks and GM teleports, raid icons, group loot rolls, equipping from the backpack, and an ordered event log of chat,
-combat, marks and rolls.
+test character from scripts or AI agents: chat, channels and GM commands, addon messages, NPC gossip, party, units
+around you, target, attack, cast, short walks and GM teleports, raid icons, group loot rolls, equipping from the
+backpack, and an ordered event log of chat, combat, marks and rolls.
 
 It was built to test server-side bots ([TortoiseBots](https://github.com/Sagiroth/TortoiseBots)) on a private test
 server: log in, hire or invite bots, start a fight, then read back the combat log and what each bot did.
@@ -83,7 +83,7 @@ browser (`Origin` header) and other `Host` names are refused.
 | Method | Params | Result |
 | --- | --- | --- |
 | `status` | | state, character, map, x/y/z, health, power, target, last event seq |
-| `chat` | `type` (say, party, yell, emote, guild, raid, whisper), `text`, `to` | |
+| `chat` | `type` (say, party, yell, emote, guild, raid, whisper, channel), `text`, `to` (whisper target or channel name) | |
 | `gm` | `text` (a `.`-command; the dot is added if missing) | |
 | `events` | `since`, `kinds`, `limit`, `wait_ms` | page: `events`, `next`, `more`, `dropped` |
 | `chat_log` | `since`, `limit` | chat and system events only |
@@ -100,12 +100,36 @@ browser (`Origin` header) and other `Host` names are refused.
 | `roll` | `roll_id` or `item_slot` (plus `looted` when two corpses share a slot), `choice` (need, greed, pass) | `roll_id`, `looted`, `item_slot`, `item_entry`, `choice` |
 | `inventory` | | backpack items (bag 255, slots 23-38): `bag`, `slot`, `guid`, `item_entry`, `count`; `item_entry` and `count` are 0 until the item's create block arrives |
 | `equip` | `item_entry`, or `slot` (and `bag`: 255 for the backpack, the default, or 19-22 for a bag) | the item sent; an empty slot is an error; a refusal arrives as an `inventory_error` event |
+| `addon_send` | `prefix`, `text`, `channel` (party, raid, guild, officer, raid_leader, raid_warning, battleground, battleground_leader, channel), `to` (channel name) | |
+| `tbm` | `command` (a `.bot` command without `.bot`), `via` (chat, the default, or addon) | `since` |
+| `tbm_handshake` | `via`, `wait_ms` (default 5000) | `since`, `next`, `version`, `caps`, `transport`, `roster[]`, `bot_state`, `errors`, `lines`, `complete` |
+| `join_channel` / `leave_channel` | `name`, `password` / `name` | |
+| `gossip_hello` | `guid`, `wait_ms` | `since`, `event` (the menu, with `wait_ms`) |
+| `gossip_select` | `guid`, `option`, `code` (coded options only), `wait_ms` | `since`, `event` (next menu or `gossip_complete`) |
 | `logout` | | |
 
 Events have `seq`, `time`, `kind`, `source`, `target`, `spell_id`, `amount`, `crit`, `text`, `party` and `data`.
 Kinds cover chat, system, whispers, melee, spell damage, periodic ticks, heals, energize, spell start/go/miss/fail,
 auras, deaths, kills, party changes, raid icons (`raid_mark`), group loot rolls (`loot_roll_start`, `loot_roll`, `loot_roll_won`,
 `loot_all_passed`, tied together by `data.roll_id`), refused equips (`inventory_error`) and session state. Cursors are exclusive; `dropped` says older events were evicted.
+A chat or system line whose colour codes were stripped keeps the original in `data.raw` (protocol lines such as
+`TBM:ROSTER|…|removing` lose `|r` otherwise).
+
+Addons, channels and NPCs:
+
+- `addon` events are LANG_ADDON chat, what the client raises as `CHAT_MSG_ADDON`: `source` is the sender, `text`
+  the payload after the tab, `data.prefix` and `data.type` (guild for replies the server sends you, party, raid, …).
+  The core accepts addon messages on the channels `addon_send` lists; it drops addon whispers, so `addon_send`
+  refuses them. A server with the addon channel switched off drops them all without an answer.
+- `tbm_handshake` sends what the TortoiseBotsManager addon sends on login (`.bot help`, then `.bot roster`) and
+  collects the module's `TBM:` reply, from system lines or `TBM` addon lines, up to the `TBM:TRANSPORT` trailer.
+  `via: addon` sends over the party addon channel instead, which the module only reads while you are grouped.
+- `channel_notify` events are `SMSG_CHANNEL_NOTIFY`: `data.notice` (you_joined, joined, left, not_member,
+  wrong_password, player_kicked, …), `data.channel`, the player concerned as `source` (a kick or ban: `target`
+  and who did it as `source`), and the client's line as `text` where it names no player by GUID.
+- `gossip` events carry an NPC menu: `source` is the NPC, `data.text_id`, `data.options[]` (`index`, `icon`,
+  `coded`, `text`) and `data.quests[]`. `gossip_select` only picks an option of the open menu; `gossip_complete`
+  closes it. An NPC out of reach does not answer `gossip_hello` at all.
 
 Text the server echoes back (for example the account name in a GM reply) is redacted before it reaches events, logs
 or replies.
@@ -152,10 +176,11 @@ with the same calls as its real-client backend (`chat`, `gm`, `state`, `tail_cha
 | --- | --- |
 | `internal/auth` | SRP6 and realmd: logon challenge/proof, realm list |
 | `internal/worldconn` | TCP framing, the 1.12 header cipher, auth session with the addon block |
-| `internal/session` | single-owner session loop: login, ping, chat, names, party, world, actions, combat, raid icons, loot rolls, inventory and equip, logout |
-| `internal/game` | packet codecs for chat, queries, groups, actions, the combat log, raid icons, loot rolls and items |
+| `internal/session` | single-owner session loop: login, ping, chat, addon messages, channels, gossip, names, party, world, actions, combat, raid icons, loot rolls, inventory and equip, logout |
+| `internal/game` | packet codecs for chat, addon messages, channels, gossip, queries, groups, actions, the combat log, raid icons, loot rolls and items |
 | `internal/objects` | update-object parser and the object store: units, and the items in the backpack and bags |
 | `internal/events` | ordered event log with cursors |
+| `internal/tbm` | the TortoiseBots addon (TBM) protocol: handshake commands and the `TBM:` reply lines |
 | `internal/capture` | packet capture files and the secret scan |
 | `internal/rpc`, `internal/netutil` | loopback JSON-RPC server |
 | `cmd/turtle-agent` | the CLI (`login`, `fleet`, capture tools) |

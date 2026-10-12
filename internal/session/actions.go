@@ -422,6 +422,7 @@ func (s *Session) onTeleportAck(body []byte) error {
 		return nil
 	}
 	s.stopWalk(errors.New("teleported by the server"), false)
+	s.gossip = nil // the client closes an NPC window when the player is moved away
 	s.mu.Lock()
 	s.pos = [4]float32{a.Move.X, a.Move.Y, a.Move.Z, a.Move.O}
 	s.mu.Unlock()
@@ -451,6 +452,7 @@ func (s *Session) onNewWorld(body []byte) error {
 		return err
 	}
 	s.stopWalk(errors.New("teleported to another map"), false)
+	s.gossip = nil
 	s.mu.Lock()
 	s.mapID, s.pos = nw.Map, [4]float32{nw.X, nw.Y, nw.Z, nw.O}
 	s.target = 0

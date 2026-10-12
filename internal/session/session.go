@@ -179,6 +179,7 @@ type Session struct {
 	markWaiters     []markWaiter
 	rolls           map[rollKey]*openRoll
 	lastRollID      uint64
+	gossip          *game.GossipMenu // the open gossip menu, nil once closed
 }
 
 func New(conn *worldconn.Conn, opts Options) *Session {
@@ -230,6 +231,7 @@ func (s *Session) register() {
 	s.registerRaid()
 	s.registerLoot()
 	s.registerItems()
+	s.registerSocial()
 }
 
 func (s *Session) registerCore() {

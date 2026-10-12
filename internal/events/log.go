@@ -42,6 +42,11 @@ const (
 	KindLootAllPassed = "loot_all_passed" // SMSG_LOOT_ALL_PASSED
 	// KindInventoryError is SMSG_INVENTORY_CHANGE_FAILURE: an equip or move the server refused.
 	KindInventoryError = "inventory_error"
+	KindAddon          = "addon" // LANG_ADDON chat: prefix, text and sender (CHAT_MSG_ADDON in the client)
+	// KindChannelNotify is SMSG_CHANNEL_NOTIFY: joined, left, kicked, wrong password, …
+	KindChannelNotify  = "channel_notify"
+	KindGossip         = "gossip"          // SMSG_GOSSIP_MESSAGE: an NPC's menu
+	KindGossipComplete = "gossip_complete" // SMSG_GOSSIP_COMPLETE: the menu closed
 )
 
 // ChatKinds is what the chat_log method returns.

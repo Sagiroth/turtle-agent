@@ -178,6 +178,7 @@ func registerMethods(srv *rpc.Server, s *session.Session) {
 		it, err := s.Equip(ctx, session.EquipRef{Entry: p.ItemEntry, Bag: p.Bag, Slot: p.Slot})
 		return it, rpcErr(err)
 	}))
+	registerSocialMethods(srv, s)
 }
 
 // readEvents long-polls up to waitMS (at most 25 s) until a matching event exists. A

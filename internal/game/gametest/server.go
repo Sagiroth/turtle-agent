@@ -75,6 +75,7 @@ func SpellStart(caster packet.GUID, spell, castTime uint32, target packet.GUID) 
 }
 
 // SpellGo is Spell::SendSpellGo (Spell.cpp:4649-4688, :4758-4809), cast flags CAST_FLAG_UNKNOWN9.
+// len(missCodes) must equal len(missGUIDs).
 func SpellGo(caster packet.GUID, spell uint32, hits, missGUIDs []packet.GUID, missCodes []uint8, target packet.GUID) []byte {
 	w := packet.NewWriter().PackedGUID(caster).PackedGUID(caster).U32(spell).U16(0x0100).U8(uint8(len(hits)))
 	for _, h := range hits {

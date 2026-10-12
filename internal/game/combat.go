@@ -141,7 +141,7 @@ type PeriodicLog struct {
 func ParsePeriodicAuraLog(body []byte) (PeriodicLog, error) {
 	r := packet.NewReader(body)
 	p := PeriodicLog{Target: r.PackedGUID(), Caster: r.PackedGUID(), SpellID: r.U32()}
-	n := r.U32()
+	n := r.U32() // the core always writes 1 (Unit.cpp:4713); 16 only guards a hostile count
 	if n > 16 {
 		return PeriodicLog{}, fmt.Errorf("SMSG_PERIODICAURALOG: %d ticks", n)
 	}
@@ -352,9 +352,14 @@ func ParseSpellLogMiss(body []byte) (SpellLogMiss, error) {
 	r := packet.NewReader(body)
 	m := SpellLogMiss{SpellID: r.U32(), Caster: r.GUID()}
 	extra := r.U8() != 0 // two floats per target when set; the core never sets it
+	// The count is uncapped in the core (Spell.cpp:4956), so bound it by the bytes left.
 	n := r.U32()
-	if n > 64 {
-		return SpellLogMiss{}, fmt.Errorf("SMSG_SPELLLOGMISS: %d targets", n)
+	per := uint64(9)
+	if extra {
+		per = 17
+	}
+	if uint64(n)*per > uint64(r.Remaining()) {
+		return SpellLogMiss{}, fmt.Errorf("SMSG_SPELLLOGMISS: %d targets in %d bytes", n, r.Remaining())
 	}
 	for i := uint32(0); i < n; i++ {
 		m.Misses = append(m.Misses, SpellMiss{Target: r.GUID(), Reason: r.U8()})

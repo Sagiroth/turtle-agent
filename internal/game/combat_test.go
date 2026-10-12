@@ -59,6 +59,15 @@ func TestPeriodicKinds(t *testing.T) {
 			t.Fatalf("%s: %+v %v", c.kind, p, err)
 		}
 	}
+	leech := packet.NewWriter().PackedGUID(wolf).PackedGUID(gorm).U32(5138).U32(1).U32(game.AuraPeriodicManaLeech).
+		U32(0).U32(42).F32(1.5).Bytes() // Unit.cpp:4733-4737
+	p, err := game.ParsePeriodicAuraLog(leech)
+	if err != nil || len(p.Ticks) != 1 || p.Ticks[0].Kind() != "leech" || p.Ticks[0].Amount != 42 || p.Ticks[0].Multiplier != 1.5 {
+		t.Fatalf("leech: %+v %v", p, err)
+	}
+	if _, err := game.ParsePeriodicAuraLog(leech[:len(leech)-1]); err == nil {
+		t.Fatal("leech tick without its multiplier accepted")
+	}
 	bad := packet.NewWriter().PackedGUID(wolf).PackedGUID(gorm).U32(1).U32(1).U32(99).Bytes()
 	if _, err := game.ParsePeriodicAuraLog(bad); err == nil {
 		t.Fatal("unknown aura type accepted")
@@ -127,5 +136,25 @@ func TestProcResist(t *testing.T) {
 	p, err := game.ParseProcResist(gametest.ProcResist(gorm, wolf, 16257))
 	if err != nil || p != (game.ProcResist{Caster: gorm, Target: wolf, SpellID: 16257}) {
 		t.Fatalf("%+v %v", p, err)
+	}
+}
+
+// SMSG_SPELLLOGMISS's count is uncapped in the core (Spell.cpp:4956): a real long list parses, a
+// count the remaining bytes cannot hold is rejected before the loop.
+func TestSpellLogMissCountBoundedByBytes(t *testing.T) {
+	w := packet.NewWriter().U32(133).GUID(gorm).U8(0).U32(100)
+	for i := 0; i < 100; i++ {
+		w.GUID(wolf + packet.GUID(i)).U8(2)
+	}
+	if m, err := game.ParseSpellLogMiss(w.Bytes()); err != nil || len(m.Misses) != 100 || m.Misses[99].Target != wolf+99 {
+		t.Fatalf("100 targets: %d %v", len(m.Misses), err)
+	}
+	hostile := packet.NewWriter().U32(133).GUID(gorm).U8(0).U32(0xFFFFFFFF).GUID(wolf).U8(2).Bytes()
+	if _, err := game.ParseSpellLogMiss(hostile); err == nil {
+		t.Fatal("count 0xFFFFFFFF in 9 bytes accepted")
+	}
+	extra := packet.NewWriter().U32(133).GUID(gorm).U8(1).U32(2).GUID(wolf).U8(2).F32(0).F32(0).GUID(wolf).U8(2).Bytes()
+	if _, err := game.ParseSpellLogMiss(extra); err == nil {
+		t.Fatal("two extra-float targets in 26 bytes accepted")
 	}
 }

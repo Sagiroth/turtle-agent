@@ -149,7 +149,7 @@ func (f *fallState) at(now time.Time) [3]float32 {
 }
 
 // descending says the flight is coming down at now, past its start: the packets then carry
-// MoveFallingFar besides MoveJumping (see currentFlags).
+// MoveFallingFar besides MoveJumping (see moveInfoAt).
 func (f *fallState) descending(now time.Time) bool {
 	return now.After(f.start) && game.FallSpeed(now.Sub(f.start).Seconds(), f.v0, f.term) > 0
 }

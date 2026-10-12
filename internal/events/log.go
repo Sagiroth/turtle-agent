@@ -83,10 +83,34 @@ const (
 // ChatKinds is what the chat_log method returns.
 var ChatKinds = []string{KindChat, KindWhisper, KindSystem}
 
+// now is the wall clock; tests replace it.
+var now = time.Now
+
+// base is taken once per process. Its monotonic reading is the zero of mono_ms.
+var base = now()
+
+// BaseTime is the wall time mono_ms counts from.
+func BaseTime() time.Time { return base }
+
+// MonoMS is the milliseconds elapsed since BaseTime on the monotonic clock.
+func MonoMS() int64 { return int64(now().Sub(base) / time.Millisecond) }
+
+// Stamp sets Time and MonoMS of e unless Time is already set. Time is base plus the monotonic
+// elapsed time, so it advances smoothly and ignores steps of the host clock.
+func Stamp(e *Event) {
+	if !e.Time.IsZero() {
+		return
+	}
+	d := now().Sub(base)
+	e.Time = base.Add(d)
+	e.MonoMS = int64(d / time.Millisecond)
+}
+
 // Event is one log entry. Names are resolved by the session before Append.
 type Event struct {
 	Seq        uint64         `json:"seq"`
 	Time       time.Time      `json:"time"`
+	MonoMS     int64          `json:"mono_ms"` // ms since BaseTime on the monotonic clock; unaffected by wall-clock steps
 	Kind       string         `json:"kind"`
 	Source     string         `json:"source,omitempty"`
 	SourceGUID packet.GUID    `json:"source_guid,omitempty"`
@@ -142,9 +166,7 @@ func (l *Log) Append(e Event) Event {
 	defer l.mu.Unlock()
 	l.last++
 	e.Seq = l.last
-	if e.Time.IsZero() {
-		e.Time = time.Now()
-	}
+	Stamp(&e)
 	if len(l.buf) >= l.limit {
 		n := copy(l.buf, l.buf[l.limit/10:])
 		clear(l.buf[n:])

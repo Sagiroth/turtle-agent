@@ -114,7 +114,7 @@ browser (`Origin` header) and other `Host` names are refused.
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `status` | | state, character, map, x/y/z, `falling`, `z_unknown`, health, power, target, last event seq |
+| `status` | | state, character, map, x/y/z, `falling`, `z_unknown`, health, power, target, last event seq, `mono_ms` and `base_time` (the monotonic axis of events: `time` of mono_ms 0) |
 | `chat` | `type` (say, party, yell, emote, guild, raid, whisper, channel), `text`, `to` (whisper target or channel name) | |
 | `gm` | `text` (a `.`-command; the dot is added if missing) | |
 | `events` | `since`, `kinds`, `limit`, `wait_ms` | page: `events`, `next`, `more`, `dropped` |
@@ -167,7 +167,7 @@ browser (`Origin` header) and other `Host` names are refused.
 | `quest_log` | | `quests[]` from the character's own quest log: `slot`, `quest_id`, `complete`, `failed`, `counts[4]` |
 | `logout` | | `outcome` (`complete` or `closed_by_server`); `lost` (-32002) and `timeout` (-32004) are errors with `data.outcome`; the reply is written before the process exits |
 
-Events have `seq`, `time`, `kind`, `source`, `target`, `spell_id`, `amount`, `crit`, `text`, `party` and `data`.
+Events have `seq`, `time`, `mono_ms` (ms since the agent started, from the monotonic clock, so it never jumps with the host clock; `time` is the process start plus that elapsed time and also ignores clock steps), `kind`, `source`, `target`, `spell_id`, `amount`, `crit`, `text`, `party` and `data`.
 Kinds cover chat, system, whispers, melee, spell damage, periodic ticks, heals, energize, spell start/go/miss/fail,
 auras, deaths, kills, party changes, raid icons (`raid_mark`), group loot rolls (`loot_roll_start`, `loot_roll`, `loot_roll_won`,
 `loot_all_passed`, tied together by `data.roll_id`), refused equips and item uses (`inventory_error`), NPC dealings (vendor, trainer and quest events, see

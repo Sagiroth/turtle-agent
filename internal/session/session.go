@@ -139,6 +139,8 @@ type StatusInfo struct {
 	Unknown     map[string]int `json:"unknown_opcodes"`
 	ParseErrors int            `json:"parse_errors"`
 	LastSeq     uint64         `json:"last_seq"`
+	MonoMS      int64          `json:"mono_ms"`   // ms since base_time on the monotonic clock, as in events
+	BaseTime    time.Time      `json:"base_time"` // wall time of mono_ms 0
 	Error       string         `json:"error,omitempty"`
 }
 
@@ -332,7 +334,7 @@ func (s *Session) Status() StatusInfo {
 		State: s.state, Character: s.self.Name, GUID: s.self.GUID, Level: s.self.Level, Map: s.mapID,
 		X: s.pos[0], Y: s.pos[1], Z: s.pos[2], O: s.pos[3], Target: s.target, LatencyMS: s.latency,
 		Falling: s.falling, ZUnknown: s.zUnknown,
-		Unknown: unknown, ParseErrors: s.parseErrs, LastSeq: s.log.Last(), Error: s.lastErr,
+		Unknown: unknown, ParseErrors: s.parseErrs, LastSeq: s.log.Last(), MonoMS: events.MonoMS(), BaseTime: events.BaseTime(), Error: s.lastErr,
 	}
 	// The player's own values from the store (zero until its create block arrives).
 	if u, ok := s.store.Get(s.self.GUID, s.pos[0], s.pos[1], s.pos[2]); ok {
@@ -440,9 +442,7 @@ func (s *Session) send(ctx context.Context, op uint16, body []byte) error {
 // emit queues e behind events still waiting for names and appends whatever is ready.
 // The names of e are asked for at once, so its wait overlaps the waits ahead of it.
 func (s *Session) emit(e events.Event) {
-	if e.Time.IsZero() {
-		e.Time = time.Now()
-	}
+	events.Stamp(&e)
 	s.fillNames(&e)
 	party := s.partyInvolved(e.SourceGUID) || s.partyInvolved(e.TargetGUID)
 	s.names.waiting = append(s.names.waiting, pendingEvent{e: e, until: time.Now().Add(s.opts.NamesWait), party: party})

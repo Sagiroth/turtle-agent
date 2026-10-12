@@ -33,6 +33,7 @@ func TestRedactorScrub(t *testing.T) {
 		"Account:|rHARNESS (id 5)":     "Account:|r<redacted> (id 5)",
 		"|Hplayer:HARNESS|hHARNESS|h":  "|Hplayer:<redacted>|h<redacted>|h",
 		"|RHARNESS and |HHARNESS":      "|R<redacted> and |H<redacted>",
+		"x|nHARNESS":                   "x|n<redacted>",
 		"x|rHARNESSb":                  "x|rHARNESSb",
 		"rHARNESS hHARNESS":            "rHARNESS hHARNESS", // no pipe: a plain word
 		"'harness's'":                  "'<redacted>'s'",

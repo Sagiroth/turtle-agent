@@ -503,3 +503,42 @@ func TestMarkMethod(t *testing.T) {
 		t.Fatalf("%v", e)
 	}
 }
+
+func TestRollMethod(t *testing.T) {
+	r := newRig(t)
+	const wolf packet.GUID = 0xF13000012B000001
+	r.srv.Send(opcode.SMSGGroupList, gametest.GroupList(0x2A, game.GroupMember{Name: "Gorm", GUID: 0x30, Status: game.MemberOnline}))
+	r.expect(opcode.CMSGRequestPartyMemberStats)
+	r.srv.Send(opcode.SMSGLootStartRoll, gametest.LootStartRoll(wolf, 2, 2589, 0, 60000))
+	r.expect(opcode.CMSGCreatureQuery)
+	r.wolfName()
+	out := r.eventually("events", `{"since":0,"kinds":["loot_roll_start"]}`, func(m map[string]any) bool {
+		return len(m["result"].(map[string]any)["events"].([]any)) == 1
+	})
+	d := out["result"].(map[string]any)["events"].([]any)[0].(map[string]any)["data"].(map[string]any)
+	if d["roll_id"] != float64(1) || d["item_slot"] != float64(2) || d["item_entry"] != float64(2589) || d["looted"] != "0xF13000012B000001" {
+		t.Fatalf("start %v", d)
+	}
+	if out := r.call("roll", `{"item_slot":2,"choice":"disenchant"}`); errCode(out) != rpc.CodeGame {
+		t.Fatalf("bad choice %v", out)
+	}
+	res := r.call("roll", `{"item_slot":2,"choice":"greed"}`)
+	if out := res["result"].(map[string]any); out["roll_id"] != float64(1) || out["choice"] != "greed" || out["item_entry"] != float64(2589) {
+		t.Fatalf("%v", res)
+	}
+	if p, err := r.srv.Expect(opcode.CMSGLootRoll, 2*time.Second); err != nil || !bytes.Equal(p.Body, game.BuildLootRoll(wolf, 2, game.RollGreed)) {
+		t.Fatalf("% X %v", p.Body, err)
+	}
+	if out := r.call("roll", `{"roll_id":1,"looted":"0xF13000012B000001","choice":"pass"}`); out["error"] != nil {
+		t.Fatalf("%v", out)
+	}
+	r.expect(opcode.CMSGLootRoll)
+	r.srv.Send(opcode.SMSGLootRoll, gametest.LootRoll(wolf, 2, 0x30, 2589, 0, 0, 0))
+	out = r.eventually("events", `{"since":0,"kinds":["loot_roll"]}`, func(m map[string]any) bool {
+		return len(m["result"].(map[string]any)["events"].([]any)) == 1
+	})
+	e := out["result"].(map[string]any)["events"].([]any)[0].(map[string]any)
+	if e["source"] != "Gorm" || e["party"] != true || e["data"].(map[string]any)["choice"] != "need" {
+		t.Fatalf("%v", e)
+	}
+}

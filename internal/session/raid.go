@@ -13,8 +13,7 @@ import (
 	"github.com/pjerra/turtle-agent/internal/packet"
 )
 
-// registerPlayer installs the handlers of the player actions bots react to.
-func (s *Session) registerPlayer() {
+func (s *Session) registerRaid() {
 	s.handlers[opcode.MSGRaidTargetUpdate] = s.onRaidTargetUpdate
 }
 

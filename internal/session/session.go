@@ -177,6 +177,8 @@ type Session struct {
 	splineUntil     time.Time // a server spline moves the player until then
 	teleportWaiters []chan struct{}
 	markWaiters     []markWaiter
+	rolls           map[rollKey]*openRoll
+	lastRollID      uint64
 }
 
 func New(conn *worldconn.Conn, opts Options) *Session {
@@ -211,7 +213,7 @@ func New(conn *worldconn.Conn, opts Options) *Session {
 		conn: conn, opts: opts, log: opts.Log, logger: opts.Logger,
 		handlers: map[uint16]handler{}, reqs: make(chan request), done: make(chan struct{}),
 		ready: make(chan struct{}), start: time.Now(), state: StatusConnecting, unknown: map[uint16]int{},
-		names: newNameCache(), store: opts.Store, runSpeed: defaultRunSpeed, redact: newRedactor(opts.Redact, opts.RedactAnywhere),
+		names: newNameCache(), store: opts.Store, rolls: map[rollKey]*openRoll{}, runSpeed: defaultRunSpeed, redact: newRedactor(opts.Redact, opts.RedactAnywhere),
 	}
 	s.register()
 	return s
@@ -225,7 +227,8 @@ func (s *Session) register() {
 	s.registerWorld()
 	s.registerActions()
 	s.registerCombat()
-	s.registerPlayer()
+	s.registerRaid()
+	s.registerLoot()
 }
 
 func (s *Session) registerCore() {

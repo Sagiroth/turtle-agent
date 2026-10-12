@@ -78,6 +78,7 @@ func (s *Session) sendMove(op uint16, mi game.MoveInfo, body []byte) error {
 // serverPosition records a position the server put the player at. zKnown is false when
 // the z may be in the air (a GM teleport); the next position from the server settles it.
 func (s *Session) serverPosition(p [3]float32, zKnown bool) {
+	s.resolveFall() // a flight still waiting for its trace announces itself first
 	s.fall = nil
 	s.placed++
 	s.last = lastMove{pos: p, ctime: s.last.ctime}
@@ -243,6 +244,7 @@ func (s *Session) onKnockBack(body []byte) error {
 	// navmesh (which may read a tile first), as the server drops a knockback whose ack has
 	// not come within Movement.PendingAckResponseTime (2 s, World.cpp:1348, Unit.cpp:7264).
 	term := fallTerm(s.toggles)
+	s.resolveFall() // a flight still waiting for its trace announces itself first
 	s.fall = &fallState{kb: k, began: now, startZ: from[2], floor: s.floorFunc(), from: from, start: now,
 		v0: max(min(float64(k.ZSpeed), term), -term), term: term, land: now.Add(maxFlight), nextBeat: now.Add(500 * time.Millisecond)}
 	s.mu.Lock()
@@ -276,7 +278,11 @@ func (s *Session) tickFall() error {
 		if now.Before(f.traceBy) {
 			return nil // no beat, nor landing, on an arc the trace may still bend
 		}
-		f.late = true // the planner is busy: keep the guess
+		// The planner is busy: keep a guess, and one that comes straight back down where
+		// the arc began, on ground the server knows, rather than the arc's own guess, which
+		// up a slope lands under the terrain (#31). No beat went out meanwhile to say otherwise.
+		f.late, f.frozen = true, true
+		f.guess()
 		s.resolveFall()
 	}
 	if !now.Before(f.land) {

@@ -491,8 +491,10 @@ a far teleport (`SMSG_NEW_WORLD`) does not fall either; landing in water sends `
 The floor search never runs in the session loop, so heartbeats, order acks and pings stay on time while it reads a
 tile (0.5-3 MB) or waits for the planner. After a knockback (or feather-fall) the ack goes out first, as the server
 drops an order not acked within 2 s; the flight then waits up to 300 ms for the trace, sending nothing (the next
-heartbeat is then at most 600 ms after the ack), and keeps the guess landing (`floor_late`) when the trace has not
-answered by then; `knocked_back` is emitted once the landing is known. After a GM teleport the player stands still where
+heartbeat is then at most 600 ms after the ack). When the trace has not answered by then, the flight goes straight up
+and down where it began, on ground the server knows, and lands back there (`floor` `guess`, `floor_late` true): the
+plain guess, the arc's x and y at its starting height, would land under the terrain up a slope. `knocked_back` is
+emitted once the landing is known, or when a teleport or another knockback ends the flight first. After a GM teleport the player stands still where
 it was put until the search answers, then falls or settles z as above; an answer that comes after the player has moved
 again (a walk, a knockback, another teleport) is dropped. `path_to`/`walk_path` read their tiles without holding the
 planner, so a floor query waits behind a plan's Detour search only, not its disk reads. A missing tile is looked up

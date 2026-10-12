@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -399,8 +400,12 @@ func TestStalledPlannerKeepsTheLoopOnTime(t *testing.T) {
 			t.Fatalf("step %d: %d ms after the one before", i, gap)
 		}
 	}
-	if lm.Z != ack.Z {
-		t.Fatalf("landing %+v, want the guess at z %.1f", lm, ack.Z)
+	// Late: straight up and down where the arc began, on ground the server knows.
+	if lm.X != ack.X || lm.Y != ack.Y || lm.Z != ack.Z {
+		t.Fatalf("landing %+v, want it back at the knockback's start %+v", lm, ack)
+	}
+	for i := 1; i < len(steps); i++ {
+		stepWithin(t, i, steps[i-1], steps[i], defaultRunSpeed)
 	}
 	close(stall.release) // the stalled queries answer now, too late
 	time.Sleep(100 * time.Millisecond)
@@ -420,5 +425,44 @@ func TestStalledPlannerKeepsTheLoopOnTime(t *testing.T) {
 		if e.Data["state"] == "falling" {
 			t.Fatalf("the teleport's late floor search started a fall: %v", e.Data)
 		}
+	}
+}
+
+// A teleport or a second knockback that ends a flight still waiting for its trace does not
+// lose the flight's knocked_back event: it is emitted, with the guess landing, before what
+// replaced it.
+func TestFlightReplacedWhileTracing(t *testing.T) {
+	tp := packet.NewWriter().PackedGUID(me.GUID).U32(7)
+	game.WriteMoveInfo(tp, game.MoveInfo{X: 1, Y: 2, Z: 30})
+	for _, c := range []struct {
+		name string
+		op   uint16
+		body []byte
+		ack  uint16
+		want string
+	}{
+		{"teleport", opcode.MSGMoveTeleportAck, tp.Bytes(), opcode.MSGMoveTeleportAck, "knocked_back,teleported"},
+		{"knockback", opcode.SMSGMoveKnockBack, gametest.KnockBack(me.GUID, 6, 1, 0, 5, -4), opcode.CMSGMoveKnockBackAck,
+			"knocked_back,knocked_back"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			stall := stalledPlanner{stall: 3 * time.Second, release: make(chan struct{})}
+			defer close(stall.release)
+			h := start(t, Options{Planner: stall})
+			h.enterWorld()
+			h.send(opcode.SMSGMoveKnockBack, gametest.KnockBack(me.GUID, 5, 0, 1, 8, -15))
+			h.expect(opcode.CMSGMoveKnockBackAck)
+			h.send(c.op, c.body)
+			h.expect(c.ack)
+			waitFor(t, func() bool {
+				var got []string
+				for _, e := range ofKind(h.s.Log(), events.KindSession) {
+					if st := e.Data["state"]; st == "knocked_back" || st == "teleported" {
+						got = append(got, st.(string))
+					}
+				}
+				return strings.Join(got, ",") == c.want
+			})
+		})
 	}
 }

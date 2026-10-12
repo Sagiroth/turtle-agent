@@ -201,6 +201,7 @@ func (s *Session) dropToFloor() {
 	p, o := [3]float32{s.pos[0], s.pos[1], s.pos[2]}, s.pos[3]
 	s.mu.Unlock()
 	placed, term := s.placed, fallTerm(s.toggles)
+	began := s.now() // the loop's clock, read on the loop; startDrop moves the flight to its start
 	go func() {
 		fl, err := floor(p[0], p[1], p[2]-fallReach, p[2]+standSlack)
 		if err != nil {
@@ -212,7 +213,6 @@ func (s *Session) dropToFloor() {
 		}
 		var f *fallState
 		if p[2]-g.Z > settleGap {
-			began := time.Unix(0, 0) // an epoch, not the loop's clock: startDrop moves the flight to its start
 			kb := game.KnockBack{Cos: float32(math.Cos(float64(o))), Sin: float32(math.Sin(float64(o)))}
 			f = &fallState{kb: kb, began: began, startZ: p[2], floor: floor}
 			f.arc(p, began, 0, term, false)

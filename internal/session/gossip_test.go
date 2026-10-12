@@ -118,3 +118,50 @@ func TestGossipOptionsAreRedacted(t *testing.T) {
 		t.Fatalf("%+v", q)
 	}
 }
+
+// A teleport, a new map or a new gossip_hello leaves the old menu behind, as in the client:
+// a select afterwards is refused instead of clicking a menu the server no longer offers.
+func TestGossipMenuClosesOnMoveAndNewHello(t *testing.T) {
+	h := start(t, Options{NamesWait: 50 * time.Millisecond})
+	h.enterWorld()
+	ctx := context.Background()
+	open := func() {
+		h.t.Helper()
+		h.send(opcode.SMSGGossipMessage, gametest.GossipMessage(recruiterGUID, 1, recruiterMenu, nil))
+		h.send(opcode.SMSGNotification, []byte("menu\x00"))
+		if _, ok := waitText(h, "menu", 2*time.Second); !ok {
+			h.t.Fatal("menu not handled")
+		}
+		if err := h.s.GossipSelect(ctx, recruiterGUID, 0, ""); err != nil {
+			h.t.Fatal(err)
+		}
+		h.expect(opcode.CMSGGossipSelectOption)
+	}
+	refused := func(why string) {
+		h.t.Helper()
+		if err := h.s.GossipSelect(ctx, recruiterGUID, 0, ""); err == nil {
+			h.t.Fatalf("select after %s accepted", why)
+		}
+	}
+
+	open()
+	w := packet.NewWriter().PackedGUID(me.GUID).U32(7)
+	game.WriteMoveInfo(w, game.MoveInfo{X: 1, Y: 2, Z: 3})
+	h.send(opcode.MSGMoveTeleportAck, w.Bytes())
+	h.expect(opcode.MSGMoveTeleportAck)
+	refused("a teleport")
+
+	open()
+	h.send(opcode.SMSGNewWorld, packet.NewWriter().U32(1).F32(10).F32(20).F32(30).F32(0).Bytes())
+	h.expect(opcode.MSGMoveWorldportAck)
+	h.expect(opcode.CMSGSetActiveMover)
+	refused("a new map")
+
+	open()
+	if err := h.s.GossipHello(ctx, recruiterGUID+1); err != nil {
+		t.Fatal(err)
+	}
+	h.expect(opcode.CMSGGossipHello)
+	refused("a new gossip_hello")
+	h.logout()
+}

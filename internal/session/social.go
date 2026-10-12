@@ -68,7 +68,15 @@ func (s *Session) GossipHello(ctx context.Context, npc packet.GUID) error {
 	if npc == 0 {
 		return errors.New("gossip: no NPC guid")
 	}
-	return s.send(ctx, opcode.CMSGGossipHello, game.BuildGossipHello(npc))
+	_, err := s.do(ctx, func() (any, error) {
+		if err := s.inWorld(); err != nil {
+			return nil, err
+		}
+		// The old menu is gone once we talk to someone else, answer or not.
+		s.gossip = nil
+		return nil, s.conn.WritePacket(opcode.CMSGGossipHello, game.BuildGossipHello(npc))
+	})
+	return err
 }
 
 // GossipSelect picks an option of the open menu (CMSG_GOSSIP_SELECT_OPTION). Like the

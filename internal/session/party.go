@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 
 	"github.com/pjerra/turtle-agent/internal/events"
@@ -45,13 +46,36 @@ func (s *Session) registerParty() {
 	s.handlers[opcode.SMSGPartyMemberStatsFull] = s.onMemberStats
 }
 
-// Party returns a copy of the group; Members is never nil, so the RPC sends [].
+// Party returns a copy of the group; Members is never nil, so the RPC sends []. The server
+// sends SMSG_PARTY_MEMBER_STATS only to members out of range of each other
+// (Player::SendUpdateToOutOfRangeGroupMembers, Player.cpp:21101); a client reads a nearby
+// member's health from its unit fields. So a member the object store holds reports the
+// store's health, max health and level, and any other member keeps the last stats values.
 func (s *Session) Party() PartyInfo {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	p := s.party
 	p.Members = append([]PartyMember{}, s.party.Members...)
+	s.mu.Unlock()
+	for i := range p.Members {
+		m := &p.Members[i]
+		u, ok := s.store.Get(m.GUID, 0, 0, 0)
+		if !ok || u.MaxHealth == 0 {
+			continue
+		}
+		m.Health, m.MaxHealth = clamp16(u.Health), clamp16(u.MaxHealth)
+		if u.Level != 0 {
+			m.Level = clamp16(u.Level)
+		}
+	}
 	return p
+}
+
+// clamp16 fits a unit field into the party stats' 16-bit width.
+func clamp16(v uint32) uint16 {
+	if v > math.MaxUint16 {
+		return math.MaxUint16
+	}
+	return uint16(v)
 }
 
 func (s *Session) inParty(g packet.GUID) bool {

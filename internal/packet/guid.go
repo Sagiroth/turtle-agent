@@ -8,7 +8,8 @@ import (
 )
 
 // GUID is a 64-bit ObjectGuid; the high 16 bits are the HighGuid (ObjectGuid.h:68-77)
-// and, for creatures and game objects, bits 24-47 hold the entry.
+// and, for creatures and game objects, bits 24-47 hold the entry. A pet or guardian
+// (HIGHGUID_PET) keeps a pet number there instead (ObjectGuid.cpp:69-70).
 type GUID uint64
 
 const (
@@ -20,10 +21,20 @@ const (
 )
 
 func (g GUID) High() uint16     { return uint16(g >> 48) }
-func (g GUID) Entry() uint32    { return uint32(g>>24) & 0x00FFFFFF }
 func (g GUID) IsPlayer() bool   { return g != 0 && g.High() == HighPlayer }
 func (g GUID) IsCreature() bool { h := g.High(); return h == HighUnit || h == HighPet }
 func (g GUID) String() string   { return fmt.Sprintf("0x%016X", uint64(g)) }
+
+// Entry is the entry a creature or game-object GUID encodes, and 0 for every other
+// HighGuid, pets included: their bits 24-47 are a pet number. The object's
+// OBJECT_FIELD_ENTRY is the truth; this is the fallback while the values are unknown.
+func (g GUID) Entry() uint32 {
+	switch g.High() {
+	case HighUnit, HighGameObject, HighTransport:
+		return uint32(g>>24) & 0x00FFFFFF
+	}
+	return 0
+}
 
 // MarshalJSON writes a hex string: JSON numbers lose precision above 2^53.
 func (g GUID) MarshalJSON() ([]byte, error) { return json.Marshal(g.String()) }

@@ -29,11 +29,16 @@ func nameResponse(g packet.GUID, name string) []byte {
 // wolfGUID is a Young Wolf (entry 299) spawn.
 const wolfGUID packet.GUID = 0xF13000012B000001
 
-// wolfName answers a creature query for entry 299 the way QueryHandler.cpp:187-200 writes it.
+// creatureResponse answers a creature query for entry the way QueryHandler.cpp:187-200 writes it.
+func creatureResponse(entry uint32, name string) []byte {
+	return packet.NewWriter().U32(entry).CString(name).U8(0).U8(0).U8(0).CString("").
+		U32(0).U32(1).U32(1).U32(0).U32(0).U32(0).U32(161).U8(0).U8(0).Bytes()
+}
+
+// wolfName answers a creature query for entry 299.
 func wolfName(h *harness) {
 	h.t.Helper()
-	h.send(opcode.SMSGCreatureQueryResponse, packet.NewWriter().U32(299).CString("Young Wolf").U8(0).U8(0).U8(0).CString("").
-		U32(0).U32(1).U32(1).U32(0).U32(0).U32(0).U32(161).U8(0).U8(0).Bytes())
+	h.send(opcode.SMSGCreatureQueryResponse, creatureResponse(299, "Young Wolf"))
 }
 
 func TestChatAndGMSendMessagechat(t *testing.T) {

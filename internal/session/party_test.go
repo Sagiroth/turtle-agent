@@ -11,6 +11,7 @@ import (
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/game"
 	"github.com/pjerra/turtle-agent/internal/game/gametest"
+	"github.com/pjerra/turtle-agent/internal/objects"
 	"github.com/pjerra/turtle-agent/internal/opcode"
 	"github.com/pjerra/turtle-agent/internal/packet"
 )
@@ -170,4 +171,32 @@ func TestPartyNeedsWorld(t *testing.T) {
 	if err := h.s.Invite(context.Background(), " "); err == nil {
 		t.Fatal("blank invite accepted")
 	}
+}
+
+// The server sends member stats only to members out of range (Player.cpp:21101), so a
+// member the store sees reports the store's health, max health and level; one it does not
+// see, or no longer sees, keeps the stats packet's values.
+func TestPartyOverlaysVisibleMembers(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	brak := game.GroupMember{Name: "Brak", GUID: 0x31, Status: game.MemberOnline}
+	h.send(opcode.SMSGGroupList, gametest.GroupList(me.GUID, gorm, brak))
+	h.send(opcode.SMSGPartyMemberStatsFull, fullStats(0x30, 500, 600))
+	h.send(opcode.SMSGPartyMemberStatsFull, fullStats(0x31, 300, 400))
+	h.send(opcode.SMSGUpdateObject, unitCreate(0x30, objects.TypePlayer, me.X+3, me.Y, me.Z,
+		map[uint16]uint32{objects.UnitHealth: 450, objects.UnitMaxHealth: 700, objects.UnitLevel: 61}))
+	waitFor(t, func() bool {
+		p := h.s.Party()
+		return len(p.Members) == 2 && p.Members[0].Health == 450 && p.Members[1].Health == 300
+	})
+	p := h.s.Party()
+	if g, b := p.Members[0], p.Members[1]; g.MaxHealth != 700 || g.Level != 61 || b.MaxHealth != 400 || b.Level != 60 {
+		t.Fatalf("overlay %+v", p.Members)
+	}
+	h.send(opcode.SMSGDestroyObject, packet.NewWriter().GUID(0x30).Bytes())
+	waitFor(t, func() bool { return h.s.Party().Members[0].Health == 500 })
+	if g := h.s.Party().Members[0]; g.MaxHealth != 600 || g.Level != 60 {
+		t.Fatalf("fallback %+v", g)
+	}
+	h.logout()
 }

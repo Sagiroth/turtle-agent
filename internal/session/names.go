@@ -14,8 +14,10 @@ import (
 // nameQueryInterval spaces repeated name or creature queries for one GUID or entry.
 const nameQueryInterval = 5 * time.Second
 
-// nameCache maps player GUIDs and creature entries to names. mu guards the two maps,
-// which RPC goroutines read; the rest belongs to the owner loop.
+// nameCache maps player GUIDs and creature entries to names. A creature's entry comes
+// from the object store (OBJECT_FIELD_ENTRY), never from a pet's GUID bits, and a creature
+// whose entry is unknown (0) stays nameless and unasked until its values arrive. mu guards
+// the two maps, which RPC goroutines read; the rest belongs to the owner loop.
 type nameCache struct {
 	mu         sync.RWMutex
 	players    map[packet.GUID]string
@@ -54,8 +56,9 @@ func (c *nameCache) setCreature(entry uint32, name string) {
 	c.mu.Unlock()
 }
 
-// lookup returns the cached name; ok is false while a query is owed.
-func (c *nameCache) lookup(g packet.GUID) (string, bool) {
+// lookup returns the cached name, using entry for a creature; ok is false while a query
+// is owed or, for a creature, while its entry is unknown.
+func (c *nameCache) lookup(g packet.GUID, entry uint32) (string, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	switch {
@@ -65,8 +68,8 @@ func (c *nameCache) lookup(g packet.GUID) (string, bool) {
 		n, ok := c.players[g]
 		return n, ok
 	case g.IsCreature():
-		n, ok := c.creatures[g.Entry()]
-		return n, ok
+		n, ok := c.creatures[entry]
+		return n, ok && entry != 0
 	}
 	return "", true // game objects and corpses have no name query in v1
 }
@@ -75,7 +78,7 @@ func (c *nameCache) lookup(g packet.GUID) (string, bool) {
 // whose last query went unanswered for a whole wait counts as known and nameless until
 // that query's throttle lapses.
 func (s *Session) nameOf(g packet.GUID) (string, bool) {
-	n, ok := s.names.lookup(g)
+	n, ok := s.cachedName(g)
 	if ok {
 		return n, true
 	}
@@ -84,6 +87,15 @@ func (s *Session) nameOf(g packet.GUID) (string, bool) {
 	}
 	s.askName(g)
 	return "", false
+}
+
+// cachedName is lookup with the creature entry taken from the store.
+func (s *Session) cachedName(g packet.GUID) (string, bool) {
+	var entry uint32
+	if g.IsCreature() {
+		entry = s.store.Entry(g)
+	}
+	return s.names.lookup(g, entry)
 }
 
 // silent reports whether g is in the short negative cache, dropping a lapsed entry.
@@ -96,9 +108,10 @@ func (s *Session) silent(g packet.GUID, now time.Time) bool {
 		}
 		return ok
 	}
-	until, ok := s.names.silentEntry[g.Entry()]
+	entry := s.store.Entry(g)
+	until, ok := s.names.silentEntry[entry]
 	if ok && !now.Before(until) {
-		delete(s.names.silentEntry, g.Entry())
+		delete(s.names.silentEntry, entry)
 		return false
 	}
 	return ok
@@ -109,7 +122,7 @@ func (s *Session) giveUp(g packet.GUID) {
 	if g == 0 {
 		return
 	}
-	if _, ok := s.names.lookup(g); ok {
+	if _, ok := s.cachedName(g); ok {
 		return
 	}
 	if g.IsPlayer() {
@@ -118,13 +131,16 @@ func (s *Session) giveUp(g packet.GUID) {
 		}
 		return
 	}
-	if t, ok := s.names.askedEntry[g.Entry()]; ok {
-		s.names.silentEntry[g.Entry()] = t.Add(nameQueryInterval)
+	entry := s.store.Entry(g)
+	if t, ok := s.names.askedEntry[entry]; ok {
+		s.names.silentEntry[entry] = t.Add(nameQueryInterval)
 	}
 }
 
 // askName sends CMSG_NAME_QUERY or CMSG_CREATURE_QUERY, at most once per
-// nameQueryInterval for a GUID or entry. A write error surfaces on the next send.
+// nameQueryInterval for a GUID or entry. A creature whose entry is not known yet is not
+// asked: its create block brings the entry and asks again. A write error surfaces on the
+// next send.
 func (s *Session) askName(g packet.GUID) {
 	now := time.Now()
 	if g.IsPlayer() {
@@ -135,7 +151,10 @@ func (s *Session) askName(g packet.GUID) {
 		_ = s.conn.WritePacket(opcode.CMSGNameQuery, game.BuildNameQuery(g))
 		return
 	}
-	entry := g.Entry()
+	entry := s.store.Entry(g)
+	if entry == 0 {
+		return
+	}
 	if t, ok := s.names.askedEntry[entry]; ok && now.Sub(t) < nameQueryInterval {
 		return
 	}

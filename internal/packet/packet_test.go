@@ -74,6 +74,13 @@ func TestGUIDParts(t *testing.T) {
 	if p := GUID(0x2A); !p.IsPlayer() || p.IsCreature() {
 		t.Fatal("player guid misclassified")
 	}
+	// HIGHGUID_PET holds a pet number where a unit holds its entry (ObjectGuid.cpp:69-70).
+	if p := GUID(0xF1400001460000D0); p.High() != HighPet || !p.IsCreature() || p.Entry() != 0 {
+		t.Fatalf("pet %s: entry %d, want 0", p, p.Entry())
+	}
+	if GUID(0x2A).Entry() != 0 || GUID(0xF11000002A000001).Entry() != 0x2A {
+		t.Fatal("player or game object entry wrong")
+	}
 }
 
 func TestGUIDJSON(t *testing.T) {

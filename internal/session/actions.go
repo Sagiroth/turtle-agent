@@ -150,7 +150,7 @@ func (s *Session) Target(ctx context.Context, g packet.GUID, name string) (objec
 	x, y, z, _ := s.selfPos()
 	u, _ := s.store.Get(g, x, y, z)
 	u.GUID = g
-	u.Name, _ = s.names.lookup(g)
+	u.Name, _ = s.cachedName(g)
 	u.InParty = s.inParty(g)
 	return u, nil
 }

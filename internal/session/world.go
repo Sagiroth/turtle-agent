@@ -63,7 +63,7 @@ func (s *Session) Units(f objects.Filter) []objects.Unit {
 		if u.GUID == self {
 			continue
 		}
-		u.Name, _ = s.names.lookup(u.GUID)
+		u.Name, _ = s.names.lookup(u.GUID, u.Entry)
 		if name != "" && !strings.Contains(strings.ToLower(u.Name), name) {
 			continue
 		}

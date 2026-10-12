@@ -125,8 +125,7 @@ func TestUnitsNameFilterAndLimit(t *testing.T) {
 	h := start(t, Options{})
 	h.enterWorld()
 	wolfName(h)
-	h.send(opcode.SMSGCreatureQueryResponse, packet.NewWriter().U32(300).CString("Far Bear").U8(0).U8(0).U8(0).CString("").
-		U32(0).U32(1).U32(1).U32(0).U32(0).U32(0).U32(161).U8(0).U8(0).Bytes())
+	h.send(opcode.SMSGCreatureQueryResponse, creatureResponse(300, "Far Bear"))
 	w := objtest.Header(121)
 	for i := 0; i < 120; i++ {
 		createBlock(w, packet.GUID(0xF13000012B000000|uint64(i+1)), objects.TypeUnit, me.X+float32(i+1), me.Y, me.Z,
@@ -179,4 +178,34 @@ func TestOptionsStoreIsUsed(t *testing.T) {
 		t.Fatal("store not used")
 	}
 	h.expect(opcode.CMSGCharEnum)
+}
+
+// A pet or guardian GUID (HIGHGUID_PET) carries a pet number in bits 24-47, not the entry
+// (ObjectGuid.cpp:69-70): the live m4 run named a Voidwalker Minion (entry 8996, pet
+// number 326) "creature 326". The creature query takes OBJECT_FIELD_ENTRY from the store,
+// and a pet whose entry field is not known yet is not queried at all.
+func TestPetNameUsesEntryField(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	wolfName(h)
+	const minion = packet.GUID(0xF1400001460000D0) // pet number 0x146 = 326
+	// The minion swings before its create block: the event waits instead of querying entry 326.
+	h.send(opcode.SMSGAttackerstateupdate, gametest.AttackerStateUpdate(0, minion, wolfGUID, 12, 0, 0, 0, 1, 0))
+	h.send(opcode.SMSGUpdateObject, unitCreate(minion, objects.TypeUnit, me.X+2, me.Y, me.Z,
+		map[uint16]uint32{objects.FieldEntry: 8996, objects.UnitHealth: 538, objects.UnitMaxHealth: 538}))
+	if p := h.expect(opcode.CMSGCreatureQuery); packet.NewReader(p.Body).U32() != 8996 {
+		t.Fatalf("first creature query % X, want entry 8996", p.Body)
+	}
+	h.send(opcode.SMSGCreatureQueryResponse, creatureResponse(8996, "Voidwalker Minion"))
+	waitFor(t, func() bool {
+		us := h.s.Units(objects.Filter{})
+		return len(us) == 1 && us[0].Name == "Voidwalker Minion"
+	})
+	if u := h.s.Units(objects.Filter{})[0]; u.Entry != 8996 || u.GUID != minion {
+		t.Fatalf("%+v", u)
+	}
+	h.logout()
+	if m := ofKind(h.s.Log(), events.KindMelee); len(m) != 1 || m[0].Source != "Voidwalker Minion" || m[0].Target != "Young Wolf" {
+		t.Fatalf("melee %+v", m)
+	}
 }

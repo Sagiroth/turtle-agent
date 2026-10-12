@@ -190,6 +190,17 @@ func (s *Store) Get(g packet.GUID, ox, oy, oz float32) (Unit, bool) {
 	return toUnit(o, ox, oy, oz), true
 }
 
+// Entry is g's creature entry: its OBJECT_FIELD_ENTRY when the store holds that, else
+// what the GUID encodes (packet.GUID.Entry), which is 0 for a pet whose values are unknown.
+func (s *Store) Entry(g packet.GUID) uint32 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if o, ok := s.objs[g]; ok && o.values[FieldEntry] != 0 {
+		return o.values[FieldEntry]
+	}
+	return g.Entry()
+}
+
 // Owners returns the charmer, summoner and creator of g (zero when unset or unknown), so
 // a pet, totem or charmed unit can be traced to its player in one lookup.
 func (s *Store) Owners(g packet.GUID) [3]packet.GUID {

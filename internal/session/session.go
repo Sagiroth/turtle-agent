@@ -218,6 +218,8 @@ type Session struct {
 	markWaiters     []markWaiter
 	rolls           map[rollKey]*openRoll
 	lastRollID      uint64
+	loot            lootState        // the open loot window (lootwindow.go)
+	mount           mountState       // the player's mount (useitem.go)
 	gossip          *game.GossipMenu // the open gossip menu, nil once closed
 	fall            *fallState
 	last            lastMove // what the server has for the player
@@ -274,6 +276,8 @@ func (s *Session) register() {
 	s.registerRaid()
 	s.registerLoot()
 	s.registerItems()
+	s.registerLootWindow()
+	s.registerUseItem()
 	s.registerSocial()
 }
 

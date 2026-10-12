@@ -6,13 +6,13 @@ A headless World of Warcraft client for **vanilla 1.12 / Turtle WoW 1.18.1** ser
 One process logs one character in, with no game window, and exposes it over a local JSON-RPC API. Use it to drive a
 test character from scripts or AI agents: chat, channels and GM commands, addon messages, NPC gossip, party, units
 around you, target, attack, cast, short walks, walks on the server's own navmesh and GM teleports, raid icons, group
-loot rolls, equipping from the backpack, and an ordered event log of chat, combat, marks and rolls.
+loot rolls, using items from the bags, corpse loot, mounts, equipping from the backpack, and an ordered event log of chat, combat, marks and rolls.
 
 It was built to test server-side bots ([TortoiseBots](https://github.com/Sagiroth/TortoiseBots)) on a private test
 server: log in, hire or invite bots, start a fight, then read back the combat log and what each bot did.
 
 > Use it only on servers you run or are allowed to test on. It has no Warden emulation and does no rendering or
-> inventory management beyond listing the backpack and equipping from it.
+> inventory management beyond listing the bags, using and equipping items, and taking corpse loot.
 
 ## Quick start
 
@@ -133,8 +133,14 @@ browser (`Origin` header) and other `Host` names are refused.
 | `teleport` | `x`, `y`, `z`, `map` (a GM `.go xyz`; needs a GM account) | |
 | `mark` | `guid` or `name`, `icon` (skull, cross, square, moon, triangle, diamond, circle, star, clear) | `icon`, `guid` once the server echoes the mark. Errors at once outside a group or when the player is neither leader nor assistant; errors after 2 s without an echo |
 | `roll` | `roll_id` or `item_slot` (plus `looted` when two corpses share a slot), `choice` (need, greed, pass) | `roll_id`, `looted`, `item_slot`, `item_entry`, `choice` |
-| `inventory` | | backpack items (bag 255, slots 23-38): `bag`, `slot`, `guid`, `item_entry`, `count`; `item_entry` and `count` are 0 until the item's create block arrives |
-| `equip` | `item_entry`, or `slot` (and `bag`: 255 for the backpack, the default, or 19-22 for a bag) | the item sent; an empty slot is an error; a refusal arrives as an `inventory_error` event |
+| `inventory` | `bags` (true: the items in the four bags too) | backpack items (bag 255, slots 23-38), then with `bags` the bag items (bag 19-22, the slot in that bag): `bag`, `slot`, `guid`, `item_entry`, `count`; `item_entry` and `count` are 0 until the item's create block arrives |
+| `equip` | `item_entry` (first match in the backpack, then the bags), or `slot` (and `bag`: 255 for the backpack, the default, or 19-22 for a bag) | the item sent; an empty slot is an error; a refusal arrives as an `inventory_error` event |
+| `use_item` | `item_entry`, or `slot` (and `bag`, as `equip`), `target` (unit guid; none uses it on yourself) | the item sent; the outcome arrives as events (see [Items, loot and mounts](#items-loot-and-mounts)) |
+| `loot` | `guid` or `name` (nearest dead unit), `wait_ms` (default 3000); no params: the open window | the window: `guid`, `type`, `money`, `items[]` (`slot`, `item_entry`, `count`, `display_id`, `random_property`, `slot_type`) |
+| `loot_take` | `slot`, or `all`; `money`; `wait_ms` (default 3000) | `taken`, `left`, `skipped` (slot numbers), `money` (copper asked for), `window` (what remains, null once closed) |
+| `loot_close` | `wait_ms` (default 3000) | |
+| `mount` | `item_entry` or `slot` (and `bag`), or `spell_id`; `wait_ms` (default 8000) | `mounted`, `display_id`, `via` (item, spell), `result` |
+| `dismount` | `spell_id` (only when the mount aura is unknown), `wait_ms` (default 3000) | `mounted`, `display_id` |
 | `addon_send` | `prefix`, `text`, `channel` (party, raid, guild, officer, raid_leader, raid_warning, battleground, battleground_leader, channel), `to` (channel name) | |
 | `tbm` | `command` (a `.bot` command without `.bot`), `via` (chat, the default, or addon) | `since` |
 | `tbm_handshake` | `via`, `wait_ms` (default 5000) | `since`, `next`, `version`, `caps`, `transport`, `roster[]`, `bot_state`, `errors`, `lines`, `complete` |
@@ -146,7 +152,9 @@ browser (`Origin` header) and other `Host` names are refused.
 Events have `seq`, `time`, `kind`, `source`, `target`, `spell_id`, `amount`, `crit`, `text`, `party` and `data`.
 Kinds cover chat, system, whispers, melee, spell damage, periodic ticks, heals, energize, spell start/go/miss/fail,
 auras, deaths, kills, party changes, raid icons (`raid_mark`), group loot rolls (`loot_roll_start`, `loot_roll`, `loot_roll_won`,
-`loot_all_passed`, tied together by `data.roll_id`), refused equips (`inventory_error`) and session state. Cursors are exclusive; `dropped` says older events were evicted.
+`loot_all_passed`, tied together by `data.roll_id`), refused equips and item uses (`inventory_error`), corpse loot (`loot_open`,
+`loot_taken`, `loot_money`, `loot_money_share`, `loot_error`, `loot_closed`), the player's own mount and stand state (`mount`,
+`mount_result`, `stand_state`) and session state. Cursors are exclusive; `dropped` says older events were evicted.
 A chat or system line whose colour codes were stripped keeps the original in `data.raw` (protocol lines such as
 `TBM:ROSTER|…|removing` lose `|r` otherwise).
 
@@ -178,6 +186,37 @@ Addons, channels and NPCs:
 
 Text the server echoes back (for example the account name in a GM reply) is redacted before it reaches events, logs
 or replies.
+
+## Items, loot and mounts
+
+`use_item` sends `CMSG_USE_ITEM` for an item in the backpack or a bag, as a right-click does. It targets yourself or a unit only: no item or game-object targets yet (poisons, enchants, lockpicking). An on-use trinket or other equipped item is used from bag 255 and its equipment slot (the core refuses an item that needs equipping anywhere else, `SpellHandler.cpp:78-85`); `inventory` lists the bags and backpack only, so pass `bag` 255 and the slot yourself. An `item_entry` picks the first
+item with that entry (backpack first); `bag`/`slot` pick one place (see `inventory` with `bags`). Without `target` the item is
+used on yourself (target mask 0), which is what the client sends with nothing selected; the agent does not fall back to the
+current target the way `cast` does. The server answers through the usual events: `spell_start`/`spell_go`, `aura_applied`
+(the Food or Drink aura), `stand_state` (`data.state` sit while eating or drinking, stand when it ends), `spell_fail`, or an
+`inventory_error` when it refuses the item (dead, in combat, wrong level, no such item).
+
+`loot` opens a corpse with `CMSG_LOOT` and waits for `SMSG_LOOT_RESPONSE`. The server checks reach, facing and permission and
+answers a refusal with a reason (`too_far`, `didnt_kill`, `locked`, `not_standing`, ...), which `loot` returns as an error. Only
+dead creatures and corpses open this way (`name` needs the corpse to be lootable, `UNIT_DYNFLAG_LOOTABLE`); chests, lootable items (`CMSG_OPEN_ITEM`) and herbs are not covered. Each item has a `slot_type`: only
+`allow_loot` and `owner` can be taken; `roll_ongoing` (a group roll is running, answer it with `roll`), `master` and `locked`
+cannot, and `loot_take` refuses a single slot of those and skips them with `all`. `loot_take` sends
+`CMSG_AUTOSTORE_LOOT_ITEM` per slot, and `CMSG_LOOT_MONEY` for the money (`all` takes both), then waits up to `wait_ms` for
+`SMSG_LOOT_REMOVED`/`SMSG_LOOT_CLEAR_MONEY`. A slot still in `left` was not taken, usually a full bag (see the
+`inventory_error` event). Like the client, the agent releases a window by itself once nothing is left in it, and `loot_close`
+(`CMSG_LOOT_RELEASE`) closes one early; opening another corpse closes the first on the server. `loot` with no params returns the
+window now open, or null.
+
+`mount` uses a mount item (`CMSG_USE_ITEM`) or casts a mount spell on yourself, then waits for the mount display
+(`UNIT_FIELD_MOUNTDISPLAYID`). It errors when already mounted, when the player's own cast fails (at once, with the reason), or when the display does not
+appear in time, naming what to read (`spell_fail`, `inventory_error` and `mount_result` events). A mount is a cast, so the time is the cast time (up to a few seconds)
+plus latency. `walk_to` and `walk_path` work while mounted: the server sets the mounted run speed, and the agent acks it like any
+speed change. `dismount` cancels the mount aura with `CMSG_CANCEL_AURA` (1.12 has no separate dismount packet). The agent cannot tell which aura is the mount's, so it
+remembers the one new buff that appeared in the same update as the mount display; with several, or after a login while
+mounted, `dismount` asks for `spell_id`.
+
+Not yet exercised on a live server (see the pull request for the live steps): the unit tests use packets built from the core's
+source, not a capture.
 
 ## Movement
 
@@ -299,8 +338,8 @@ with the same calls as its real-client backend (`chat`, `gm`, `state`, `tail_cha
 | --- | --- |
 | `internal/auth` | SRP6 and realmd: logon challenge/proof, realm list |
 | `internal/worldconn` | TCP framing, the 1.12 header cipher, auth session with the addon block |
-| `internal/session` | single-owner session loop: login, ping, chat, addon messages, channels, gossip, names, party, world, actions, combat, raid icons, loot rolls, inventory and equip, logout |
-| `internal/game` | packet codecs for chat, addon messages, channels, gossip, queries, groups, actions, the combat log, raid icons, loot rolls and items |
+| `internal/session` | single-owner session loop: login, ping, chat, addon messages, channels, gossip, names, party, world, actions, combat, raid icons, loot rolls, inventory, equip and use, corpse loot, mounts, logout |
+| `internal/game` | packet codecs for chat, addon messages, channels, gossip, queries, groups, actions, the combat log, raid icons, loot rolls, the loot window, items and mounts |
 | `internal/objects` | update-object parser and the object store: units, and the items in the backpack and bags |
 | `internal/navmesh` | tile loading and path planning over the core's Detour (cgo); `navfixture` builds synthetic tiles |
 | `internal/events` | ordered event log with cursors |

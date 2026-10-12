@@ -18,6 +18,8 @@ const (
 	UnitBytes0       uint16 = 0x24 // race, class, gender, power type (:94; Unit.h:455)
 	UnitFlags        uint16 = 0x2E // (:97; FIELD_UNIT_FIELD_FLAGS = 46 at :345)
 	UnitAura         uint16 = 0x2F // 48 slots of spell ids (:98-99)
+	UnitMountDisplay uint16 = 0x85 // UNIT_FIELD_MOUNTDISPLAYID, non-zero while mounted (:118)
+	UnitBytes1       uint16 = 0x8A // UNIT_FIELD_BYTES_1, byte 0 is the stand state (:123; UnitDefines.h:74-85)
 	UnitDynamicFlags uint16 = 0x8F // (:128; FIELD_UNIT_DYNAMIC_FLAGS = 143 at :346)
 	UnitNPCFlags     uint16 = 0x93 // (:132; FIELD_UNIT_NPC_FLAGS = 147 at :347)
 )
@@ -36,6 +38,9 @@ const (
 	UnitFlagInCombat         uint32 = 0x00080000
 	UnitFlagNotSelectable    uint32 = 0x02000000
 )
+
+// Unit dynamic flags (SharedDefines.h:1327).
+const DynFlagLootable uint32 = 0x0001
 
 // Type ids (ObjectGuid.h:35-42).
 const (

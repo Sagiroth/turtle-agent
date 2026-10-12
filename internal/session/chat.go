@@ -44,6 +44,19 @@ func (s *Session) onMessageChat(body []byte) error {
 	if m.Tag != 0 {
 		data["tag"] = m.Tag
 	}
+	if m.Lang == game.LangAddon {
+		// The client raises CHAT_MSG_ADDON, not chat, for these. The text stays raw: addon
+		// protocols such as TBM separate fields with "|".
+		prefix, text, _ := game.SplitAddon(m.Raw)
+		data["prefix"] = prefix
+		s.emit(events.Event{Kind: events.KindAddon, SourceGUID: m.Sender, Text: text, Data: data})
+		return nil
+	}
+	if m.Raw != m.Text {
+		// StripColors also eats "|r" and "|c…" out of "|"-separated protocol lines such as
+		// "TBM:ROSTER|…|removing|…"; the addon reads the raw line.
+		data["raw"] = m.Raw
+	}
 	s.emit(events.Event{Kind: chatKind(m.Type), Source: m.SenderName, SourceGUID: m.Sender,
 		TargetGUID: m.Target, Text: m.Text, Data: data})
 	return nil
@@ -75,6 +88,21 @@ func (s *Session) Chat(ctx context.Context, typ, text, to string) error {
 		return err
 	}
 	body, err := game.BuildMessageChat(t, to, text)
+	if err != nil {
+		return err
+	}
+	return s.send(ctx, opcode.CMSGMessagechat, body)
+}
+
+// AddonSend sends prefix and text as an addon message on channel (party, raid, guild,
+// officer, raid_leader, raid_warning, battleground, battleground_leader, or channel with
+// to naming the chat channel).
+func (s *Session) AddonSend(ctx context.Context, channel, prefix, text, to string) error {
+	t, err := game.AddonChannelByName(channel)
+	if err != nil {
+		return err
+	}
+	body, err := game.BuildAddonMessage(t, prefix, text, to)
 	if err != nil {
 		return err
 	}

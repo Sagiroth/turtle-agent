@@ -1,0 +1,116 @@
+package main
+
+import (
+	"bytes"
+	"testing"
+	"time"
+
+	"github.com/pjerra/turtle-agent/internal/game"
+	"github.com/pjerra/turtle-agent/internal/game/gametest"
+	"github.com/pjerra/turtle-agent/internal/opcode"
+	"github.com/pjerra/turtle-agent/internal/packet"
+	"github.com/pjerra/turtle-agent/internal/rpc"
+)
+
+func (r *agentRig) expectBody(op uint16, want []byte) {
+	r.t.Helper()
+	p, err := r.srv.Expect(op, 2*time.Second)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if !bytes.Equal(p.Body, want) {
+		r.t.Fatalf("%s: % X, want % X", opcode.Name(op), p.Body, want)
+	}
+}
+
+func say(text string) []byte { return packet.NewWriter().U32(0).U32(0).CString(text).Bytes() }
+
+func TestAddonSendMethod(t *testing.T) {
+	r := newRig(t)
+	if out := r.call("addon_send", `{"prefix":"TBM","text":"roster","channel":"party"}`); out["error"] != nil {
+		t.Fatalf("%v", out)
+	}
+	r.expectBody(opcode.CMSGMessagechat, packet.NewWriter().U32(1).U32(game.LangAddon).CString("TBM\troster").Bytes())
+	if out := r.call("addon_send", `{"prefix":"TBM","text":"x","channel":"whisper","to":"Gorm"}`); errCode(out) != rpc.CodeGame {
+		t.Fatalf("whisper: %v", out)
+	}
+	if out := r.call("addon_send", `{"prefix":"TBM","text":"x"}`); errCode(out) != rpc.CodeGame {
+		t.Fatalf("no channel: %v", out)
+	}
+}
+
+func TestTBMCommandMethod(t *testing.T) {
+	r := newRig(t)
+	if out := r.call("tbm", `{"command":"action attack"}`); out["error"] != nil {
+		t.Fatalf("%v", out)
+	}
+	r.expectBody(opcode.CMSGMessagechat, say(".bot action attack"))
+	if out := r.call("tbm", `{"command":"action attack","via":"addon"}`); out["error"] != nil {
+		t.Fatalf("%v", out)
+	}
+	r.expectBody(opcode.CMSGMessagechat, packet.NewWriter().U32(1).U32(game.LangAddon).CString("TBM\taction attack").Bytes())
+	if out := r.call("tbm", `{"command":"x","via":"pigeon"}`); errCode(out) != rpc.CodeGame {
+		t.Fatalf("%v", out)
+	}
+}
+
+// The handshake sends ".bot help" and ".bot roster" as the addon does on login and
+// collects the roster response up to its TBM:TRANSPORT trailer, from system lines (chat
+// transport) and TBM addon lines (addon transport) alike.
+func TestTBMHandshakeMethod(t *testing.T) {
+	r := newRig(t)
+	got := make(chan map[string]any, 1)
+	go func() { got <- r.call("tbm_handshake", `{"wait_ms":3000}`) }()
+	r.expectBody(opcode.CMSGMessagechat, say(".bot help"))
+	r.expectBody(opcode.CMSGMessagechat, say(".bot roster"))
+	system := func(s string) {
+		r.srv.Send(opcode.SMSGMessagechat, gametest.ChatPacket(game.ChatSystem, 0, 0, "", 0, "", s, 0))
+	}
+	system("TBM:VERSION|2026-10-11-v8")
+	system("TBM:ROSTER_BEGIN|1")
+	system("TBM:ROSTER|7|Gorm|1|removing|1|-")
+	system("TBM:ROSTER_END")
+	r.srv.Send(opcode.SMSGMessagechat, gametest.AddonMessage(0x2A, "TBM", "TBM:CAPS|pull-seconds,flee", 0))
+	system("Unrelated system line")
+	system("TBM:TRANSPORT|party")
+	var out map[string]any
+	select {
+	case out = <-got:
+	case <-time.After(3 * time.Second):
+		t.Fatal("tbm_handshake did not return")
+	}
+	res, ok := out["result"].(map[string]any)
+	if !ok || res["complete"] != true || res["transport"] != "party" || res["version"] != "2026-10-11-v8" {
+		t.Fatalf("%v", out)
+	}
+	rows := res["roster"].([]any)
+	if len(rows) != 1 || rows[0].(map[string]any)["state"] != "removing" || rows[0].(map[string]any)["name"] != "Gorm" {
+		t.Fatalf("roster %v", rows)
+	}
+	if caps := res["caps"].([]any); len(caps) != 2 || caps[1] != "flee" {
+		t.Fatalf("caps %v", caps)
+	}
+	if lines := res["lines"].([]any); len(lines) != 6 {
+		t.Fatalf("lines %v", lines)
+	}
+	if res["since"].(float64) >= res["next"].(float64) {
+		t.Fatalf("cursors %v", res)
+	}
+}
+
+// No module answer: the wait runs out and the result says the response is incomplete.
+func TestTBMHandshakeTimesOut(t *testing.T) {
+	r := newRig(t)
+	got := make(chan map[string]any, 1)
+	go func() { got <- r.call("tbm_handshake", `{"wait_ms":200,"via":"addon"}`) }()
+	r.expectBody(opcode.CMSGMessagechat, packet.NewWriter().U32(1).U32(game.LangAddon).CString("TBM\thelp").Bytes())
+	r.expectBody(opcode.CMSGMessagechat, packet.NewWriter().U32(1).U32(game.LangAddon).CString("TBM\troster").Bytes())
+	select {
+	case out := <-got:
+		if res := out["result"].(map[string]any); res["complete"] != false || len(res["lines"].([]any)) != 0 {
+			t.Fatalf("%v", out)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("tbm_handshake did not time out")
+	}
+}

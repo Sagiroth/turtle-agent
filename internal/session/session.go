@@ -65,7 +65,13 @@ type Options struct {
 	PingInterval  time.Duration // 0: 30 s; under 27 s is test-only: the server kicks for overspeed pings (WorldSocket.cpp:413-433)
 	PongTimeout   time.Duration // 0: 90 s
 	LogoutTimeout time.Duration // 0: 30 s
+	// LoginRetryDelay spaces the CMSG_PLAYER_LOGIN retries after a locked character; 0: 2 s.
+	LoginRetryDelay time.Duration
 }
+
+// maxLoginRetries bounds the retries after SMSG_CHARACTER_LOGIN_FAILED code 1. With the
+// 2 s delay they cover the backup worker's 5 s cycle plus the dump (World.cpp:4841-4869).
+const maxLoginRetries = 5
 
 type StatusInfo struct {
 	State       Status         `json:"state"`
@@ -137,6 +143,8 @@ type Session struct {
 	pongWait       bool
 	logout         *logoutOp
 	logoutDeadline time.Time
+	loginRetries   int
+	loginRetryAt   time.Time
 }
 
 func New(conn *worldconn.Conn, opts Options) *Session {
@@ -154,6 +162,9 @@ func New(conn *worldconn.Conn, opts Options) *Session {
 	}
 	if opts.LogoutTimeout == 0 {
 		opts.LogoutTimeout = 30 * time.Second
+	}
+	if opts.LoginRetryDelay == 0 {
+		opts.LoginRetryDelay = 2 * time.Second
 	}
 	s := &Session{
 		conn: conn, opts: opts, log: opts.Log, logger: opts.Logger,
@@ -345,6 +356,12 @@ func (s *Session) dispatch(p worldconn.Packet) error {
 }
 
 func (s *Session) onTick(now time.Time) error {
+	if !s.loginRetryAt.IsZero() && !now.Before(s.loginRetryAt) {
+		s.loginRetryAt = time.Time{}
+		if err := s.sendPlayerLogin(); err != nil {
+			return err
+		}
+	}
 	if st := s.State(); st == StatusInWorld || st == StatusLoggingOut {
 		if s.pongWait && now.Sub(s.pingSent) > s.opts.PongTimeout {
 			return errors.New("no SMSG_PONG within the pong timeout")
@@ -407,7 +424,7 @@ func (s *Session) onCharEnum(body []byte) error {
 			s.mu.Lock()
 			s.self, s.state = c, StatusLoggingIn
 			s.mu.Unlock()
-			if err := s.conn.WritePacket(opcode.CMSGPlayerLogin, packet.NewWriter().GUID(c.GUID).Bytes()); err != nil {
+			if err := s.sendPlayerLogin(); err != nil {
 				return &fatalError{err}
 			}
 			return nil
@@ -417,10 +434,25 @@ func (s *Session) onCharEnum(body []byte) error {
 	return &fatalError{fmt.Errorf("character %q is not on this account (characters: %s)", s.opts.Character, strings.Join(names, ", "))}
 }
 
+func (s *Session) sendPlayerLogin() error {
+	return s.conn.WritePacket(opcode.CMSGPlayerLogin, packet.NewWriter().GUID(s.self.GUID).Bytes())
+}
+
+// onLoginFailed retries code 1 a few times: the server also sends it while the character
+// is locked for an automatic backup, which the first character list of a session from a
+// new IP schedules for characters above AutoPDump.MinCharLevel (WorldSocket.cpp:344,
+// CharacterHandler.cpp:181-182, :503-510; World.cpp:4801-4869).
 func (s *Session) onLoginFailed(body []byte) error {
 	code := -1
 	if len(body) > 0 {
 		code = int(body[0])
+	}
+	if code == 1 && s.State() == StatusLoggingIn && s.loginRetries < maxLoginRetries {
+		s.loginRetries++
+		s.loginRetryAt = time.Now().Add(s.opts.LoginRetryDelay)
+		fmt.Fprintf(s.logger, "world: SMSG_CHARACTER_LOGIN_FAILED (code 1), character locked (backup?); retrying in %s (%d/%d)\n",
+			s.opts.LoginRetryDelay, s.loginRetries, maxLoginRetries)
+		return nil
 	}
 	return &fatalError{fmt.Errorf("SMSG_CHARACTER_LOGIN_FAILED (code %d): character locked or already loading", code)}
 }

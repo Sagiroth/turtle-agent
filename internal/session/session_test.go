@@ -380,3 +380,48 @@ func TestPingScheduledFromSendTime(t *testing.T) {
 	h.expect(opcode.CMSGPing)
 	h.logout()
 }
+
+// Live on m910q (Task 11): the first character list of a session schedules an automatic
+// character backup and locks the character until the backup worker runs, up to ~5 s later
+// (CharacterHandler.cpp:181-182, World.cpp:4801-4869). A CMSG_PLAYER_LOGIN sent straight
+// after the list gets SMSG_CHARACTER_LOGIN_FAILED code 1, so the session tries again.
+func TestLockedCharacterLoginIsRetried(t *testing.T) {
+	var log bytes.Buffer
+	h := start(t, Options{LoginRetryDelay: 20 * time.Millisecond, Logger: &log})
+	h.expect(opcode.CMSGCharEnum)
+	h.send(opcode.SMSGCharEnum, charEnumBody(me))
+	h.expect(opcode.CMSGPlayerLogin)
+	h.send(opcode.SMSGCharacterLoginFailed, []byte{1})
+	if p := h.expect(opcode.CMSGPlayerLogin); packet.NewReader(p.Body).GUID() != me.GUID {
+		t.Fatalf("retried with % X", p.Body)
+	}
+	h.send(opcode.SMSGLoginVerifyWorld, packet.NewWriter().U32(0).F32(me.X).F32(me.Y).F32(me.Z).F32(1.5).Bytes())
+	h.expect(opcode.CMSGSetActiveMover)
+	select {
+	case <-h.s.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("not ready after the retry")
+	}
+	if !strings.Contains(log.String(), "retrying") {
+		t.Fatalf("logger: %q", log.String())
+	}
+	h.logout()
+}
+
+func TestLockedCharacterGivesUpAfterRetries(t *testing.T) {
+	h := start(t, Options{LoginRetryDelay: time.Millisecond})
+	h.expect(opcode.CMSGCharEnum)
+	h.send(opcode.SMSGCharEnum, charEnumBody(me))
+	for i := 0; i <= maxLoginRetries; i++ {
+		h.expect(opcode.CMSGPlayerLogin)
+		h.send(opcode.SMSGCharacterLoginFailed, []byte{1})
+	}
+	select {
+	case err := <-h.run:
+		if err == nil || !strings.Contains(err.Error(), "code 1") {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not give up")
+	}
+}

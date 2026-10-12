@@ -1,0 +1,154 @@
+package session
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/pjerra/turtle-agent/internal/events"
+	"github.com/pjerra/turtle-agent/internal/game"
+	"github.com/pjerra/turtle-agent/internal/opcode"
+	"github.com/pjerra/turtle-agent/internal/packet"
+)
+
+// chatBody transcribes ChatHandler::BuildChatPacket's default and say branches (Chat.cpp:2251-2314).
+func chatBody(t game.ChatType, sender packet.GUID, msg string) []byte {
+	w := packet.NewWriter().U8(uint8(t)).U32(0).GUID(sender)
+	if t == game.ChatSay || t == game.ChatParty || t == game.ChatYell {
+		w.GUID(sender)
+	}
+	return w.U32(uint32(len(msg) + 1)).CString(msg).U8(0).Bytes()
+}
+
+func nameResponse(g packet.GUID, name string) []byte {
+	return packet.NewWriter().GUID(g).CString(name).U8(0).U32(1).U32(0).U32(1).Bytes()
+}
+
+// wolfGUID is a Young Wolf (entry 299) spawn.
+const wolfGUID packet.GUID = 0xF13000012B000001
+
+// wolfName answers a creature query for entry 299 the way QueryHandler.cpp:187-200 writes it.
+func wolfName(h *harness) {
+	h.t.Helper()
+	h.send(opcode.SMSGCreatureQueryResponse, packet.NewWriter().U32(299).CString("Young Wolf").U8(0).U8(0).U8(0).CString("").
+		U32(0).U32(1).U32(1).U32(0).U32(0).U32(0).U32(161).U8(0).U8(0).Bytes())
+}
+
+func TestChatAndGMSendMessagechat(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	if err := h.s.Chat(context.Background(), "party", "hello", ""); err != nil {
+		t.Fatal(err)
+	}
+	if p := h.expect(opcode.CMSGMessagechat); !bytes.Equal(p.Body, packet.NewWriter().U32(1).U32(0).CString("hello").Bytes()) {
+		t.Fatalf("% X", p.Body)
+	}
+	if err := h.s.GM(context.Background(), "gm visible on"); err != nil {
+		t.Fatal(err)
+	}
+	if p := h.expect(opcode.CMSGMessagechat); !bytes.Equal(p.Body, packet.NewWriter().U32(0).U32(0).CString(".gm visible on").Bytes()) {
+		t.Fatalf("% X", p.Body)
+	}
+	h.logout()
+}
+
+func TestChatBeforeWorldFails(t *testing.T) {
+	h := start(t, Options{})
+	h.expect(opcode.CMSGCharEnum)
+	if err := h.s.Chat(context.Background(), "say", "x", ""); !errors.Is(err, ErrNotInWorld) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestWhisperNameComesFromQuery(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	h.send(opcode.SMSGMessagechat, chatBody(game.ChatWhisper, 0x99, "attacking"))
+	if p := h.expect(opcode.CMSGNameQuery); packet.NewReader(p.Body).GUID() != 0x99 {
+		t.Fatalf("query % X", p.Body)
+	}
+	h.send(opcode.SMSGNameQueryResponse, nameResponse(0x99, "Gorm"))
+	h.send(opcode.SMSGNotification, []byte("Hello\x00"))
+	h.logout()
+	w := ofKind(h.s.Log(), events.KindWhisper)
+	if len(w) != 1 || w[0].Source != "Gorm" || w[0].Text != "attacking" || w[0].Data["type"] != "whisper" {
+		t.Fatalf("%+v", w)
+	}
+	if sys := ofKind(h.s.Log(), events.KindSystem); len(sys) != 1 || sys[0].Text != "Hello" {
+		t.Fatalf("%+v", sys)
+	}
+}
+
+// Review Focus 5: an event waiting for a name is not overtaken, and it is logged
+// with what is known once the name wait runs out.
+func TestNameWaitKeepsOrder(t *testing.T) {
+	h := start(t, Options{NamesWait: 150 * time.Millisecond})
+	h.enterWorld()
+	h.send(opcode.SMSGMessagechat, chatBody(game.ChatWhisper, 0x77, "first"))
+	h.send(opcode.SMSGMessagechat, chatBody(game.ChatSystem, 0, "second"))
+	h.expect(opcode.CMSGNameQuery) // never answered
+	time.Sleep(400 * time.Millisecond)
+	h.send(opcode.SMSGChatPlayerNotFound, []byte("Nobody\x00"))
+	h.logout()
+	p := h.s.Log().Read(events.Query{Kinds: events.ChatKinds})
+	if len(p.Events) != 3 || p.Events[0].Text != "first" || p.Events[0].Source != "" ||
+		p.Events[1].Text != "second" || p.Events[2].Data["type"] != "player_not_found" {
+		t.Fatalf("%+v", p.Events)
+	}
+	for i := 1; i < len(p.Events); i++ {
+		if p.Events[i].Seq <= p.Events[i-1].Seq {
+			t.Fatal("sequence not increasing")
+		}
+	}
+}
+
+// A name query for an event queued behind a waiting one goes out at once, so the
+// second event does not lose its name to the first one's wait.
+func TestQueuedEventAsksForItsNameAtOnce(t *testing.T) {
+	h := start(t, Options{NamesWait: 300 * time.Millisecond})
+	h.enterWorld()
+	h.send(opcode.SMSGMessagechat, chatBody(game.ChatWhisper, 0x77, "first"))
+	h.send(opcode.SMSGMessagechat, chatBody(game.ChatWhisper, 0x88, "second"))
+	for _, want := range []packet.GUID{0x77, 0x88} {
+		if p := h.expect(opcode.CMSGNameQuery); packet.NewReader(p.Body).GUID() != want {
+			t.Fatalf("query % X, want %v", p.Body, want)
+		}
+	}
+	h.send(opcode.SMSGNameQueryResponse, nameResponse(0x88, "Bree"))
+	h.logout()
+	w := ofKind(h.s.Log(), events.KindWhisper)
+	if len(w) != 2 || w[0].Text != "first" || w[0].Source != "" || w[1].Text != "second" || w[1].Source != "Bree" {
+		t.Fatalf("%+v", w)
+	}
+}
+
+// Creature names come from CMSG_CREATURE_QUERY, sent once per entry; an unknown entry
+// gets a placeholder name.
+func TestCreatureTargetNameComesFromQuery(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	// CHAT_MSG_MONSTER_EMOTE: name, then the target GUID (Chat.cpp:2262-2270).
+	emote := func(target packet.GUID, msg string) []byte {
+		return packet.NewWriter().U8(uint8(game.ChatMonsterEmote)).U32(0).U32(6).CString("Guard").GUID(target).
+			U32(uint32(len(msg) + 1)).CString(msg).U8(0).Bytes()
+	}
+	h.send(opcode.SMSGMessagechat, emote(wolfGUID, "%s glares."))
+	if p := h.expect(opcode.CMSGCreatureQuery); !bytes.Equal(p.Body, game.BuildCreatureQuery(299, wolfGUID)) {
+		t.Fatalf("query % X", p.Body)
+	}
+	h.send(opcode.SMSGMessagechat, emote(wolfGUID+1, "%s glares again.")) // same entry: no second query
+	wolfName(h)
+	h.send(opcode.SMSGMessagechat, emote(0xF13000012C000002, "%s stares."))
+	if p := h.expect(opcode.CMSGCreatureQuery); packet.NewReader(p.Body).U32() != 300 {
+		t.Fatalf("second query % X, want entry 300 only", p.Body)
+	}
+	h.send(opcode.SMSGCreatureQueryResponse, packet.NewWriter().U32(300|0x80000000).Bytes())
+	h.logout()
+	c := ofKind(h.s.Log(), events.KindChat)
+	if len(c) != 3 || c[0].Source != "Guard" || c[0].Target != "Young Wolf" || c[1].Target != "Young Wolf" ||
+		c[2].Target != "creature 300" || c[0].Data["type"] != "monster_emote" {
+		t.Fatalf("%+v", c)
+	}
+}

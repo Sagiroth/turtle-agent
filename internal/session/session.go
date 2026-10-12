@@ -67,6 +67,9 @@ type Options struct {
 	LogoutTimeout time.Duration // 0: 30 s
 	// LoginRetryDelay spaces the CMSG_PLAYER_LOGIN retries after a locked character; 0: 2 s.
 	LoginRetryDelay time.Duration
+	// NamesWait bounds how long an event waits for a source or target name before it is
+	// logged with the names known so far; 0: 2 s.
+	NamesWait time.Duration
 }
 
 // maxLoginRetries bounds the retries after SMSG_CHARACTER_LOGIN_FAILED code 1. With the
@@ -145,6 +148,7 @@ type Session struct {
 	logoutDeadline time.Time
 	loginRetries   int
 	loginRetryAt   time.Time
+	names          *nameCache
 }
 
 func New(conn *worldconn.Conn, opts Options) *Session {
@@ -166,10 +170,14 @@ func New(conn *worldconn.Conn, opts Options) *Session {
 	if opts.LoginRetryDelay == 0 {
 		opts.LoginRetryDelay = 2 * time.Second
 	}
+	if opts.NamesWait == 0 {
+		opts.NamesWait = 2 * time.Second
+	}
 	s := &Session{
 		conn: conn, opts: opts, log: opts.Log, logger: opts.Logger,
 		handlers: map[uint16]handler{}, reqs: make(chan request), done: make(chan struct{}),
 		ready: make(chan struct{}), start: time.Now(), state: StatusConnecting, unknown: map[uint16]int{},
+		names: newNameCache(),
 	}
 	s.register()
 	return s
@@ -178,6 +186,7 @@ func New(conn *worldconn.Conn, opts Options) *Session {
 // register installs every packet handler; each feature adds its own register call here.
 func (s *Session) register() {
 	s.registerCore()
+	s.registerChat()
 }
 
 func (s *Session) registerCore() {
@@ -320,11 +329,22 @@ func (s *Session) send(ctx context.Context, op uint16, body []byte) error {
 	return err
 }
 
-// emit appends an event (Task 13 makes it wait for names first).
-func (s *Session) emit(e events.Event) { s.log.Append(e) }
+// emit queues e behind events still waiting for names and appends whatever is ready.
+// The names of e are asked for at once, so its wait overlaps the waits ahead of it.
+func (s *Session) emit(e events.Event) {
+	if e.Time.IsZero() {
+		e.Time = time.Now()
+	}
+	s.fillNames(&e)
+	s.names.waiting = append(s.names.waiting, pendingEvent{e: e, until: e.Time.Add(s.opts.NamesWait)})
+	s.flushNames(time.Now())
+}
 
-// flushPending appends events still waiting for names (filled in by Task 13).
-func (s *Session) flushPending() {}
+// appendEvent stores a ready event in the log.
+func (s *Session) appendEvent(e events.Event) { s.log.Append(e) }
+
+// flushPending appends everything still waiting, with the names known so far.
+func (s *Session) flushPending() { s.flushNames(time.Now().Add(time.Hour)) }
 
 func (s *Session) dispatch(p worldconn.Packet) error {
 	h, ok := s.handlers[p.Op]
@@ -356,6 +376,7 @@ func (s *Session) dispatch(p worldconn.Packet) error {
 }
 
 func (s *Session) onTick(now time.Time) error {
+	s.flushNames(now)
 	if !s.loginRetryAt.IsZero() && !now.Before(s.loginRetryAt) {
 		s.loginRetryAt = time.Time{}
 		if err := s.sendPlayerLogin(); err != nil {
@@ -467,6 +488,7 @@ func (s *Session) onVerifyWorld(body []byte) error {
 	s.mapID, s.pos, s.state = m, [4]float32{x, y, z, o}, StatusInWorld
 	self := s.self
 	s.mu.Unlock()
+	s.names.setPlayer(self.GUID, self.Name)
 	s.nextPing = time.Now().Add(s.opts.PingInterval)
 	if err := s.conn.WritePacket(opcode.CMSGSetActiveMover, packet.NewWriter().GUID(self.GUID).Bytes()); err != nil {
 		return &fatalError{err}

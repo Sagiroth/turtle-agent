@@ -150,9 +150,21 @@ func (s *Session) WalkPath(ctx context.Context, x, y, z float32) (WalkReport, er
 				g = path.Ground[i-1]
 			}
 			_, before := s.where()
+			s.mu.Lock()
+			s.walkEnd = nil
+			s.mu.Unlock()
 			err := s.walkStraight(ctx, b, walkOpts{via: g, onMesh: true})
 			_, after := s.where()
-			rep.Walked += dist3(before, after)
+			// A server move (fear, charge, teleport) is not walked: count up to where the walk was stopped.
+			walkedTo := after
+			if isInterruption(err) {
+				s.mu.Lock()
+				if s.walkEnd != nil {
+					walkedTo = navmesh.Vec3(*s.walkEnd)
+				}
+				s.mu.Unlock()
+			}
+			rep.Walked += dist3(before, walkedTo)
 			st := TraceStep{Kind: "walk", From: &before, To: &b}
 			if err != nil {
 				st.Text = err.Error()

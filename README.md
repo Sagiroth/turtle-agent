@@ -27,6 +27,7 @@ engine), and a server whose realmd and world ports you can reach. `CGO_ENABLED=0
 ```sh
 make build                      # bin/turtle-agent
 make test                       # gofmt check, go vet, a no-cgo build, go test -race
+make fuzz-moves               # go test -fuzz on the monster-move parser (ctrl-C to stop; `make test` runs only its seeds)
 make tbm-contract               # TBM addon protocol check (needs lua5.1; see TBM contract test)
 ```
 

@@ -7,6 +7,7 @@ package tbm
 import (
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/pjerra/turtle-agent/internal/events"
 )
@@ -24,7 +25,8 @@ var Handshake = []string{"help", "roster"}
 func Chat(command string) string { return ".bot " + command }
 
 // RosterRow is one TBM:ROSTER line: guid low, name, class id, state, grouped, location
-// (BotCommands.cpp:1950-1953).
+// (BotCommands.cpp:1950-1953), and the CC mark the addon also reads as a 7th field
+// (Roster.lua:342-346).
 type RosterRow struct {
 	GUID     uint32 `json:"guid"`
 	Name     string `json:"name"`
@@ -32,6 +34,7 @@ type RosterRow struct {
 	State    string `json:"state"`
 	Grouped  bool   `json:"grouped"`
 	Location string `json:"location"`
+	CCMark   string `json:"cc_mark,omitempty"`
 }
 
 // Status is what a roster response says about the module (BotCommands.cpp:1880-2024).
@@ -56,19 +59,24 @@ func (st *Status) Add(line string) bool {
 	switch verb {
 	case "VERSION":
 		st.Version = rest
-	case "CAPS":
-		st.Caps = strings.Split(rest, ",")
+	case "CAPS": // split like the addon: [^,%s|]+ (Comms.lua:623)
+		st.Caps = strings.FieldsFunc(rest, func(r rune) bool { return r == ',' || r == '|' || unicode.IsSpace(r) })
 	case "TRANSPORT":
 		st.Transport, st.Complete = rest, true
 	case "ROSTER_BEGIN":
 		st.Roster = nil
 	case "ROSTER":
-		if len(f) == 6 {
+		if len(f) >= 6 {
 			guid, _ := strconv.ParseUint(f[0], 10, 32)
 			class, _ := strconv.ParseUint(f[2], 10, 32)
-			st.Roster = append(st.Roster, RosterRow{GUID: uint32(guid), Name: f[1], Class: uint32(class), State: f[3],
-				Grouped: f[4] == "1", Location: f[5]})
+			row := RosterRow{GUID: uint32(guid), Name: f[1], Class: uint32(class), State: f[3], Grouped: f[4] == "1", Location: f[5]}
+			if len(f) >= 7 {
+				row.CCMark = f[6]
+			}
+			st.Roster = append(st.Roster, row)
 		}
+	case "BOTSTATE_BEGIN":
+		st.BotState = nil
 	case "BOTSTATE":
 		if len(f) == 2 {
 			if st.BotState == nil {
@@ -85,7 +93,7 @@ func (st *Status) Add(line string) bool {
 }
 
 // Line returns the TBM: protocol line an event carries: a system message on the chat
-// transport, or an addon message with prefix TBM on the addon transport (the module mirrors
+// transport, or an addon message with prefix TBM on the addon transport (the module redirects
 // its chat replies there, BotAddonAdapter.cpp:20-56). A system line is read raw, because
 // colour stripping eats "|r" out of fields such as "|removing".
 func Line(e events.Event) (string, bool) {

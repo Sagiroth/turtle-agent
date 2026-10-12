@@ -80,3 +80,33 @@ func TestCommandBodies(t *testing.T) {
 		t.Fatal("handshake")
 	}
 }
+
+// Review nits: a roster row may carry a 7th field, the CC mark (Roster.lua:342-346 at
+// 3384e15); CAPS splits on commas, spaces and pipes like the addon ([^,%s|]+, Comms.lua:623);
+// BOTSTATE_BEGIN starts a fresh bot state set.
+func TestRosterCCMarkCapsAndBotStateReset(t *testing.T) {
+	var st Status
+	for _, l := range []string{
+		"TBM:BOTSTATE_BEGIN|1", "TBM:BOTSTATE|Old|move=stay", "TBM:BOTSTATE_END",
+		"TBM:ROSTER_BEGIN|2",
+		"TBM:ROSTER|7|Gorm|1|online|1|-|moon",
+		"TBM:ROSTER|8|Lia|5|online|0|-|x|extra",
+		"TBM:ROSTER|9|Bad|1|online",
+		"TBM:ROSTER_END",
+		"TBM:BOTSTATE_BEGIN|1", "TBM:BOTSTATE|Gorm|move=follow", "TBM:BOTSTATE_END",
+		"TBM:CAPS|pull-seconds, flee|inventory,,behavior",
+	} {
+		st.Add(l)
+	}
+	want := []RosterRow{{GUID: 7, Name: "Gorm", Class: 1, State: "online", Grouped: true, Location: "-", CCMark: "moon"},
+		{GUID: 8, Name: "Lia", Class: 5, State: "online", Location: "-", CCMark: "x"}}
+	if !reflect.DeepEqual(st.Roster, want) {
+		t.Fatalf("roster %+v", st.Roster)
+	}
+	if !reflect.DeepEqual(st.BotState, map[string]string{"Gorm": "move=follow"}) {
+		t.Fatalf("bot state %+v", st.BotState)
+	}
+	if !reflect.DeepEqual(st.Caps, []string{"pull-seconds", "flee", "inventory", "behavior"}) {
+		t.Fatalf("caps %q", st.Caps)
+	}
+}

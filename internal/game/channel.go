@@ -24,7 +24,7 @@ func BuildJoinChannel(name, password string) ([]byte, error) {
 	return packet.NewWriter().CString(name).CString(password).Bytes(), nil
 }
 
-// BuildLeaveChannel is CMSG_LEAVE_CHANNEL: the name only (ChannelHandler.cpp:72-82).
+// BuildLeaveChannel is CMSG_LEAVE_CHANNEL: the name only (ChannelHandler.cpp:74-90).
 func BuildLeaveChannel(name string) ([]byte, error) {
 	if err := channelName(name); err != nil {
 		return nil, err

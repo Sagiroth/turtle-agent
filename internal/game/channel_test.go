@@ -10,7 +10,7 @@ import (
 )
 
 // HandleJoinChannelOpcode reads the name, then the password (ChannelHandler.cpp:30-49);
-// HandleLeaveChannelOpcode reads the name only (ChannelHandler.cpp:72-82).
+// HandleLeaveChannelOpcode reads the name only (ChannelHandler.cpp:74-90).
 func TestBuildJoinAndLeaveChannel(t *testing.T) {
 	b, err := game.BuildJoinChannel("tbtest", "")
 	if err != nil || !bytes.Equal(b, packet.NewWriter().CString("tbtest").CString("").Bytes()) {

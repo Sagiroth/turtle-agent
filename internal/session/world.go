@@ -147,7 +147,7 @@ func (s *Session) onMonsterMove(body []byte) error {
 // returns "moved by the server" already sees it in status.
 func (s *Session) serverMoved(p [3]float32) {
 	s.serverPosition(p, true)
-	s.stopWalk(errors.New("moved by the server"), false)
+	s.stopWalk(errServerMoved, false)
 }
 
 // onCompressedMoves runs each bundled packet through the handler table.

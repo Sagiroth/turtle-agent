@@ -10,6 +10,7 @@ import (
 	"github.com/pjerra/turtle-agent/internal/auth"
 	"github.com/pjerra/turtle-agent/internal/config"
 	"github.com/pjerra/turtle-agent/internal/events"
+	"github.com/pjerra/turtle-agent/internal/navmesh"
 	"github.com/pjerra/turtle-agent/internal/session"
 	"github.com/pjerra/turtle-agent/internal/worldconn"
 )
@@ -95,6 +96,7 @@ type reconnector struct {
 	log         *events.Log
 	stderr      io.Writer
 	redact      func(string) string
+	planner     *navmesh.Planner // shared with the first session, its loaded tiles kept
 }
 
 // next waits out the backoff and the realmd window and logs in again, until an attempt
@@ -157,8 +159,7 @@ func (r *reconnector) login(ctx context.Context) (*worldSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := session.New(conn, session.Options{Character: r.character, Log: r.log, Logger: r.stderr,
-		Redact: []string{ticket.Account, r.account}, RedactAnywhere: []string{r.password}})
+	s := session.New(conn, sessionOptions(r.character, r.log, r.stderr, []string{ticket.Account, r.account}, r.password, r.planner))
 	runErr := make(chan error, 1)
 	go func() { runErr <- s.Run(context.Background()) }()
 	timeout := time.NewTimer(reconnectReadyWait)

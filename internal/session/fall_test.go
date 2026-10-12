@@ -293,3 +293,19 @@ func TestFlightBumpsIntoACeiling(t *testing.T) {
 		t.Fatalf("cliff: bump at %.2f, stopped across at %.2f", f.bumpT, f.stopXY)
 	}
 }
+
+// Live (m910q, 2026-10-12): a summon left the player 0.55 yd under the mesh of a 45° slope,
+// and the arc took the slope for a ceiling and fell to a guess. The ground a flight starts
+// from may be up to startSlack above it; a trace that finds nothing leaves no bump behind.
+func TestFlightStartsUnderTheMeshOfASlope(t *testing.T) {
+	slope := func(x, y float32) []float32 { return []float32{0.55 + x, -30} } // rises along +x, a cave far below
+	f := flight(slope, [3]float32{0, 0, 0}, game.KnockBack{Cos: -1, XYSpeed: 10, ZSpeed: -10})
+	if !f.onFloor || f.bumpT < 10 || f.landPos[0] >= 0 || math.Abs(float64(f.landPos[2]-(0.55+f.landPos[0]))) > 0.01 {
+		t.Fatalf("downhill: landed at %v (floor %v) after %.2f s, bump at %.2f", f.landPos, f.onFloor, f.seconds(), f.bumpT)
+	}
+	none := func(float32, float32) []float32 { return []float32{5} } // only a floor far overhead
+	f = flight(none, [3]float32{0, 0, 0}, game.KnockBack{Cos: 1, XYSpeed: 10, ZSpeed: -10})
+	if f.onFloor || f.bumpT < 10 || math.Abs(float64(f.landPos[2])) > 0.01 {
+		t.Fatalf("no floor: landed at %v (floor %v), bump at %.2f", f.landPos, f.onFloor, f.bumpT)
+	}
+}

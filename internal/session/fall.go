@@ -25,9 +25,13 @@ const (
 	traceStep  = 0.05 // seconds between the samples a flight is checked against the floor at
 	fallReach  = 600  // yards below a sample a floor is looked for: a 10 s flight drops less
 	wallReach  = 50   // yards above a sample a floor counts as the top of a wall
-	standSlack = 0.5  // a floor this far above the player's z is the one it stands on
+	standSlack = 1.0  // a floor this far above the player's z is the one it stands on (*)
+	startSlack = 2.0  // a floor this far above a flight's start is the ground it left (*)
 	settleGap  = 0.05 // a floor this far below the player's z is the one it stands on
 )
+
+// (*) The mesh and the server's terrain height differ: live, a summon on a 45° slope put the
+// player 0.55 yd under the mesh.
 
 // floorFunc is the navmesh floor query on the player's map, or nil without one (no
 // mmaps_dir, or a Planner that cannot answer).
@@ -64,12 +68,12 @@ func highest(fl []navmesh.Floor, lo, hi float32) (navmesh.Floor, bool) {
 func (f *fallState) trace(limit float64) (float64, bool) {
 	rise := float32(float64(f.kb.XYSpeed)*traceStep*1.5) + 0.5 // a 56° slope, and the mesh's error
 	prev := f.pos(0)
-	fl, err := f.floor(prev[0], prev[1], prev[2]-fallReach, prev[2]+standSlack)
+	fl, err := f.floor(prev[0], prev[1], prev[2]-fallReach, prev[2]+startSlack)
 	if err != nil {
 		return 0, false
 	}
 	ground := float32(-math.MaxFloat32) // the highest floor under the last sample
-	if g, ok := highest(fl, -math.MaxFloat32, prev[2]+standSlack); ok {
+	if g, ok := highest(fl, -math.MaxFloat32, prev[2]+startSlack); ok {
 		ground = g.Z
 	}
 	for i := 1; float64(i-1)*traceStep < limit; {

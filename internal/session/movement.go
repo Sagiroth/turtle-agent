@@ -127,6 +127,10 @@ func (f *fallState) arc(from [3]float32, start time.Time, v0, term float64, froz
 			return
 		}
 	}
+	f.stopXY, f.bumpT = math.Inf(1), math.Inf(1) // undo what the failed trace found
+	if frozen {
+		f.stopXY = 0
+	}
 	t := min(game.FallTimeTo(float64(from[2]-f.startZ), f.v0, term), max(limit, 0))
 	f.land = start.Add(time.Duration(t * float64(time.Second)))
 	f.landPos = f.pos(t)

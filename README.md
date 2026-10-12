@@ -306,7 +306,7 @@ terrain:
   across there and flies on up and down;
 - a GM teleport (`.go xyz`, `.summon`) that leaves the player above the floor falls to it from rest. The fall opens
   with a heartbeat at the teleport's position, as the server keeps the player's movement flags across a teleport and
-  checks the next packet against them. A floor up to 0.5 yd above or 0.05 yd below the teleport's z counts as standing
+  checks the next packet against them. A floor up to 1 yd above or 0.05 yd below the teleport's z counts as standing
   on it. Session event `falling` (with the landing it expects) opens the fall, `landed` ends it;
 - in the air the packets carry `MoveJumping` with the jump values, and `MoveFallingFar` too once on the way down; the
   landing carries the time fallen, so the server can deal fall damage as for a client (`Player::HandleFall`: 14.57 yd

@@ -58,21 +58,22 @@ type handshakeResult struct {
 	tbm.Status
 }
 
-// registerSocialMethods wires addon messages, the TBM helpers, channels and gossip.
-func registerSocialMethods(srv *rpc.Server, s *session.Session) {
-	log := s.Log()
+// registerSocialMethods wires addon messages, the TBM helpers, channels and gossip to the
+// session cur returns at each call (see registerMethodsFor).
+func registerSocialMethods(srv *rpc.Server, cur func() *session.Session) {
+	log := cur().Log()
 	srv.Register("addon_send", rpc.Typed(func(ctx context.Context, p addonParams) (empty, error) {
-		return empty{}, rpcErr(s.AddonSend(ctx, p.Channel, p.Prefix, p.Text, p.To))
+		return empty{}, rpcErr(cur().AddonSend(ctx, p.Channel, p.Prefix, p.Text, p.To))
 	}))
 	srv.Register("tbm", rpc.Typed(func(ctx context.Context, p tbmParams) (sinceResult, error) {
 		since := log.Last()
-		return sinceResult{since}, rpcErr(sendTBM(ctx, s, p.Via, p.Command))
+		return sinceResult{since}, rpcErr(sendTBM(ctx, cur(), p.Via, p.Command))
 	}))
 	srv.Register("tbm_handshake", rpc.Typed(func(ctx context.Context, p handshakeParams) (handshakeResult, error) {
 		res := handshakeResult{Since: log.Last()}
 		res.Lines = []string{}
 		for _, c := range tbm.Handshake {
-			if err := sendTBM(ctx, s, p.Via, c); err != nil {
+			if err := sendTBM(ctx, cur(), p.Via, c); err != nil {
 				return res, rpcErr(err)
 			}
 		}
@@ -80,14 +81,14 @@ func registerSocialMethods(srv *rpc.Server, s *session.Session) {
 		return res, nil
 	}))
 	srv.Register("join_channel", rpc.Typed(func(ctx context.Context, p channelParams) (empty, error) {
-		return empty{}, rpcErr(s.JoinChannel(ctx, p.Name, p.Password))
+		return empty{}, rpcErr(cur().JoinChannel(ctx, p.Name, p.Password))
 	}))
 	srv.Register("leave_channel", rpc.Typed(func(ctx context.Context, p channelParams) (empty, error) {
-		return empty{}, rpcErr(s.LeaveChannel(ctx, p.Name))
+		return empty{}, rpcErr(cur().LeaveChannel(ctx, p.Name))
 	}))
 	srv.Register("gossip_hello", rpc.Typed(func(ctx context.Context, p gossipParams) (gossipResult, error) {
 		res := gossipResult{Since: log.Last()}
-		if err := s.GossipHello(ctx, p.GUID); err != nil {
+		if err := cur().GossipHello(ctx, p.GUID); err != nil {
 			return res, rpcErr(err)
 		}
 		res.Event = nextGossip(ctx, log, res.Since, p.WaitMS)
@@ -95,7 +96,7 @@ func registerSocialMethods(srv *rpc.Server, s *session.Session) {
 	}))
 	srv.Register("gossip_select", rpc.Typed(func(ctx context.Context, p gossipParams) (gossipResult, error) {
 		res := gossipResult{Since: log.Last()}
-		if err := s.GossipSelect(ctx, p.GUID, p.Option, p.Code); err != nil {
+		if err := cur().GossipSelect(ctx, p.GUID, p.Option, p.Code); err != nil {
 			return res, rpcErr(err)
 		}
 		res.Event = nextGossip(ctx, log, res.Since, p.WaitMS)

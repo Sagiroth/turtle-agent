@@ -186,10 +186,13 @@ func TestRootStopsWalkAndBlocksIt(t *testing.T) {
 }
 
 // selfCreate is the player's own create block carrying run speed run (Object.cpp:436-441).
-func selfCreate(run float32) []byte {
+func selfCreate(run float32) []byte { return selfCreateFlags(run, 0) }
+
+// selfCreateFlags is selfCreate with movement flags in its MovementInfo.
+func selfCreateFlags(run float32, flags uint32) []byte {
 	w := objtest.Header(1).U8(uint8(objects.BlockCreate2)).PackedGUID(me.GUID).U8(objects.TypePlayer)
 	w.U8(0x20)
-	game.WriteMoveInfo(w, game.MoveInfo{X: me.X, Y: me.Y, Z: me.Z})
+	game.WriteMoveInfo(w, game.MoveInfo{Flags: flags, X: me.X, Y: me.Y, Z: me.Z})
 	w.F32(2.5).F32(run).F32(4.5).F32(4.72).F32(2.5).F32(3.14)
 	objtest.Values(w, 192, map[uint16]uint32{objects.UnitHealth: 100, objects.UnitMaxHealth: 100, objects.UnitLevel: 61})
 	return w.Bytes()

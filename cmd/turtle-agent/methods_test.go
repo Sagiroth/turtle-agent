@@ -575,3 +575,29 @@ func TestInventoryAndEquipMethods(t *testing.T) {
 		}
 	}
 }
+
+// cancel_cast sends CMSG_CANCEL_CAST with the spell id, 0 when none is given, which cancels
+// whatever is being cast (SpellHandler.cpp:411-426, Object.cpp:5428-5440). status reports
+// falling and z_unknown.
+func TestCancelCastAndMovementStatus(t *testing.T) {
+	r := newRig(t)
+	for _, c := range []struct {
+		params string
+		spell  uint32
+	}{{`{"spell_id":133}`, 133}, {`{}`, 0}} {
+		if out := r.call("cancel_cast", c.params); out["error"] != nil {
+			t.Fatalf("cancel_cast %s: %v", c.params, out["error"])
+		}
+		p, err := r.srv.Expect(opcode.CMSGCancelCast, 2*time.Second)
+		if err != nil || !bytes.Equal(p.Body, game.BuildCancelCast(c.spell)) {
+			t.Fatalf("%s: % X %v", c.params, p.Body, err)
+		}
+	}
+	if out := r.call("cancel_cast", `{"spell":1}`); errCode(out) != -32602 {
+		t.Fatalf("unknown field: %v", out)
+	}
+	st := r.call("status", "{}")["result"].(map[string]any)
+	if st["falling"] != false || st["z_unknown"] != false {
+		t.Fatalf("status %v", st)
+	}
+}

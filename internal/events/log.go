@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	KindSession     = "session"      // state changes: in_world, logout_pending, logged_out, disconnected, teleported
+	KindSession     = "session"      // state changes: in_world, logout_pending, logged_out, disconnected, teleported, knocked_back, landed, reconnected
 	KindChat        = "chat"         // say, party, yell, emote, channel, monster speech
 	KindWhisper     = "whisper"      // whispers in and out
 	KindSystem      = "system"       // system messages, GM command output, notifications

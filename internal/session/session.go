@@ -103,6 +103,8 @@ type StatusInfo struct {
 	MaxHealth   uint32         `json:"max_health"`
 	Power       uint32         `json:"power"`
 	MaxPower    uint32         `json:"max_power"`
+	Falling     bool           `json:"falling"`   // in the air after a knockback
+	ZUnknown    bool           `json:"z_unknown"` // z is a guess (GM teleport, climb, landing) until the server sends a position
 	LatencyMS   uint32         `json:"latency_ms"`
 	Unknown     map[string]int `json:"unknown_opcodes"`
 	ParseErrors int            `json:"parse_errors"`
@@ -159,6 +161,8 @@ type Session struct {
 	party     PartyInfo
 	marks     [game.RaidIconCount]packet.GUID // the group's raid icons
 	target    packet.GUID
+	falling   bool // s.fall != nil, for Status
+	zUnknown  bool
 
 	// owner-loop only
 	finished        bool
@@ -180,6 +184,10 @@ type Session struct {
 	rolls           map[rollKey]*openRoll
 	lastRollID      uint64
 	gossip          *game.GossipMenu // the open gossip menu, nil once closed
+	fall            *fallState
+	last            lastMove // what the server has for the player
+	lastClock       uint32   // the last MovementInfo client time sent
+	toggles         uint32   // water walking, hover, feather fall as the server applied them
 }
 
 func New(conn *worldconn.Conn, opts Options) *Session {
@@ -281,6 +289,7 @@ func (s *Session) Status() StatusInfo {
 	info := StatusInfo{
 		State: s.state, Character: s.self.Name, GUID: s.self.GUID, Level: s.self.Level, Map: s.mapID,
 		X: s.pos[0], Y: s.pos[1], Z: s.pos[2], O: s.pos[3], Target: s.target, LatencyMS: s.latency,
+		Falling: s.falling, ZUnknown: s.zUnknown,
 		Unknown: unknown, ParseErrors: s.parseErrs, LastSeq: s.log.Last(), Error: s.lastErr,
 	}
 	// The player's own values from the store (zero until its create block arrives).
@@ -449,6 +458,9 @@ func (s *Session) onTick(now time.Time) error {
 	if err := s.tickWalk(); err != nil {
 		return err
 	}
+	if err := s.tickFall(); err != nil {
+		return err
+	}
 	if !s.loginRetryAt.IsZero() && !now.Before(s.loginRetryAt) {
 		s.loginRetryAt = time.Time{}
 		if err := s.sendPlayerLogin(); err != nil {
@@ -560,6 +572,7 @@ func (s *Session) onVerifyWorld(body []byte) error {
 	s.mapID, s.pos, s.state = m, [4]float32{x, y, z, o}, StatusInWorld
 	self := s.self
 	s.mu.Unlock()
+	s.last = lastMove{pos: [3]float32{x, y, z}}
 	s.names.setPlayer(self.GUID, self.Name)
 	s.nextPing = time.Now().Add(s.opts.PingInterval)
 	if err := s.conn.WritePacket(opcode.CMSGSetActiveMover, packet.NewWriter().GUID(self.GUID).Bytes()); err != nil {

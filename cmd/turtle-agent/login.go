@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/pjerra/turtle-agent/internal/auth"
@@ -77,11 +78,21 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	capPath := fs.String("capture", "", "record decrypted world packets to this new file")
 	stay := fs.Duration("stay", 0, "log out after this long in world (0: until interrupted or the logout RPC)")
 	rpcAddr := fs.String("rpc", "", "JSON-RPC listen address (default: the settings file's rpc)")
+	reconnects := fs.Int("reconnect", 0, "after an unplanned disconnect, log in again up to N times (0: off)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
 	if fs.NArg() != 1 && fs.NArg() != 2 {
 		fmt.Fprintln(stderr, "usage: turtle-agent login [flags] [<account>] <character>")
+		return exitUsage
+	}
+	if *reconnects < 0 {
+		fmt.Fprintln(stderr, "login: --reconnect must be 0 (off) or more")
+		return exitUsage
+	}
+	if *reconnects > 0 && *capPath != "" {
+		// A reconnect brings a new session key that the capture's redaction list lacks.
+		fmt.Fprintln(stderr, "login: --reconnect cannot be combined with --capture")
 		return exitUsage
 	}
 	st, err := config.Load(*cfgPath)
@@ -127,6 +138,8 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		}
 	}
 
+	window := &loginWindow{}
+	window.note(time.Now())
 	actx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	ticket, err := authLogin(actx, st.Realmd, account, password)
 	cancel()
@@ -204,8 +217,17 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	info := s.Status()
 	fmt.Fprintf(stderr, "in world: %s guid=%s map=%d x=%.1f y=%.1f z=%.1f\n", info.Character, info.GUID, info.Map, info.X, info.Y, info.Z)
 
+	// The RPC acts on the current session: a reconnect swaps the new one in behind the same
+	// address, and the shared event log keeps the cursors valid.
+	var cur atomic.Pointer[session.Session]
+	cur.Store(s)
+	var rc *reconnector
+	if *reconnects > 0 {
+		rc = &reconnector{total: *reconnects, window: window, st: st, account: account, password: password,
+			character: character, log: log, stderr: stderr, redact: s.Redact}
+	}
 	srv := rpc.NewServer()
-	registerMethods(srv, s)
+	registerMethodsFor(srv, cur.Load)
 	rctx, stopRPC := context.WithCancel(context.Background())
 	served := make(chan error, 1)
 	go func() { served <- rpc.Serve(rctx, ln, srv.Handler()) }()
@@ -229,8 +251,19 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			return logoutAndWait(s, conn, runErr, stderr)
 		case err := <-runErr:
 			code := sessionExit(s, err, stderr)
-			if err == nil || served == nil {
+			if err == nil {
 				return code // a logout through the RPC: done at once
+			}
+			// --reconnect: an unplanned disconnect of a session that was in world logs in again.
+			if rc != nil && errors.Is(err, session.ErrDisconnected) {
+				if ws, ok := rc.next(ctx); ok {
+					s, conn, runErr = ws.s, ws.conn, ws.runErr
+					cur.Store(s)
+					continue
+				}
+			}
+			if served == nil {
+				return code
 			}
 			// Unplanned: keep the RPC up, read-only in effect (actions answer -32002), so
 			// status and events show the disconnect and why. A Ctrl-C ends the wait.

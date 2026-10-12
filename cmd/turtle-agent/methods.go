@@ -61,6 +61,10 @@ type castParams struct {
 	Target  packet.GUID `json:"target,omitempty"`
 }
 
+type cancelCastParams struct {
+	SpellID uint32 `json:"spell_id,omitempty"` // 0: whatever is being cast
+}
+
 type guidParams struct {
 	GUID packet.GUID `json:"guid"`
 }
@@ -98,17 +102,24 @@ type equipParams struct {
 }
 
 // registerMethods wires the spec's JSON-RPC methods (v1) to the session; later
-// milestones add their methods at the end of this function.
+// milestones add their methods at the end of registerMethodsFor.
 func registerMethods(srv *rpc.Server, s *session.Session) {
-	log := s.Log()
+	registerMethodsFor(srv, func() *session.Session { return s })
+}
+
+// registerMethodsFor wires the methods to whatever session cur returns at each call, so
+// --reconnect can swap a new session in behind the same address. The sessions share one
+// event log, so event cursors stay valid across a reconnect.
+func registerMethodsFor(srv *rpc.Server, cur func() *session.Session) {
+	log := cur().Log()
 	srv.Register("status", rpc.Typed(func(ctx context.Context, _ empty) (session.StatusInfo, error) {
-		return s.Status(), nil
+		return cur().Status(), nil
 	}))
 	srv.Register("chat", rpc.Typed(func(ctx context.Context, p chatParams) (empty, error) {
-		return empty{}, rpcErr(s.Chat(ctx, p.Type, p.Text, p.To))
+		return empty{}, rpcErr(cur().Chat(ctx, p.Type, p.Text, p.To))
 	}))
 	srv.Register("gm", rpc.Typed(func(ctx context.Context, p gmParams) (empty, error) {
-		return empty{}, rpcErr(s.GM(ctx, p.Text))
+		return empty{}, rpcErr(cur().GM(ctx, p.Text))
 	}))
 	srv.Register("events", rpc.Typed(func(ctx context.Context, p eventsParams) (events.Page, error) {
 		q := events.Query{Since: p.Since, Kinds: p.Kinds, PartyOnly: p.PartyOnly, Limit: p.Limit}
@@ -118,67 +129,72 @@ func registerMethods(srv *rpc.Server, s *session.Session) {
 		return readEvents(ctx, log, events.Query{Since: p.Since, Kinds: events.ChatKinds, Limit: p.Limit}, p.WaitMS), nil
 	}))
 	srv.Register("logout", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) {
-		return empty{}, rpcErr(s.Logout(ctx))
+		return empty{}, rpcErr(cur().Logout(ctx))
 	}))
 	srv.Register("invite", rpc.Typed(func(ctx context.Context, p nameParams) (empty, error) {
-		return empty{}, rpcErr(s.Invite(ctx, p.Name))
+		return empty{}, rpcErr(cur().Invite(ctx, p.Name))
 	}))
 	srv.Register("accept_invite", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) {
-		return empty{}, rpcErr(s.AcceptInvite(ctx))
+		return empty{}, rpcErr(cur().AcceptInvite(ctx))
 	}))
 	srv.Register("leave_group", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) {
-		return empty{}, rpcErr(s.LeaveGroup(ctx))
+		return empty{}, rpcErr(cur().LeaveGroup(ctx))
 	}))
 	srv.Register("party", rpc.Typed(func(ctx context.Context, _ empty) (session.PartyInfo, error) {
-		return s.Party(), nil
+		return cur().Party(), nil
 	}))
 	srv.Register("units", rpc.Typed(func(ctx context.Context, p unitsParams) ([]objects.Unit, error) {
-		us := s.Units(objects.Filter{Near: p.Near, Entry: p.Entry, Hostile: p.Hostile, Name: p.Name, Limit: p.Limit})
+		us := cur().Units(objects.Filter{Near: p.Near, Entry: p.Entry, Hostile: p.Hostile, Name: p.Name, Limit: p.Limit})
 		if us == nil {
 			us = []objects.Unit{}
 		}
 		return us, nil
 	}))
 	srv.Register("target", rpc.Typed(func(ctx context.Context, p targetParams) (objects.Unit, error) {
-		u, err := s.Target(ctx, p.GUID, p.Name)
+		u, err := cur().Target(ctx, p.GUID, p.Name)
 		return u, rpcErr(err)
 	}))
-	srv.Register("attack", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) { return empty{}, rpcErr(s.Attack(ctx)) }))
-	srv.Register("stop_attack", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) { return empty{}, rpcErr(s.StopAttack(ctx)) }))
+	srv.Register("attack", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) { return empty{}, rpcErr(cur().Attack(ctx)) }))
+	srv.Register("stop_attack", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) { return empty{}, rpcErr(cur().StopAttack(ctx)) }))
 	srv.Register("cast", rpc.Typed(func(ctx context.Context, p castParams) (empty, error) {
-		return empty{}, rpcErr(s.Cast(ctx, p.SpellID, p.Target))
+		return empty{}, rpcErr(cur().Cast(ctx, p.SpellID, p.Target))
 	}))
-	srv.Register("face", rpc.Typed(func(ctx context.Context, p guidParams) (empty, error) { return empty{}, rpcErr(s.Face(ctx, p.GUID)) }))
+	srv.Register("cancel_cast", rpc.Typed(func(ctx context.Context, p cancelCastParams) (empty, error) {
+		return empty{}, rpcErr(cur().CancelCast(ctx, p.SpellID))
+	}))
+	srv.Register("face", rpc.Typed(func(ctx context.Context, p guidParams) (empty, error) {
+		return empty{}, rpcErr(cur().Face(ctx, p.GUID))
+	}))
 	srv.Register("walk_to", rpc.Typed(func(ctx context.Context, p walkParams) (empty, error) {
-		return empty{}, rpcErr(s.WalkTo(ctx, p.X, p.Y, p.Z))
+		return empty{}, rpcErr(cur().WalkTo(ctx, p.X, p.Y, p.Z))
 	}))
 	srv.Register("teleport", rpc.Typed(func(ctx context.Context, p pointParams) (empty, error) {
 		m := -1
 		if p.Map != nil {
 			m = *p.Map
 		}
-		return empty{}, rpcErr(s.Teleport(ctx, p.X, p.Y, p.Z, m))
+		return empty{}, rpcErr(cur().Teleport(ctx, p.X, p.Y, p.Z, m))
 	}))
 	srv.Register("mark", rpc.Typed(func(ctx context.Context, p markParams) (session.MarkResult, error) {
-		res, err := s.Mark(ctx, p.GUID, p.Name, p.Icon)
+		res, err := cur().Mark(ctx, p.GUID, p.Name, p.Icon)
 		return res, rpcErr(err)
 	}))
 	srv.Register("roll", rpc.Typed(func(ctx context.Context, p rollParams) (session.RollInfo, error) {
-		res, err := s.Roll(ctx, session.RollRef{ID: p.RollID, Slot: p.ItemSlot, Looted: p.Looted}, p.Choice)
+		res, err := cur().Roll(ctx, session.RollRef{ID: p.RollID, Slot: p.ItemSlot, Looted: p.Looted}, p.Choice)
 		return res, rpcErr(err)
 	}))
 	srv.Register("inventory", rpc.Typed(func(ctx context.Context, _ empty) ([]objects.Item, error) {
-		inv := s.Inventory()
+		inv := cur().Inventory()
 		if inv == nil {
 			inv = []objects.Item{}
 		}
 		return inv, nil
 	}))
 	srv.Register("equip", rpc.Typed(func(ctx context.Context, p equipParams) (objects.Item, error) {
-		it, err := s.Equip(ctx, session.EquipRef{Entry: p.ItemEntry, Bag: p.Bag, Slot: p.Slot})
+		it, err := cur().Equip(ctx, session.EquipRef{Entry: p.ItemEntry, Bag: p.Bag, Slot: p.Slot})
 		return it, rpcErr(err)
 	}))
-	registerSocialMethods(srv, s)
+	registerSocialMethods(srv, cur)
 }
 
 // readEvents long-polls up to waitMS (at most 25 s) until a matching event exists. A

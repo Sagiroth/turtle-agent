@@ -138,12 +138,16 @@ func (s *Session) onMonsterMove(body []byte) error {
 }
 
 // serverMoved puts the player where the server moved it, ending a running walk without a
-// stop packet: the server owns the movement now.
+// stop packet and a knockback flight without a landing: the server owns the movement now,
+// and its position settles a z the agent could only guess. Live, that is a spline on the
+// player (fear, charge) or the rare heartbeat the server sends the player itself
+// (Unit::SendHeartBeat(true), Unit.cpp:537-549, which carries back the agent's own last z, so
+// it settles nothing new); the core never sends the player its own movement block, nor relays
+// its own MSG_MOVE_* back. The position is stored before the walk ends, so a walk_to that
+// returns "moved by the server" already sees it in status.
 func (s *Session) serverMoved(p [3]float32) {
+	s.serverPosition(p, true)
 	s.stopWalk(errors.New("moved by the server"), false)
-	s.mu.Lock()
-	s.pos[0], s.pos[1], s.pos[2] = p[0], p[1], p[2]
-	s.mu.Unlock()
 }
 
 // onCompressedMoves runs each bundled packet through the handler table.

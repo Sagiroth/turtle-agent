@@ -6,6 +6,10 @@ import "github.com/pjerra/turtle-agent/internal/packet"
 const (
 	MoveForward         uint32 = 0x00000001
 	MoveBackward        uint32 = 0x00000002
+	MoveStrafeLeft      uint32 = 0x00000004
+	MoveStrafeRight     uint32 = 0x00000008
+	MovePitchUp         uint32 = 0x00000040
+	MovePitchDown       uint32 = 0x00000080
 	MoveWalkMode        uint32 = 0x00000100
 	MoveRoot            uint32 = 0x00001000
 	MoveJumping         uint32 = 0x00002000
@@ -14,6 +18,14 @@ const (
 	MoveSplineEnabled   uint32 = 0x00400000
 	MoveOnTransport     uint32 = 0x02000000
 	MoveSplineElevation uint32 = 0x04000000
+	MoveWaterWalking    uint32 = 0x10000000
+	MoveSafeFall        uint32 = 0x20000000 // feather fall
+	MoveHover           uint32 = 0x40000000
+
+	// MoveMaskMoving is MOVEFLAG_MASK_MOVING (Object.h:242-245): the flags under which the
+	// anticheat lets the position change between two packets.
+	MoveMaskMoving = MoveForward | MoveBackward | MoveStrafeLeft | MoveStrafeRight | MovePitchUp | MovePitchDown |
+		MoveJumping | MoveFallingFar | MoveSplineElevation
 )
 
 // MoveInfo is MovementInfo (Object.cpp:64-106 read, :146-180 write).

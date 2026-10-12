@@ -134,3 +134,22 @@ func TestRPCAuthSettings(t *testing.T) {
 		}
 	}
 }
+
+func TestAddonsOverride(t *testing.T) {
+	list := `["Blizzard_BindingUI","Blizzard_InspectUI","Blizzard_MacroUI","Blizzard_RaidUI","Blizzard_TalentUI"]`
+	p := writeSettings(t, 0o600, `{"realmd":"h:1","accounts":{"a":"b"},"addons":`+list+`}`)
+	s, err := Load(p)
+	if err != nil || len(s.Addons) != 5 {
+		t.Fatalf("addons %v err %v", s.Addons, err)
+	}
+	if want := filepath.Dir(p); s.FingerprintDir != want {
+		t.Fatalf("fingerprint dir %q, want %q", s.FingerprintDir, want)
+	}
+	s, err = Load(writeSettings(t, 0o600, good))
+	if err != nil || s.Addons != nil {
+		t.Fatalf("default addons %v err %v", s.Addons, err)
+	}
+	if _, err := Load(writeSettings(t, 0o600, `{"realmd":"h:1","accounts":{"a":"b"},"addons":["Blizzard_TalentUI"]}`)); err == nil {
+		t.Fatal(`an "addons" list without the fingerprint addons was accepted`)
+	}
+}

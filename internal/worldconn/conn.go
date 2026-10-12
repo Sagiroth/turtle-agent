@@ -105,10 +105,11 @@ type Conn struct {
 	early     []Packet // packets that arrived before SMSG_AUTH_RESPONSE
 	writeMu   sync.Mutex
 	closeOnce sync.Once
+	addons    *Addons // nil: stock list, no stored fingerprint
 }
 
 // Dial connects to the world server and authenticates; ctx bounds the handshake only.
-func Dial(ctx context.Context, addr, account string, key []byte, tap Tap) (*Conn, error) {
+func Dial(ctx context.Context, addr, account string, key []byte, tap Tap, opts ...Option) (*Conn, error) {
 	var d net.Dialer
 	nc, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -120,7 +121,7 @@ func Dial(ctx context.Context, addr, account string, key []byte, tap Tap) (*Conn
 	}
 	_ = nc.SetDeadline(deadline)
 	stop := context.AfterFunc(ctx, func() { _ = nc.SetDeadline(time.Unix(1, 0)) })
-	c, err := Client(nc, account, key, tap)
+	c, err := Client(nc, account, key, tap, opts...)
 	if !stop() && err == nil {
 		err = ctx.Err() // cancelled while the handshake finished: the deadline may be in the past
 	}
@@ -136,8 +137,11 @@ func Dial(ctx context.Context, addr, account string, key []byte, tap Tap) (*Conn
 }
 
 // Client authenticates over an already open connection (tests pass a net.Pipe).
-func Client(nc net.Conn, account string, key []byte, tap Tap) (*Conn, error) {
+func Client(nc net.Conn, account string, key []byte, tap Tap, opts ...Option) (*Conn, error) {
 	c := &Conn{nc: nc, tap: tap}
+	for _, o := range opts {
+		o(c)
+	}
 	if err := c.authenticate(account, key); err != nil {
 		return nil, err
 	}
@@ -157,7 +161,7 @@ func (c *Conn) authenticate(account string, key []byte) error {
 	if _, err := rand.Read(cs[:]); err != nil {
 		return err
 	}
-	body := BuildAuthSession(account, binary.LittleEndian.Uint32(cs[:]), serverSeed, key)
+	body := buildAuthSession(account, binary.LittleEndian.Uint32(cs[:]), serverSeed, key, c.addons)
 	if err := c.write(opcode.CMSGAuthSession, body, nil); err != nil {
 		return fmt.Errorf("world: send auth session: %w", err)
 	}
@@ -167,6 +171,10 @@ func (c *Conn) authenticate(account string, key []byte) error {
 
 // BuildAuthSession lays out CMSG_AUTH_SESSION (WorldSocket.cpp:144-149, :287-299).
 func BuildAuthSession(account string, clientSeed uint32, serverSeed [4]byte, key []byte) []byte {
+	return buildAuthSession(account, clientSeed, serverSeed, key, nil)
+}
+
+func buildAuthSession(account string, clientSeed uint32, serverSeed [4]byte, key []byte, addons *Addons) []byte {
 	d := sha1.New()
 	d.Write([]byte(account))
 	d.Write([]byte{0, 0, 0, 0})
@@ -174,7 +182,7 @@ func BuildAuthSession(account string, clientSeed uint32, serverSeed [4]byte, key
 	d.Write(serverSeed[:])
 	d.Write(key)
 	return packet.NewWriter().U32(WorldBuild).U32(0).CString(account).U32(clientSeed).
-		Append(d.Sum(nil)).Append(AddonBlock()).Bytes()
+		Append(d.Sum(nil)).Append(addons.Block()).Bytes()
 }
 
 // readAuthResponse waits for SMSG_AUTH_RESPONSE. A rejection is sent before the server
@@ -215,6 +223,7 @@ func (c *Conn) readAuthResponse() error {
 		if c.tap != nil {
 			c.tap.Packet(ServerToClient, op, body)
 		}
+		c.addons.observe(op, body)
 		if op != opcode.SMSGAuthResponse {
 			c.early = append(c.early, Packet{Op: op, Body: body})
 			continue
@@ -268,6 +277,7 @@ func (c *Conn) readRaw() (Packet, error) {
 	if c.tap != nil {
 		c.tap.Packet(ServerToClient, op, body)
 	}
+	c.addons.observe(op, body)
 	return Packet{Op: op, Body: body}, nil
 }
 

@@ -80,7 +80,7 @@ func TestAuthSessionLayout(t *testing.T) {
 			t.Fatal("addon entry fields wrong")
 		}
 	}
-	if len(names) != 4 || names[0] != "Blizzard_BindingUI" || names[3] != "Blizzard_RaidUI" || pr.Err() != nil {
+	if len(names) != 11 || names[0] != "Blizzard_AuctionUI" || names[10] != "Blizzard_TrainerUI" || pr.Err() != nil {
 		t.Fatalf("addons %v err %v", names, pr.Err())
 	}
 }

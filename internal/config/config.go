@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/pjerra/turtle-agent/internal/netutil"
+	"github.com/pjerra/turtle-agent/internal/worldconn"
 )
 
 // Spot is a place near hostile mobs used by the live checks (map id and world coordinates).
@@ -41,6 +42,16 @@ type Settings struct {
 	// MmapsDir holds copies of the server's data/mmaps files (NNN.mmap, NNNyyxx.mmtile)
 	// for path_to and walk_path. A leading ~/ is the home folder.
 	MmapsDir string `json:"mmaps_dir,omitempty"`
+	// Addons overrides the addon list sent at world login (default: a stock 1.12.1 client's
+	// Blizzard_* set). It must include the four fingerprint addons, see worldconn.StockAddons.
+	Addons []string `json:"addons,omitempty"`
+	// SharedFingerprint makes every account present one addon fingerprint (one file, as for
+	// one real PC). Off by default: the core's anticheat bans by a hash of fingerprint and IP,
+	// so a shared print marked on one account would reach all of them.
+	SharedFingerprint bool `json:"shared_fingerprint,omitempty"`
+	// FingerprintDir is where the server-issued addon fingerprints are kept between runs: the
+	// folder of the settings file. Set by Load, not read from JSON.
+	FingerprintDir string `json:"-"`
 }
 
 const DefaultRPC = "127.0.0.1:8765"
@@ -92,6 +103,7 @@ func Load(path string) (Settings, error) {
 	if err := s.validate(); err != nil {
 		return Settings{}, fmt.Errorf("settings %s: %w", path, err)
 	}
+	s.FingerprintDir = filepath.Dir(path)
 	return s, nil
 }
 
@@ -128,6 +140,11 @@ func (s Settings) validate() error {
 	if s.MmapsDir != "" {
 		if info, err := os.Stat(s.MmapsDir); err != nil || !info.IsDir() {
 			return fmt.Errorf(`"mmaps_dir" %s is not a folder (copy the server's data/mmaps files there)`, s.MmapsDir)
+		}
+	}
+	if s.Addons != nil {
+		if err := worldconn.ValidateAddonNames(s.Addons); err != nil {
+			return fmt.Errorf(`"addons": %w`, err)
 		}
 	}
 	if len(s.Accounts) == 0 {

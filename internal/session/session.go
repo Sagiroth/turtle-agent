@@ -304,7 +304,7 @@ func (s *Session) registerCore() {
 	s.handlers[opcode.SMSGPong] = s.onPong
 	s.handlers[opcode.SMSGLogoutResponse] = s.onLogoutResponse
 	s.handlers[opcode.SMSGLogoutComplete] = s.onLogoutComplete
-	// Warden is ignored: the timeout kick is commented out (Warden.cpp:498).
+	// Warden is never answered; see README "What the server sees" (Warden.cpp:494-500).
 	s.handlers[opcode.SMSGWardenData] = func([]byte) error { return nil }
 	s.handlers[opcode.SMSGAddonInfo] = func([]byte) error { return nil }
 }

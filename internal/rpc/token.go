@@ -7,11 +7,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/pjerra/turtle-agent/internal/privfile"
 )
 
 // NewToken returns a random bearer token: 32 bytes from crypto/rand, base64url (43 characters).
@@ -67,27 +68,9 @@ func WriteTokenFile(path, token string) (remove func(), err error) {
 // ReadTokenFile returns the token in path. It refuses anything but a regular file (a
 // symlink is not followed) that only its owner can access, and an empty one.
 func ReadTokenFile(path string) (string, error) {
-	info, err := os.Lstat(path)
+	raw, err := privfile.Read(path, 4096)
 	if err != nil {
-		return "", err
-	}
-	if !info.Mode().IsRegular() {
-		return "", errors.New("rpc token file is not a regular file")
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("rpc token file has mode %04o; run: chmod 600 %s", info.Mode().Perm(), path)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	if now, err := f.Stat(); err != nil || !os.SameFile(info, now) {
-		return "", errors.New("rpc token file changed while being read")
-	}
-	raw, err := io.ReadAll(io.LimitReader(f, 4096))
-	if err != nil {
-		return "", err
+		return "", fmt.Errorf("rpc token file: %w", err)
 	}
 	tok := strings.TrimSpace(string(raw))
 	if tok == "" {

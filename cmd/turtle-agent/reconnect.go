@@ -154,7 +154,7 @@ func (r *reconnector) login(ctx context.Context) (*worldSession, error) {
 		addr = r.st.WorldAddr
 	}
 	wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	conn, err := dialWorld(wctx, addr, ticket, nil)
+	conn, err := dialWorld(wctx, addr, ticket, nil, addonOption(r.st, ticket.Account, r.stderr))
 	cancel()
 	if err != nil {
 		return nil, err

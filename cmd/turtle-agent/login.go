@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -115,8 +117,38 @@ func sessionOptions(character string, log *events.Log, stderr io.Writer, account
 
 // dialWorld keys the world connection with Ticket.KeyBytes(), the unpadded form the
 // server hashes (39 bytes when the high byte of K is zero), never Ticket.Key[:].
-func dialWorld(ctx context.Context, addr string, tk *auth.Ticket, tap worldconn.Tap) (*worldconn.Conn, error) {
-	return dial(ctx, addr, tk.Account, tk.KeyBytes(), tap)
+func dialWorld(ctx context.Context, addr string, tk *auth.Ticket, tap worldconn.Tap, opts ...worldconn.Option) (*worldconn.Conn, error) {
+	return dial(ctx, addr, tk.Account, tk.KeyBytes(), tap, opts...)
+}
+
+// fingerprintPath is the file holding the addon fingerprint for account: one per account
+// (named by a hash, so the name stays out of the folder listing), because the core's
+// anticheat bans by a hash of fingerprint and IP and a shared one would spread a ban to
+// every account. With shared_fingerprint every account uses one file.
+func fingerprintPath(st config.Settings, account string) string {
+	if st.SharedFingerprint {
+		return filepath.Join(st.FingerprintDir, "addon-fingerprint")
+	}
+	sum := sha256.Sum256([]byte(strings.ToUpper(account)))
+	return filepath.Join(st.FingerprintDir, "addon-fingerprint-"+hex.EncodeToString(sum[:6]))
+}
+
+// addonOption makes the login present the same addon fingerprint every time: the one kept
+// in the account's file, or, on the first login, the one the server announces, which is then
+// saved there. A failed save is reported and costs only a new fingerprint next login.
+func addonOption(st config.Settings, account string, stderr io.Writer) worldconn.Option {
+	a := &worldconn.Addons{Names: st.Addons}
+	if st.FingerprintDir == "" {
+		return worldconn.WithAddons(a)
+	}
+	f := &worldconn.FingerprintFile{Path: fingerprintPath(st, account)}
+	a.Fingerprint = f.Load()
+	a.OnFingerprint = func(fp uint32) {
+		if err := f.Save(fp); err != nil {
+			fmt.Fprintln(stderr, "addon fingerprint not saved:", err)
+		}
+	}
+	return worldconn.WithAddons(a)
 }
 
 func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -235,7 +267,7 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 
 	wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	conn, err := dialWorld(wctx, addr, ticket, tap)
+	conn, err := dialWorld(wctx, addr, ticket, tap, addonOption(st, ticket.Account, stderr))
 	cancel()
 	if err != nil {
 		fmt.Fprintln(stderr, withPrefix("world:", err))

@@ -73,6 +73,9 @@ func (s *Session) registerActions() {
 	s.handlers[opcode.SMSGForceMoveRoot] = s.rootHandler(opcode.CMSGForceMoveRootAck, true)
 	s.handlers[opcode.SMSGForceMoveUnroot] = s.rootHandler(opcode.CMSGForceMoveUnrootAck, false)
 	s.handlers[opcode.SMSGMoveKnockBack] = s.onKnockBack
+	for op, o := range toggleOrders {
+		s.handlers[op] = s.toggleHandler(o)
+	}
 	s.handlers[opcode.SMSGAttackstart] = s.onAttackStart
 	s.handlers[opcode.SMSGAttackstop] = s.onAttackStop
 	for op, reason := range swingErrors {

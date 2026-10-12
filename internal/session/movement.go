@@ -176,3 +176,51 @@ func (s *Session) tickFall() error {
 	s.mu.Unlock()
 	return s.sendMove(opcode.MSGMoveHeartbeat, mi, game.BuildMovement(mi))
 }
+
+// toggleOrder is one water-walk, hover or feather-fall order (MovementPacketSender.cpp:259-276)
+// and its ack (Opcodes_1_12_1.h:225-226, :245-249, :722-723).
+type toggleOrder struct {
+	ack   uint16
+	flag  uint32
+	apply bool
+}
+
+var toggleOrders = map[uint16]toggleOrder{
+	opcode.SMSGMoveWaterWalk:   {opcode.CMSGMoveWaterWalkAck, game.MoveWaterWalking, true},
+	opcode.SMSGMoveLandWalk:    {opcode.CMSGMoveWaterWalkAck, game.MoveWaterWalking, false},
+	opcode.SMSGMoveSetHover:    {opcode.CMSGMoveHoverAck, game.MoveHover, true},
+	opcode.SMSGMoveUnsetHover:  {opcode.CMSGMoveHoverAck, game.MoveHover, false},
+	opcode.SMSGMoveFeatherFall: {opcode.CMSGMoveFeatherFallAck, game.MoveSafeFall, true},
+	opcode.SMSGMoveNormalFall:  {opcode.CMSGMoveFeatherFallAck, game.MoveSafeFall, false},
+}
+
+// toggleHandler acks a toggle order with its counter, the MovementInfo with the flag as
+// now applied, and the apply u32 the server matches against the order
+// (MovementHandler.cpp:543-558, Unit.cpp:7437-7449). The flag stays in later movement, as
+// a real client keeps it; a flight already under way keeps the fall speed it started with.
+func (s *Session) toggleHandler(o toggleOrder) handler {
+	return func(body []byte) error {
+		c, err := game.ParseMovementChange(body, false)
+		if err != nil {
+			return err
+		}
+		self := s.selfGUID()
+		if c.GUID != self {
+			return nil
+		}
+		if o.apply {
+			s.toggles |= o.flag
+		} else {
+			s.toggles &^= o.flag
+		}
+		now := time.Now()
+		s.syncWalk(now)
+		s.mu.Lock()
+		mi := s.moveInfoAt(s.currentFlags(), now)
+		s.mu.Unlock()
+		if err := s.sendMove(o.ack, mi, game.BuildMovementToggleAck(self, c.Counter, mi, o.apply)); err != nil {
+			return &fatalError{err}
+		}
+		return nil
+	}
+}

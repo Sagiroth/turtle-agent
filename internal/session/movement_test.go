@@ -260,3 +260,74 @@ func TestSlowWalkRefused(t *testing.T) {
 	}
 	h.logout()
 }
+
+// T23 deferred item: the water-walk, hover and feather-fall orders are acked with their
+// own counter, MovementInfo and the u32 apply (MovementHandler.cpp:543-558); the flag stays
+// in later movement until the removal order, and feather fall caps a knockback's descent.
+func TestToggleOrdersAcked(t *testing.T) {
+	ctx := context.Background()
+	h := start(t, Options{})
+	h.enterWorld()
+	cases := []struct {
+		order, ack uint16
+		flag       uint32
+		apply      bool
+	}{
+		{opcode.SMSGMoveWaterWalk, opcode.CMSGMoveWaterWalkAck, game.MoveWaterWalking, true},
+		{opcode.SMSGMoveSetHover, opcode.CMSGMoveHoverAck, game.MoveHover, true},
+		{opcode.SMSGMoveFeatherFall, opcode.CMSGMoveFeatherFallAck, game.MoveSafeFall, true},
+		{opcode.SMSGMoveLandWalk, opcode.CMSGMoveWaterWalkAck, game.MoveWaterWalking, false},
+		{opcode.SMSGMoveUnsetHover, opcode.CMSGMoveHoverAck, game.MoveHover, false},
+	}
+	want := uint32(0)
+	var lastTime uint32
+	for i, c := range cases {
+		h.send(c.order, gametest.MovementOrder(me.GUID, uint32(20+i)))
+		mi, r := ackMove(t, h.expect(c.ack), uint32(20+i))
+		if c.apply {
+			want |= c.flag
+		} else {
+			want &^= c.flag
+		}
+		apply := r.U32()
+		if r.Err() != nil || r.Remaining() != 0 || (apply == 1) != c.apply || apply > 1 {
+			t.Fatalf("%s: apply %d, err %v, %d left", opcode.Name(c.ack), apply, r.Err(), r.Remaining())
+		}
+		if mi.Flags != want || mi.X != me.X || mi.Time == 0 || mi.Time < lastTime {
+			t.Fatalf("%s: %+v, want flags %#x", opcode.Name(c.ack), mi, want)
+		}
+		lastTime = mi.Time
+	}
+	// Feather fall is still on: it rides along in a walk and caps the knockback's fall.
+	if err := h.s.WalkTo(ctx, me.X+1, me.Y, me.Z); err != nil {
+		t.Fatal(err)
+	}
+	if mi := readMove(h.expect(opcode.MSGMoveStartForward).Body); mi.Flags != game.MoveForward|game.MoveSafeFall {
+		t.Fatalf("walk flags %#x", mi.Flags)
+	}
+	h.expect(opcode.MSGMoveStop)
+	h.send(opcode.SMSGMoveKnockBack, gametest.KnockBack(me.GUID, 30, 1, 0, 2, -12))
+	ack, _ := ackMove(t, h.expect(opcode.CMSGMoveKnockBackAck), 30)
+	if ack.Flags != game.MoveJumping|game.MoveSafeFall {
+		t.Fatalf("knockback ack flags %#x", ack.Flags)
+	}
+	land, err := h.srv.Expect(opcode.MSGMoveFallLand, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lm, want := readMove(land.Body), game.FallLandTime(-12, game.TerminalSafeFall); math.Abs(float64(lm.FallTime)-want*1000) > 1 {
+		t.Fatalf("feather-fall landing after %d ms, want %.0f", lm.FallTime, want*1000)
+	}
+	h.send(opcode.SMSGMoveNormalFall, gametest.MovementOrder(me.GUID, 31))
+	if mi, r := ackMove(t, h.expect(opcode.CMSGMoveFeatherFallAck), 31); mi.Flags != 0 || r.U32() != 0 {
+		t.Fatalf("normal fall ack %+v", mi)
+	}
+	// An order for another unit is not acked.
+	h.send(opcode.SMSGMoveSetHover, gametest.MovementOrder(wolfGUID, 32))
+	h.logout()
+	for _, p := range h.srv.Skipped() {
+		if p.Op == opcode.CMSGMoveHoverAck {
+			t.Fatal("acked another unit's hover")
+		}
+	}
+}

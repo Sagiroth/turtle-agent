@@ -30,3 +30,4 @@ Files taken from agent-wow 5ef4916 (copied = unchanged apart from the header;
 ported = structure kept, protocol details rewritten for the 1.12 core):
 
 turtle-agent file | agent-wow source | how
+tools/opcodegen/main.go | tools/opcodecatalog/main.go | ported (enum walk and assignment regex kept; 1.12 enum, gaps allowed, name table added)

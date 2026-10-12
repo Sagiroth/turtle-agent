@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -115,14 +114,9 @@ func (s Settings) Password(account string) (string, error) {
 	return "", errors.New("the requested account is not in the settings file")
 }
 
-// String keeps passwords out of %v, %+v and %s formatting.
+// String keeps passwords and account names out of %v, %+v and %s formatting.
 func (s Settings) String() string {
-	names := make([]string, 0, len(s.Accounts))
-	for n := range s.Accounts {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return fmt.Sprintf("Settings{realmd=%s realm=%q rpc=%s accounts=%v passwords=redacted}", s.Realmd, s.Realm, s.RPC, names)
+	return fmt.Sprintf("Settings{realmd=%s realm=%q rpc=%s accounts=%d passwords=redacted}", s.Realmd, s.Realm, s.RPC, len(s.Accounts))
 }
 
 // GoString keeps passwords out of %#v.

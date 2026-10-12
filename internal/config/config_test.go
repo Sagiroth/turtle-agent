@@ -66,8 +66,8 @@ func TestPasswordsNeverFormatted(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, out := range []string{fmt.Sprintf("%v", s), fmt.Sprintf("%+v", s), fmt.Sprintf("%#v", s), s.String()} {
-		if strings.Contains(out, "s3cret") {
-			t.Fatalf("password leaked: %s", out)
+		if strings.Contains(out, "s3cret") || strings.Contains(out, "Harness") {
+			t.Fatalf("password or account name leaked: %s", out)
 		}
 	}
 }

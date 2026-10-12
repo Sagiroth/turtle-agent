@@ -2,7 +2,10 @@
 // gametest imports game (see gametest.go), so only external test packages (package game_test) may use it.
 package gametest
 
-import "github.com/pjerra/turtle-agent/internal/packet"
+import (
+	"github.com/pjerra/turtle-agent/internal/game"
+	"github.com/pjerra/turtle-agent/internal/packet"
+)
 
 // AttackerStateUpdate is Unit::SendAttackStateUpdate with one sub-damage (Unit.cpp:4888-4921).
 func AttackerStateUpdate(hitInfo uint32, attacker, victim packet.GUID, total, school, absorb uint32, resist int32, victimState, blocked uint32) []byte {
@@ -42,6 +45,11 @@ func PeriodicHeal(target, caster packet.GUID, spell, auraType, amount uint32) []
 // PeriodicEnergize is the energize branch (Unit.cpp:4728-4732).
 func PeriodicEnergize(target, caster packet.GUID, spell, auraType, power, amount uint32) []byte {
 	return periodicHead(target, caster, spell, auraType).U32(power).U32(amount).Bytes()
+}
+
+// PeriodicLeech is the mana-leech branch (Unit.cpp:4733-4737).
+func PeriodicLeech(target, caster packet.GUID, spell, power, amount uint32, multiplier float32) []byte {
+	return periodicHead(target, caster, spell, game.AuraPeriodicManaLeech).U32(power).U32(amount).F32(multiplier).Bytes()
 }
 
 // SpellHeal is WorldObject::SendHealSpellLog (Object.cpp:4260-4271).

@@ -207,6 +207,7 @@ func (s *Session) register() {
 	s.registerParty()
 	s.registerWorld()
 	s.registerActions()
+	s.registerCombat()
 }
 
 func (s *Session) registerCore() {
@@ -365,8 +366,11 @@ func (s *Session) emit(e events.Event) {
 	s.flushNames(time.Now())
 }
 
-// appendEvent stores a ready event in the log.
-func (s *Session) appendEvent(e events.Event) { s.log.Append(e) }
+// appendEvent stores a ready event, flagging it when the player or a party member is involved.
+func (s *Session) appendEvent(e events.Event) {
+	e.Party = s.inParty(e.SourceGUID) || s.inParty(e.TargetGUID)
+	s.log.Append(e)
+}
 
 // flushPending appends everything still waiting, with the names known so far.
 func (s *Session) flushPending() { s.flushNames(time.Now().Add(time.Hour)) }

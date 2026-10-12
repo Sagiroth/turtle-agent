@@ -59,8 +59,7 @@ func TestPeriodicKinds(t *testing.T) {
 			t.Fatalf("%s: %+v %v", c.kind, p, err)
 		}
 	}
-	leech := packet.NewWriter().PackedGUID(wolf).PackedGUID(gorm).U32(5138).U32(1).U32(game.AuraPeriodicManaLeech).
-		U32(0).U32(42).F32(1.5).Bytes() // Unit.cpp:4733-4737
+	leech := gametest.PeriodicLeech(wolf, gorm, 5138, 0, 42, 1.5)
 	p, err := game.ParsePeriodicAuraLog(leech)
 	if err != nil || len(p.Ticks) != 1 || p.Ticks[0].Kind() != "leech" || p.Ticks[0].Amount != 42 || p.Ticks[0].Multiplier != 1.5 {
 		t.Fatalf("leech: %+v %v", p, err)

@@ -84,3 +84,38 @@ func TestM3PartyFromCapture(t *testing.T) {
 		}
 	}
 }
+
+// Milestone 5: the attack and teleport packets the server sent parse with the source layouts.
+func TestM5ActionsFromCapture(t *testing.T) {
+	recs := fixture(t, "m5-attack.twcap")
+	starts := capture.Bodies(recs, opcode.SMSGAttackstart)
+	if len(starts) == 0 {
+		t.Fatal("no SMSG_ATTACKSTART captured")
+	}
+	for _, b := range starts {
+		if a, err := ParseAttackStart(b); err != nil || a.Attacker == 0 || a.Victim == 0 {
+			t.Fatalf("% X: %+v %v", b, a, err)
+		}
+	}
+	for _, b := range capture.Bodies(recs, opcode.SMSGAttackstop) {
+		if _, err := ParseAttackStop(b); err != nil {
+			t.Fatalf("% X: %v", b, err)
+		}
+	}
+	teleports := 0
+	for _, b := range capture.Bodies(recs, opcode.MSGMoveTeleportAck) {
+		if _, err := ParseTeleportAck(b); err != nil {
+			t.Fatalf("% X: %v", b, err)
+		}
+		teleports++
+	}
+	for _, b := range capture.Bodies(recs, opcode.SMSGNewWorld) {
+		if _, err := ParseNewWorld(b); err != nil {
+			t.Fatalf("% X: %v", b, err)
+		}
+		teleports++
+	}
+	if teleports == 0 {
+		t.Fatal("no teleport captured")
+	}
+}

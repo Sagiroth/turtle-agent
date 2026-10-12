@@ -164,3 +164,28 @@ func TestUnitsTieBreakOnGUID(t *testing.T) {
 		}
 	}
 }
+
+func TestOwnersReadsTheThreeOwnerFields(t *testing.T) {
+	const pet, totem, charmed = packet.GUID(0xF140000001000001), packet.GUID(0xF130000F8E000002), packet.GUID(0xF130000001000003)
+	owner := packet.GUID(0x0000000100000030) // both words set, so the high word is read too
+	s := NewStore()
+	s.Apply([]Block{
+		createBlock(pet, TypeUnit, 0, 0, map[uint16]uint32{UnitCreatedBy: 0x30, UnitCreatedBy + 1: 1}),
+		createBlock(totem, TypeUnit, 0, 0, map[uint16]uint32{UnitSummonedBy: 0x30, UnitSummonedBy + 1: 1}),
+		createBlock(charmed, TypeUnit, 0, 0, nil),
+	})
+	s.Apply([]Block{{Type: BlockValues, GUID: charmed, Values: map[uint16]uint32{UnitCharmedBy: 0x30, UnitCharmedBy + 1: 1}}})
+	for _, c := range []struct {
+		g    packet.GUID
+		want [3]packet.GUID
+	}{
+		{pet, [3]packet.GUID{0, 0, owner}},
+		{totem, [3]packet.GUID{0, owner, 0}},
+		{charmed, [3]packet.GUID{owner, 0, 0}},
+		{wolf, [3]packet.GUID{}}, // not in the store
+	} {
+		if got := s.Owners(c.g); got != c.want {
+			t.Fatalf("%v: %v, want %v", c.g, got, c.want)
+		}
+	}
+}

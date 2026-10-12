@@ -190,6 +190,22 @@ func (s *Store) Get(g packet.GUID, ox, oy, oz float32) (Unit, bool) {
 	return toUnit(o, ox, oy, oz), true
 }
 
+// Owners returns the charmer, summoner and creator of g (zero when unset or unknown), so
+// a pet, totem or charmed unit can be traced to its player in one lookup.
+func (s *Store) Owners(g packet.GUID) [3]packet.GUID {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o, ok := s.objs[g]
+	if !ok {
+		return [3]packet.GUID{}
+	}
+	return [3]packet.GUID{guidAt(o.values, UnitCharmedBy), guidAt(o.values, UnitSummonedBy), guidAt(o.values, UnitCreatedBy)}
+}
+
+func guidAt(v map[uint16]uint32, i uint16) packet.GUID {
+	return packet.GUID(uint64(v[i]) | uint64(v[i+1])<<32)
+}
+
 // Units returns players and creatures matching f, nearest first.
 func (s *Store) Units(f Filter, ox, oy, oz float32) []Unit {
 	s.mu.RLock()
@@ -237,7 +253,7 @@ func toUnit(o *object, ox, oy, oz float32) Unit {
 		GUID: o.guid, Type: "creature", Entry: v[FieldEntry], X: o.x, Y: o.y, Z: o.z, O: o.o,
 		Health: v[UnitHealth], MaxHealth: v[UnitMaxHealth], PowerType: uint8(v[UnitBytes0] >> 24),
 		Level: v[UnitLevel], Faction: v[UnitFaction], Flags: v[UnitFlags], NPCFlags: v[UnitNPCFlags],
-		Target: packet.GUID(uint64(v[UnitTarget]) | uint64(v[UnitTarget+1])<<32),
+		Target: guidAt(v, UnitTarget),
 	}
 	if o.typ == TypePlayer || o.guid.IsPlayer() {
 		u.Type = "player"

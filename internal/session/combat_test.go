@@ -7,6 +7,7 @@ import (
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/game"
 	"github.com/pjerra/turtle-agent/internal/game/gametest"
+	"github.com/pjerra/turtle-agent/internal/objects"
 	"github.com/pjerra/turtle-agent/internal/opcode"
 	"github.com/pjerra/turtle-agent/internal/packet"
 )
@@ -99,5 +100,27 @@ func TestProcResistAndPowerTicks(t *testing.T) {
 	if len(p) != 2 || p[0].Data["tick"] != "energize" || p[0].Data["power"] != uint32(3) || p[0].Amount != 30 ||
 		p[1].Data["tick"] != "leech" || p[1].Data["power"] != uint32(0) || p[1].Source != "Young Wolf" || p[1].Amount != 42 {
 		t.Fatalf("power ticks %+v", p)
+	}
+}
+
+// TestPetEventsArePartyEvents: a hunter pet's swings and the hits it takes carry the party
+// flag through UNIT_FIELD_CREATEDBY; a stranger's pet stays out.
+func TestPetEventsArePartyEvents(t *testing.T) {
+	h := start(t, Options{NamesWait: 100 * time.Millisecond})
+	h.enterWorld()
+	wolfName(h)
+	const pet, strangerPet = packet.GUID(0xF140000001000001), packet.GUID(0xF140000002000002)
+	owned := func(owner packet.GUID) map[uint16]uint32 {
+		return map[uint16]uint32{objects.UnitHealth: 100, objects.UnitMaxHealth: 100, objects.UnitCreatedBy: uint32(owner), objects.UnitCreatedBy + 1: uint32(owner >> 32)}
+	}
+	h.send(opcode.SMSGUpdateObject, unitCreate(pet, objects.TypeUnit, me.X+2, me.Y, me.Z, owned(me.GUID)))
+	h.send(opcode.SMSGUpdateObject, unitCreate(strangerPet, objects.TypeUnit, me.X+4, me.Y, me.Z, owned(0x40)))
+	h.send(opcode.SMSGAttackerstateupdate, gametest.AttackerStateUpdate(0, pet, wolfGUID, 12, 0, 0, 0, 1, 0))
+	h.send(opcode.SMSGAttackerstateupdate, gametest.AttackerStateUpdate(0, wolfGUID, pet, 7, 0, 0, 0, 1, 0))
+	h.send(opcode.SMSGAttackerstateupdate, gametest.AttackerStateUpdate(0, strangerPet, wolfGUID, 9, 0, 0, 0, 1, 0))
+	h.logout()
+	m := kindsOf(h.s.Log())[events.KindMelee]
+	if len(m) != 3 || !m[0].Party || m[0].Amount != 12 || !m[1].Party || m[1].Amount != 7 || m[2].Party {
+		t.Fatalf("pet melee %+v", m)
 	}
 }

@@ -366,9 +366,10 @@ func (s *Session) emit(e events.Event) {
 	s.flushNames(time.Now())
 }
 
-// appendEvent stores a ready event, flagging it when the player or a party member is involved.
+// appendEvent stores a ready event, flagging it when the player, a party member or one of
+// their pets is involved.
 func (s *Session) appendEvent(e events.Event) {
-	e.Party = s.inParty(e.SourceGUID) || s.inParty(e.TargetGUID)
+	e.Party = s.partyInvolved(e.SourceGUID) || s.partyInvolved(e.TargetGUID)
 	s.log.Append(e)
 }
 

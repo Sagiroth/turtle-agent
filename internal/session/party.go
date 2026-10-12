@@ -55,6 +55,9 @@ func (s *Session) Party() PartyInfo {
 }
 
 func (s *Session) inParty(g packet.GUID) bool {
+	if g == 0 {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if g != 0 && g == s.self.GUID {
@@ -62,6 +65,24 @@ func (s *Session) inParty(g packet.GUID) bool {
 	}
 	for _, m := range s.party.Members {
 		if m.GUID == g {
+			return true
+		}
+	}
+	return false
+}
+
+// partyInvolved reports whether g is the player, a party member, or a unit charmed,
+// summoned or created by one of them (a pet, totem or mind-controlled mob). It costs one
+// store lookup when g is not a member itself.
+func (s *Session) partyInvolved(g packet.GUID) bool {
+	if s.inParty(g) {
+		return true
+	}
+	if g == 0 {
+		return false
+	}
+	for _, owner := range s.store.Owners(g) {
+		if s.inParty(owner) {
 			return true
 		}
 	}

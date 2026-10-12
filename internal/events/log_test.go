@@ -1,0 +1,189 @@
+package events
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func appendKinds(l *Log, kinds ...string) {
+	for _, k := range kinds {
+		l.Append(Event{Kind: k})
+	}
+}
+
+func TestSinceIsExclusiveAndContiguous(t *testing.T) {
+	l := New(100)
+	appendKinds(l, KindChat, KindMelee, KindChat, KindHeal)
+	p := l.Read(Query{Since: 1})
+	if len(p.Events) != 3 || p.Events[0].Seq != 2 || p.Events[2].Seq != 4 || p.Next != 4 || p.Dropped || p.More {
+		t.Fatalf("%+v", p)
+	}
+	if p := l.Read(Query{Since: 4}); len(p.Events) != 0 || p.Next != 4 {
+		t.Fatalf("%+v", p)
+	}
+}
+
+func TestKindsFilterAdvancesNext(t *testing.T) {
+	l := New(100)
+	appendKinds(l, KindMelee, KindChat, KindMelee)
+	p := l.Read(Query{Kinds: []string{KindChat}})
+	if len(p.Events) != 1 || p.Events[0].Seq != 2 || p.Next != 3 {
+		t.Fatalf("%+v", p)
+	}
+}
+
+func TestPartyOnly(t *testing.T) {
+	l := New(100)
+	l.Append(Event{Kind: KindMelee, Party: true})
+	l.Append(Event{Kind: KindMelee})
+	if p := l.Read(Query{PartyOnly: true}); len(p.Events) != 1 || p.Events[0].Seq != 1 || p.Next != 2 {
+		t.Fatalf("%+v", p)
+	}
+}
+
+func TestLimitAndMore(t *testing.T) {
+	l := New(100)
+	for i := 0; i < 10; i++ {
+		l.Append(Event{Kind: KindChat})
+	}
+	p := l.Read(Query{Limit: 4})
+	if len(p.Events) != 4 || !p.More || p.Next != 4 {
+		t.Fatalf("%+v", p)
+	}
+	p = l.Read(Query{Since: p.Next, Limit: 100})
+	if len(p.Events) != 6 || p.More || p.Next != 10 {
+		t.Fatalf("%+v", p)
+	}
+}
+
+func TestEvictionReportsDropped(t *testing.T) {
+	l := New(10)
+	for i := 0; i < 25; i++ {
+		l.Append(Event{Kind: KindChat})
+	}
+	p := l.Read(Query{})
+	if !p.Dropped || p.Oldest <= 1 || p.Events[0].Seq != p.Oldest || p.Next != 25 || len(p.Events) > 10 {
+		t.Fatalf("%+v", p)
+	}
+	if p := l.Read(Query{Since: p.Oldest}); p.Dropped {
+		t.Fatalf("cursor at Oldest must not report drops: %+v", p)
+	}
+}
+
+func TestConcurrentAppend(t *testing.T) {
+	l := New(100000)
+	var writers, reader sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			for i := 0; i < 1000; i++ {
+				l.Append(Event{Kind: KindChat})
+			}
+		}()
+	}
+	done := make(chan struct{})
+	reader.Add(1)
+	go func() {
+		defer reader.Done()
+		var next uint64
+		for {
+			p := l.Read(Query{Since: next, Limit: MaxLimit})
+			for _, e := range p.Events {
+				if e.Seq != next+1 {
+					t.Errorf("gap: %d after %d", e.Seq, next)
+				}
+				next = e.Seq
+			}
+			select {
+			case <-done:
+				if next == 8000 {
+					return
+				}
+			default:
+			}
+		}
+	}()
+	writers.Wait()
+	close(done)
+	reader.Wait()
+	if l.Last() != 8000 {
+		t.Fatalf("last %d", l.Last())
+	}
+}
+
+func TestCursorAheadOfLog(t *testing.T) {
+	l := New(10)
+	appendKinds(l, KindChat)
+	if p := l.Read(Query{Since: 99}); p.Next != 1 || len(p.Events) != 0 {
+		t.Fatalf("%+v", p)
+	}
+}
+
+func TestWaitWakesOnAppendAndHonoursContext(t *testing.T) {
+	l := New(10)
+	go func() { time.Sleep(20 * time.Millisecond); l.Append(Event{Kind: KindChat}) }()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := l.Wait(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel2()
+	if err := l.Wait(ctx2, 1); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestEventJSONShape(t *testing.T) {
+	b, _ := json.Marshal(Event{Seq: 1, Kind: KindMelee, SourceGUID: 0xF130000000001234, Amount: 12})
+	s := string(b)
+	if !strings.Contains(s, `"source_guid":"0xF130000000001234"`) || strings.Contains(s, "target_guid") || !strings.Contains(s, `"amount":12`) {
+		t.Fatal(s)
+	}
+}
+
+func TestFilteredPagingCoversEveryEventOnce(t *testing.T) {
+	l := New(100)
+	for i := 0; i < 30; i++ {
+		k := KindMelee
+		if i%3 == 0 {
+			k = KindChat
+		}
+		l.Append(Event{Kind: k})
+	}
+	var got []uint64
+	var next uint64
+	for i := 0; i < 20; i++ {
+		p := l.Read(Query{Since: next, Kinds: []string{KindChat}, Limit: 3})
+		for _, e := range p.Events {
+			got = append(got, e.Seq)
+		}
+		next = p.Next
+		if !p.More {
+			break
+		}
+	}
+	if len(got) != 10 || got[0] != 1 || got[9] != 28 || next != 28 && next != 30 {
+		t.Fatalf("got %v next %d", got, next)
+	}
+}
+
+func TestWaitReturnsImmediatelyWhenBehindAndLimitClamps(t *testing.T) {
+	l := New(10)
+	appendKinds(l, KindChat, KindChat)
+	if err := l.Wait(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		l.Append(Event{Kind: KindChat})
+	}
+	if p := l.Read(Query{Limit: -5}); len(p.Events) != 5 {
+		t.Fatalf("%+v", p)
+	}
+}

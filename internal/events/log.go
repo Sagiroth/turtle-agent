@@ -83,7 +83,7 @@ const (
 // ChatKinds is what the chat_log method returns.
 var ChatKinds = []string{KindChat, KindWhisper, KindSystem}
 
-// now is the wall clock; tests replace it.
+// now is the clock; tests replace it.
 var now = time.Now
 
 // base is taken once per process. Its monotonic reading is the zero of mono_ms.
@@ -95,22 +95,34 @@ func BaseTime() time.Time { return base }
 // MonoMS is the milliseconds elapsed since BaseTime on the monotonic clock.
 func MonoMS() int64 { return int64(now().Sub(base) / time.Millisecond) }
 
-// Stamp sets Time and MonoMS of e unless Time is already set. Time is base plus the monotonic
-// elapsed time, so it advances smoothly and ignores steps of the host clock.
+// WallOffsetMS is the wall clock now minus BaseTime plus the monotonic elapsed time, in ms: how
+// far the host clock has been stepped or has drifted from the monotonic clock since start.
+func WallOffsetMS() int64 {
+	n := now()
+	return wallOffset(n.Round(0), n.Sub(base)).Milliseconds()
+}
+
+func wallOffset(wall time.Time, elapsed time.Duration) time.Duration {
+	return wall.Sub(base.Round(0).Add(elapsed))
+}
+
+// Stamp sets Time (the wall clock) unless it is already set, and MonoMS (the steady axis) unless
+// it is already set. An event that arrives with a Time still gets the mono_ms of its arrival.
 func Stamp(e *Event) {
-	if !e.Time.IsZero() {
-		return
+	n := now()
+	if e.Time.IsZero() {
+		e.Time = n
 	}
-	d := now().Sub(base)
-	e.Time = base.Add(d)
-	e.MonoMS = int64(d / time.Millisecond)
+	if e.MonoMS == 0 {
+		e.MonoMS = int64(n.Sub(base) / time.Millisecond)
+	}
 }
 
 // Event is one log entry. Names are resolved by the session before Append.
 type Event struct {
 	Seq        uint64         `json:"seq"`
 	Time       time.Time      `json:"time"`
-	MonoMS     int64          `json:"mono_ms"` // ms since BaseTime on the monotonic clock; unaffected by wall-clock steps
+	MonoMS     int64          `json:"mono_ms"` // ms since BaseTime on the monotonic clock; unaffected by wall-clock steps (time is the wall clock)
 	Kind       string         `json:"kind"`
 	Source     string         `json:"source,omitempty"`
 	SourceGUID packet.GUID    `json:"source_guid,omitempty"`

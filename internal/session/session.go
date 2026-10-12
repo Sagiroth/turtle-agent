@@ -119,29 +119,30 @@ type Options struct {
 const maxLoginRetries = 5
 
 type StatusInfo struct {
-	State       Status         `json:"state"`
-	Character   string         `json:"character,omitempty"`
-	GUID        packet.GUID    `json:"guid,omitempty"`
-	Level       uint8          `json:"level,omitempty"`
-	Map         uint32         `json:"map"`
-	X           float32        `json:"x"`
-	Y           float32        `json:"y"`
-	Z           float32        `json:"z"`
-	O           float32        `json:"o"`
-	Target      packet.GUID    `json:"target,omitempty"`
-	Health      uint32         `json:"health"`
-	MaxHealth   uint32         `json:"max_health"`
-	Power       uint32         `json:"power"`
-	MaxPower    uint32         `json:"max_power"`
-	Falling     bool           `json:"falling"`   // in the air: a knockback, or a fall after a teleport
-	ZUnknown    bool           `json:"z_unknown"` // z is a guess (GM teleport, climb, landing) until the server sends a position
-	LatencyMS   uint32         `json:"latency_ms"`
-	Unknown     map[string]int `json:"unknown_opcodes"`
-	ParseErrors int            `json:"parse_errors"`
-	LastSeq     uint64         `json:"last_seq"`
-	MonoMS      int64          `json:"mono_ms"`   // ms since base_time on the monotonic clock, as in events
-	BaseTime    time.Time      `json:"base_time"` // wall time of mono_ms 0
-	Error       string         `json:"error,omitempty"`
+	State        Status         `json:"state"`
+	Character    string         `json:"character,omitempty"`
+	GUID         packet.GUID    `json:"guid,omitempty"`
+	Level        uint8          `json:"level,omitempty"`
+	Map          uint32         `json:"map"`
+	X            float32        `json:"x"`
+	Y            float32        `json:"y"`
+	Z            float32        `json:"z"`
+	O            float32        `json:"o"`
+	Target       packet.GUID    `json:"target,omitempty"`
+	Health       uint32         `json:"health"`
+	MaxHealth    uint32         `json:"max_health"`
+	Power        uint32         `json:"power"`
+	MaxPower     uint32         `json:"max_power"`
+	Falling      bool           `json:"falling"`   // in the air: a knockback, or a fall after a teleport
+	ZUnknown     bool           `json:"z_unknown"` // z is a guess (GM teleport, climb, landing) until the server sends a position
+	LatencyMS    uint32         `json:"latency_ms"`
+	Unknown      map[string]int `json:"unknown_opcodes"`
+	ParseErrors  int            `json:"parse_errors"`
+	LastSeq      uint64         `json:"last_seq"`
+	MonoMS       int64          `json:"mono_ms"`        // ms since base_time on the monotonic clock, as in events
+	BaseTime     time.Time      `json:"base_time"`      // wall time of mono_ms 0
+	WallOffsetMS int64          `json:"wall_offset_ms"` // wall clock now minus base_time + mono_ms: host clock steps and drift
+	Error        string         `json:"error,omitempty"`
 }
 
 type handler func(body []byte) error
@@ -334,7 +335,7 @@ func (s *Session) Status() StatusInfo {
 		State: s.state, Character: s.self.Name, GUID: s.self.GUID, Level: s.self.Level, Map: s.mapID,
 		X: s.pos[0], Y: s.pos[1], Z: s.pos[2], O: s.pos[3], Target: s.target, LatencyMS: s.latency,
 		Falling: s.falling, ZUnknown: s.zUnknown,
-		Unknown: unknown, ParseErrors: s.parseErrs, LastSeq: s.log.Last(), MonoMS: events.MonoMS(), BaseTime: events.BaseTime(), Error: s.lastErr,
+		Unknown: unknown, ParseErrors: s.parseErrs, LastSeq: s.log.Last(), MonoMS: events.MonoMS(), BaseTime: events.BaseTime(), WallOffsetMS: events.WallOffsetMS(), Error: s.lastErr,
 	}
 	// The player's own values from the store (zero until its create block arrives).
 	if u, ok := s.store.Get(s.self.GUID, s.pos[0], s.pos[1], s.pos[2]); ok {

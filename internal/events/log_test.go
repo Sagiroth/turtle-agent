@@ -188,7 +188,7 @@ func TestWaitReturnsImmediatelyWhenBehindAndLimitClamps(t *testing.T) {
 	}
 }
 
-func TestStampFollowsMonotonicClock(t *testing.T) {
+func TestStampKeepsWallTimeAndAddsMono(t *testing.T) {
 	saved, savedBase := now, base
 	defer func() { now, base = saved, savedBase }()
 	wall := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -198,13 +198,13 @@ func TestStampFollowsMonotonicClock(t *testing.T) {
 	a := l.Append(Event{Kind: KindChat})
 	wall = wall.Add(1500 * time.Millisecond)
 	b := l.Append(Event{Kind: KindChat})
-	if a.MonoMS != 0 || b.MonoMS != 1500 || !b.Time.Equal(base.Add(1500*time.Millisecond)) {
+	if a.MonoMS != 0 || b.MonoMS != 1500 || !b.Time.Equal(wall) {
 		t.Fatalf("%+v %+v", a, b)
 	}
-	// A preset Time (replayed or foreign) is kept as is.
+	// An event that brings its own time keeps it and still gets the mono_ms of its arrival.
 	c := l.Append(Event{Kind: KindChat, Time: base.Add(-time.Hour)})
-	if c.MonoMS != 0 || !c.Time.Equal(base.Add(-time.Hour)) {
-		t.Fatalf("preset time must be kept: %+v", c)
+	if c.MonoMS != 1500 || !c.Time.Equal(base.Add(-time.Hour)) {
+		t.Fatalf("preset time: %+v", c)
 	}
 	var m map[string]any
 	raw, _ := json.Marshal(b)
@@ -212,6 +212,21 @@ func TestStampFollowsMonotonicClock(t *testing.T) {
 	if m["mono_ms"] != float64(1500) {
 		t.Fatalf("json: %s", raw)
 	}
+}
+
+func TestWallOffsetShowsAClockStep(t *testing.T) {
+	saved := base
+	defer func() { base = saved }()
+	base = time.Now()
+	elapsed := time.Second
+	if got := wallOffset(base.Round(0).Add(elapsed), elapsed); got != 0 {
+		t.Fatalf("no step: %v", got)
+	}
+	// The host clock stepped back 2 s while 1 s of monotonic time passed.
+	if got := wallOffset(base.Round(0).Add(elapsed-2*time.Second), elapsed); got != -2*time.Second {
+		t.Fatalf("step: %v", got)
+	}
+	_ = WallOffsetMS()
 }
 
 func TestMonoMSNeverGoesBack(t *testing.T) {

@@ -290,6 +290,7 @@ func TestRPCErrMapping(t *testing.T) {
 		{session.ErrClosed, rpc.CodeDisconnected},
 		{context.DeadlineExceeded, rpc.CodeTimeout},
 		{session.ErrLogoutTimeout, rpc.CodeTimeout},
+		{session.ErrLostAtLogout, rpc.CodeDisconnected},
 		{context.Canceled, rpc.CodeDisconnected},
 		{&session.LogoutError{Reason: 1}, rpc.CodeGame},
 		{fmt.Errorf("%w: CMSG_PING: %w", worldconn.ErrWrite, net.ErrClosed), rpc.CodeDisconnected},

@@ -102,7 +102,8 @@ type equipParams struct {
 }
 
 // logoutResult says how the logout ended: "complete" (SMSG_LOGOUT_COMPLETE) or
-// "closed_by_server" (the server closed the socket instead; issues #9, #18).
+// "closed_by_server" (the server accepted it, then closed the socket; issues #9, #18).
+// "lost" and "timeout" are errors (-32002, -32004) carrying data.outcome.
 type logoutResult struct {
 	Outcome string `json:"outcome"`
 }
@@ -252,12 +253,16 @@ func rpcErr(err error) error {
 		return nil
 	case errors.Is(err, session.ErrNotInWorld):
 		return &rpc.Error{Code: rpc.CodeNotInWorld, Message: err.Error()}
+	case errors.Is(err, session.ErrLostAtLogout):
+		return &rpc.Error{Code: rpc.CodeDisconnected, Message: err.Error(), Data: map[string]any{"outcome": string(session.LogoutLost)}}
+	case errors.Is(err, session.ErrLogoutTimeout):
+		return &rpc.Error{Code: rpc.CodeTimeout, Message: err.Error(), Data: map[string]any{"outcome": string(session.LogoutTimedOut)}}
 	case errors.Is(err, session.ErrDisconnected), errors.Is(err, session.ErrClosed), errors.Is(err, context.Canceled),
 		errors.Is(err, worldconn.ErrWrite):
 		// context.Canceled: the client went away or the agent is shutting down. ErrWrite: the
 		// socket died under a write, before Run has noticed the close (review M1).
 		return &rpc.Error{Code: rpc.CodeDisconnected, Message: err.Error()}
-	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, session.ErrLogoutTimeout):
+	case errors.Is(err, context.DeadlineExceeded):
 		return &rpc.Error{Code: rpc.CodeTimeout, Message: err.Error()}
 	case errors.As(err, &le):
 		return &rpc.Error{Code: rpc.CodeGame, Message: err.Error(), Data: map[string]any{"reason": le.Reason}}

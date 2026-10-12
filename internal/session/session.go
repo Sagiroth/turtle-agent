@@ -46,6 +46,11 @@ var (
 	// without SMSG_LOGOUT_COMPLETE (issues #9, #18). The logout itself succeeded: Logout
 	// answers LogoutClosedByServer.
 	ErrClosedAtLogout = errors.New("the server closed the connection during the logout, without SMSG_LOGOUT_COMPLETE")
+	// ErrLostAtLogout ends Logout and Run when the socket died after a logout request the
+	// server had not accepted yet: the core keeps a dropped character in world for a while
+	// (WorldSession.cpp, ForcePlayerLogoutDelay), so this is not a logout. Like the other
+	// logout ends it does not wrap ErrDisconnected: no reconnect, no grace window.
+	ErrLostAtLogout = errors.New("the connection was lost before the server accepted the logout")
 	// ErrLogoutTimeout ends Logout and Run when the server neither completed the logout nor
 	// closed the socket within Options.LogoutTimeout; the agent then closes the socket.
 	ErrLogoutTimeout = errors.New("logout timed out without SMSG_LOGOUT_COMPLETE")
@@ -58,8 +63,13 @@ type LogoutOutcome string
 const (
 	// LogoutComplete: the server sent SMSG_LOGOUT_COMPLETE (WorldSession.cpp LogoutPlayer).
 	LogoutComplete LogoutOutcome = "complete"
-	// LogoutClosedByServer: the server closed the socket after the request instead.
+	// LogoutClosedByServer: the server accepted the logout (SMSG_LOGOUT_RESPONSE reason 0)
+	// and then closed the socket instead.
 	LogoutClosedByServer LogoutOutcome = "closed_by_server"
+	// LogoutLost: the socket died before the server accepted the logout (ErrLostAtLogout).
+	LogoutLost LogoutOutcome = "lost"
+	// LogoutTimedOut: no answer within Options.LogoutTimeout (ErrLogoutTimeout).
+	LogoutTimedOut LogoutOutcome = "timeout"
 )
 
 // LogoutError is a refused logout (MiscHandler.cpp:350-365).
@@ -196,6 +206,7 @@ type Session struct {
 	pongWait        bool
 	logout          *logoutOp
 	logoutDeadline  time.Time
+	logoutAccepted  bool // SMSG_LOGOUT_RESPONSE reason 0 for the pending logout
 	loginRetries    int
 	loginRetryAt    time.Time
 	names           *nameCache
@@ -327,8 +338,8 @@ func (s *Session) Status() StatusInfo {
 }
 
 // Run drives the character from the character list to logout. It returns nil after a
-// clean logout, ErrClosedAtLogout or ErrLogoutTimeout after a logout that ended another
-// way, and an error wrapping ErrDisconnected when the server closes the socket otherwise.
+// clean logout, ErrClosedAtLogout, ErrLostAtLogout or ErrLogoutTimeout after a logout that
+// ended another way, and an error wrapping ErrDisconnected when the server closes the socket otherwise.
 func (s *Session) Run(ctx context.Context) error {
 	defer close(s.done)
 	defer s.conn.Close()
@@ -522,32 +533,44 @@ func (s *Session) onTick(now time.Time) error {
 }
 
 // end records why the session stopped, emits it and wakes a waiting Logout.
-func (s *Session) end(err error) error {
+func (s *Session) end(err error) error { return s.endLogout(err, "") }
+
+// endLogout is end for a pending logout that ended without a logout: the session event
+// and the waiting Logout carry outcome.
+func (s *Session) endLogout(err error, outcome LogoutOutcome) error {
 	s.mu.Lock()
 	s.state = StatusDisconnected
 	s.lastErr = s.redact.scrub(err.Error())
 	s.mu.Unlock()
 	s.flushPending()
-	s.emit(events.Event{Kind: events.KindSession, Text: err.Error(), Data: map[string]any{"state": string(StatusDisconnected)}})
+	data := map[string]any{"state": string(StatusDisconnected)}
+	if outcome != "" {
+		data["outcome"] = string(outcome)
+	}
+	s.emit(events.Event{Kind: events.KindSession, Text: err.Error(), Data: data})
 	if s.logout != nil {
-		s.logout.finish("", err)
+		s.logout.finish(outcome, err)
 		s.logout = nil
 	}
 	return err
 }
 
 // connLost ends the session after a socket error or a failed tick. A socket that dies
-// while a logout is pending is the server ending the logout its own way (issues #9, #18):
-// the logout succeeds as LogoutClosedByServer and Run returns ErrClosedAtLogout, which is
-// not ErrDisconnected, so neither --reconnect nor the disconnect grace window applies.
+// after the server accepted a pending logout is the server ending the logout its own way
+// (issues #9, #18): the logout succeeds as LogoutClosedByServer and Run returns
+// ErrClosedAtLogout. Before the acceptance it is LogoutLost (ErrLostAtLogout). Neither
+// wraps ErrDisconnected, so neither --reconnect nor the disconnect grace window applies.
 func (s *Session) connLost(err error) error {
 	switch st := s.State(); {
 	case st == StatusLoggedOut:
 		return nil
 	case errors.Is(err, ErrLogoutTimeout):
-		return s.end(err)
+		return s.endLogout(err, LogoutTimedOut)
 	case st == StatusLoggingOut && !errors.Is(err, errNoPong):
-		return s.closedAtLogout(err)
+		if s.logoutAccepted {
+			return s.closedAtLogout(err)
+		}
+		return s.endLogout(fmt.Errorf("%w: %v", ErrLostAtLogout, err), LogoutLost)
 	}
 	return s.end(fmt.Errorf("%w: %v", ErrDisconnected, err))
 }
@@ -654,9 +677,10 @@ func (s *Session) onPong(body []byte) error {
 }
 
 // Logout asks for a logout and waits for its end: SMSG_LOGOUT_COMPLETE (LogoutComplete) or
-// the server closing the socket (LogoutClosedByServer). A refusal is a *LogoutError and
-// the session lives on; no answer within Options.LogoutTimeout is ErrLogoutTimeout and
-// ends the session.
+// the server closing the socket after accepting it (LogoutClosedByServer). A refusal is a
+// *LogoutError and the session lives on. A socket lost before the acceptance (LogoutLost,
+// ErrLostAtLogout) and no answer within Options.LogoutTimeout (LogoutTimedOut,
+// ErrLogoutTimeout) end the session and return their outcome with the error.
 func (s *Session) Logout(ctx context.Context) (LogoutOutcome, error) {
 	v, err := s.do(ctx, func() (any, error) {
 		if s.logout != nil {
@@ -670,6 +694,7 @@ func (s *Session) Logout(ctx context.Context) (LogoutOutcome, error) {
 		}
 		s.logout = &logoutOp{done: make(chan struct{})}
 		s.logoutDeadline = time.Now().Add(s.opts.LogoutTimeout)
+		s.logoutAccepted = false
 		s.setState(StatusLoggingOut)
 		return s.logout, nil
 	})
@@ -707,6 +732,7 @@ func (s *Session) onLogoutResponse(body []byte) error {
 		s.emit(events.Event{Kind: events.KindSession, Data: map[string]any{"state": "logout_refused", "reason": reason}})
 		return nil
 	}
+	s.logoutAccepted = s.logout != nil
 	s.emit(events.Event{Kind: events.KindSession, Data: map[string]any{"state": "logout_pending", "instant": instant == 1}})
 	return nil
 }

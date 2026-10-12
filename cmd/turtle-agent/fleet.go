@@ -223,13 +223,15 @@ func runFleet(ctx context.Context, members []fleetMember, deps fleetDeps, o flee
 	}
 
 	// anyExit reports an exited child and whether it failed. A failed child wins over
-	// an earlier clean exit, so a clean logout never hides a later failure.
+	// an earlier clean exit, so a clean logout never hides a later failure. A logout that
+	// did not complete (exitLogoutIncomplete, from that child's own RPC logout) is not a
+	// failure here: the rest keep running, and finish still reports its code.
 	anyExit := func() (int, bool) {
 		first := -1
 		for i, c := range children {
 			select {
 			case <-c.Done():
-				if c.Code() != exitOK {
+				if c.Code() != exitOK && c.Code() != exitLogoutIncomplete {
 					return i, true
 				}
 				if first < 0 {

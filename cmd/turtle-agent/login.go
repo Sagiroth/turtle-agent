@@ -274,7 +274,8 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			return logoutAndWait(s, conn, runErr, stderr)
 		case err := <-runErr:
 			code := sessionExit(s, err, stderr)
-			if err == nil || errors.Is(err, session.ErrClosedAtLogout) || errors.Is(err, session.ErrLogoutTimeout) {
+			if err == nil || errors.Is(err, session.ErrClosedAtLogout) || errors.Is(err, session.ErrLostAtLogout) ||
+				errors.Is(err, session.ErrLogoutTimeout) {
 				// A logout through the RPC, however it ended: done at once. The deferred RPC
 				// shutdown lets the logout call in flight write its reply first.
 				return code
@@ -324,7 +325,7 @@ func logoutAndWait(s *session.Session, conn *worldconn.Conn, runErr <-chan error
 		cancel()
 		var le *session.LogoutError
 		if !errors.As(err, &le) {
-			if err != nil && !errors.Is(err, session.ErrLogoutTimeout) { // sessionExit says that one
+			if err != nil && !errors.Is(err, session.ErrLogoutTimeout) && !errors.Is(err, session.ErrLostAtLogout) { // sessionExit says those
 				fmt.Fprintln(stderr, "logout:", s.Redact(err.Error()))
 			}
 			break
@@ -376,7 +377,10 @@ func sessionExit(s *session.Session, err error, stderr io.Writer) int {
 		return exitOK
 	case errors.Is(err, session.ErrLogoutTimeout):
 		fmt.Fprintln(stderr, "logout: timed out without SMSG_LOGOUT_COMPLETE; connection closed, the character may stay in world")
-		return exitDisconnected
+		return exitLogoutIncomplete
+	case errors.Is(err, session.ErrLostAtLogout):
+		fmt.Fprintln(stderr, "logout:", s.Redact(err.Error())+"; the character may stay in world for a while")
+		return exitLogoutIncomplete
 	}
 	fmt.Fprintln(stderr, "session:", s.Redact(err.Error()))
 	if errors.Is(err, session.ErrDisconnected) {

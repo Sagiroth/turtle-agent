@@ -21,8 +21,8 @@ func TestRPCLogoutEndsProcess(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		server  func(srv *worldtest.Server)
-		outcome string // result.outcome; "": an error with errCode
-		errCode int
+		outcome string // result.outcome, or error.data.outcome with errCode
+		errCode int    // 0: a result
 		code    int
 		stderr  string
 	}{
@@ -35,10 +35,10 @@ func TestRPCLogoutEndsProcess(t *testing.T) {
 			srv.Close()
 		}, "closed_by_server", 0, exitOK, "logout: the server closed the connection"},
 		{"close without response", func(srv *worldtest.Server) { srv.Close() },
-			"closed_by_server", 0, exitOK, "logout: the server closed the connection"},
+			"lost", rpc.CodeDisconnected, exitLogoutIncomplete, "before the server accepted the logout"},
 		{"never answers", func(srv *worldtest.Server) {
 			srv.Expect(0xFFFF, 10*time.Second) // hold the socket until the agent closes it
-		}, "", rpc.CodeTimeout, exitDisconnected, "logout: timed out"},
+		}, "timeout", rpc.CodeTimeout, exitLogoutIncomplete, "logout: timed out"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			old := logoutTimeout
@@ -62,12 +62,12 @@ func TestRPCLogoutEndsProcess(t *testing.T) {
 			t.Cleanup(func() { cancel(); <-exited })
 			addr := rpcAddr(t, &stderr)
 			out := rpcCall(t, addr, "logout", "{}")
-			if tc.outcome != "" {
+			if tc.errCode == 0 {
 				res, _ := out["result"].(map[string]any)
 				if out["error"] != nil || res["outcome"] != tc.outcome {
 					t.Fatalf("logout reply %v", out)
 				}
-			} else if errCode(out) != tc.errCode {
+			} else if e, _ := out["error"].(map[string]any); errCode(out) != tc.errCode || e["data"].(map[string]any)["outcome"] != tc.outcome {
 				t.Fatalf("logout reply %v", out)
 			}
 			select {

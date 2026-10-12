@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,6 +41,12 @@ func start(t *testing.T, opts Options) *harness {
 // the form the world server derives from the account's stored K.
 func startKeyed(t *testing.T, opts Options, clientKey, serverKey []byte) *harness {
 	t.Helper()
+	return startWrapped(t, opts, clientKey, serverKey, nil)
+}
+
+// startWrapped is startKeyed with the client's end of the pipe wrapped (nil: as is).
+func startWrapped(t *testing.T, opts Options, clientKey, serverKey []byte, wrap func(net.Conn) net.Conn) *harness {
+	t.Helper()
 	cli, srvConn := net.Pipe()
 	t.Cleanup(func() { cli.Close(); srvConn.Close() })
 	ch := make(chan *worldtest.Server, 1)
@@ -50,7 +57,11 @@ func startKeyed(t *testing.T, opts Options, clientKey, serverKey []byte) *harnes
 		}
 		ch <- srv
 	}()
-	conn, err := worldconn.Client(cli, "TESTACC", clientKey, nil)
+	var nc net.Conn = cli
+	if wrap != nil {
+		nc = wrap(cli)
+	}
+	conn, err := worldconn.Client(nc, "TESTACC", clientKey, nil)
 	if err != nil {
 		<-ch // the server goroutine reports through t; let it finish before the test does
 		t.Fatal(err)
@@ -248,10 +259,11 @@ func TestLogoutEnds(t *testing.T) {
 			h.send(opcode.SMSGLogoutResponse, accepted)
 			h.srv.Close()
 		}, LogoutClosedByServer, nil, ErrClosedAtLogout, StatusLoggedOut, "logged_out"},
+		// Not accepted yet: the core keeps a dropped character in world (ForcePlayerLogoutDelay).
 		{"close without response", func(h *harness) { h.srv.Close() },
-			LogoutClosedByServer, nil, ErrClosedAtLogout, StatusLoggedOut, "logged_out"},
+			LogoutLost, ErrLostAtLogout, ErrLostAtLogout, StatusDisconnected, "disconnected"},
 		{"never answers", func(h *harness) {},
-			"", ErrLogoutTimeout, ErrLogoutTimeout, StatusDisconnected, "disconnected"},
+			LogoutTimedOut, ErrLogoutTimeout, ErrLogoutTimeout, StatusDisconnected, "disconnected"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := start(t, Options{LogoutTimeout: 300 * time.Millisecond})
@@ -281,7 +293,71 @@ func TestLogoutEnds(t *testing.T) {
 			if states := sessionStates(h.s.Log()); states[len(states)-1] != tc.last {
 				t.Fatalf("events %v", states)
 			}
+			evs := ofKind(h.s.Log(), events.KindSession)
+			if got := evs[len(evs)-1].Data["outcome"]; got != string(tc.outcome) {
+				t.Fatalf("final session event outcome %v", got)
+			}
 		})
+	}
+}
+
+// brokenWrites fails every write once broken is set; reads go on.
+type brokenWrites struct {
+	net.Conn
+	broken atomic.Bool
+}
+
+func (b *brokenWrites) Write(p []byte) (int, error) {
+	if b.broken.Load() {
+		return 0, errors.New("broken pipe")
+	}
+	return b.Conn.Write(p)
+}
+
+// A ping that fails to write while an unanswered logout is pending is a lost logout,
+// never closed_by_server: the server had not accepted it.
+func TestPingWriteFailsDuringLogout(t *testing.T) {
+	var bw *brokenWrites
+	h := startWrapped(t, Options{PingInterval: 50 * time.Millisecond}, testKey, testKey, func(c net.Conn) net.Conn {
+		bw = &brokenWrites{Conn: c}
+		return bw
+	})
+	h.enterWorld()
+	done := h.logoutAsync()
+	h.expect(opcode.CMSGLogoutRequest)
+	bw.broken.Store(true)
+	select {
+	case r := <-done:
+		if r.outcome != LogoutLost || !errors.Is(r.err, ErrLostAtLogout) {
+			t.Fatalf("logout = %q, %v", r.outcome, r.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("logout never answered")
+	}
+	if err := <-h.run; !errors.Is(err, ErrLostAtLogout) || errors.Is(err, ErrDisconnected) {
+		t.Fatalf("run err = %v", err)
+	}
+}
+
+// A second Logout while one is pending sends no second request and gets the same end.
+func TestSecondLogoutJoinsThePendingOne(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	first := h.logoutAsync()
+	h.expect(opcode.CMSGLogoutRequest)
+	second := h.logoutAsync()
+	if _, err := h.srv.Expect(opcode.CMSGLogoutRequest, 200*time.Millisecond); err == nil {
+		t.Fatal("second CMSG_LOGOUT_REQUEST sent")
+	}
+	h.send(opcode.SMSGLogoutResponse, packet.NewWriter().U32(0).U8(1).Bytes())
+	h.send(opcode.SMSGLogoutComplete, nil)
+	for _, c := range []<-chan logoutRes{first, second} {
+		if r := <-c; r.err != nil || r.outcome != LogoutComplete {
+			t.Fatalf("logout = %q, %v", r.outcome, r.err)
+		}
+	}
+	if err := <-h.run; err != nil {
+		t.Fatal(err)
 	}
 }
 

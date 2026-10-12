@@ -152,6 +152,50 @@ func (p *Planner) Plan(mapID uint32, from, to Vec3) (Path, error) {
 	return path, nil
 }
 
+// Floor is a navmesh surface at a point: its height and its polygon's flags (NavGround,
+// NavWater, ...).
+type Floor struct {
+	Z     float32
+	Flags uint16
+}
+
+// Floors lists the navmesh surfaces at (x, y) from height lo to hi, highest first: ground,
+// water, lava, slime and too-steep slopes alike, as a falling body lands on any of them. It
+// loads the one tile under the point when it is not loaded yet; a point whose tile file is
+// missing has no floors. The mesh is the server's, so a floor is where the server's
+// pathing has the ground (within the mesh's detail error); it holds no game objects.
+func (p *Planner) Floors(mapID uint32, x, y, lo, hi float32) ([]Floor, error) {
+	if p.dir == "" {
+		return nil, errors.New(`navmesh: no tiles folder; set "mmaps_dir" in the settings file`)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	m, err := p.mesh(mapID)
+	if err != nil {
+		return nil, err
+	}
+	name := tileFile(mapID, x, y)
+	if m.tiles[name] == nil {
+		if _, err := os.Stat(filepath.Join(p.dir, name)); errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+	}
+	if err := p.load(m, []string{name}); err != nil {
+		return nil, err
+	}
+	fl, err := m.eng.floors(x, y, lo, hi)
+	slices.SortFunc(fl, func(a, b Floor) int {
+		switch {
+		case a.Z > b.Z:
+			return -1
+		case a.Z < b.Z:
+			return 1
+		}
+		return 0
+	})
+	return fl, err
+}
+
 func (p *Planner) mesh(mapID uint32) (*mapMesh, error) {
 	if m := p.maps[mapID]; m != nil {
 		return m, nil

@@ -146,6 +146,32 @@ extern "C" int nd_nearest(void* h, const float* p, const float* ext, unsigned sh
     return 0;
 }
 
+extern "C" int nd_floors(void* h, const float* p, float lo, float hi, float* z, unsigned short* flags, int max) {
+    Nav* n = (Nav*)h;
+    dtQueryFilter f = makeFilter(0xffff, 0);
+    // A thin column round the point: every polygon whose bounds overlap it, then the
+    // surface height of each one the point lies over.
+    float w[3] = {p[0], p[1], (lo + hi) / 2}, c[3];
+    toDt(w, c);
+    const float ext[3] = {0.05f, (hi - lo) / 2 + 0.5f, 0.05f};
+    dtPolyRef refs[64];
+    int nrefs = 0;
+    if (dtStatusFailed(n->query->queryPolygons(c, ext, &f, refs, &nrefs, 64)))
+        return -1;
+    int count = 0;
+    for (int i = 0; i < nrefs && count < max; ++i) {
+        float y = 0;
+        if (dtStatusFailed(n->query->getPolyHeight(refs[i], c, &y)) || y < lo || y > hi)
+            continue;
+        unsigned short fl = 0;
+        n->mesh->getPolyFlags(refs[i], &fl);
+        z[count] = y;
+        flags[count] = fl;
+        ++count;
+    }
+    return count;
+}
+
 extern "C" int nd_find_path(void* h, const float* start, const float* end, unsigned short include,
                             unsigned short exclude, float* out, int max_points, int* count, float* goal) {
     Nav* n = (Nav*)h;

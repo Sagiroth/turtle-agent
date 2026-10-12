@@ -75,6 +75,23 @@ func (e *engine) nearest(p, ext Vec3) (Vec3, bool) {
 	return out, rc == 0
 }
 
+// floors lists the surface heights at (x, y) between lo and hi with their polygon flags.
+func (e *engine) floors(x, y, lo, hi float32) ([]Floor, error) {
+	const most = 32
+	p := Vec3{x, y, 0}
+	var z [most]float32
+	var fl [most]C.ushort
+	n := int(C.nd_floors(e.h, cvec(&p), C.float(lo), C.float(hi), (*C.float)(unsafe.Pointer(&z[0])), &fl[0], most))
+	if n < 0 {
+		return nil, errors.New("navmesh: Detour failed to query the floors")
+	}
+	out := make([]Floor, n)
+	for i := range out {
+		out[i] = Floor{Z: z[i], Flags: uint16(fl[i])}
+	}
+	return out, nil
+}
+
 // findPath returns Detour's verdict (0 complete, 1 partial, 2 partial with the goal over
 // 7 yd from the mesh, -1 start off the mesh, -2 goal off the mesh, -3 failure), the
 // straight path between the floor points, and the floor point found for the goal.

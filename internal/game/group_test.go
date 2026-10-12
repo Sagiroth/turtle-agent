@@ -154,3 +154,63 @@ func TestPartyMemberStatsPetAuraMasks(t *testing.T) {
 		}
 	}
 }
+
+// The control packets carry full u64 guids and 0-based subgroups (GroupHandler.cpp:334-352,
+// :524-557, :598-616).
+func TestGroupControlPackets(t *testing.T) {
+	guid := packet.GUID(0x1122334455667788)
+	cases := []struct {
+		name string
+		got  []byte
+		want []byte
+	}{
+		{"set leader", game.BuildGroupSetLeader(guid), []byte{0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11}},
+		{"assistant on", game.BuildGroupAssistant(guid, true), []byte{0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 1}},
+		{"assistant off", game.BuildGroupAssistant(guid, false), []byte{0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0}},
+		{"raid convert", game.BuildGroupRaidConvert(), nil},
+		{"change subgroup", game.BuildGroupChangeSubGroup("Gorm", 1), []byte("Gorm\x00\x01")},
+		{"swap subgroup", game.BuildGroupSwapSubGroup("Gorm", "Lia"), []byte("Gorm\x00Lia\x00")},
+		{"uninvite guid", game.BuildGroupUninviteGUID(0x30), []byte{0x30, 0, 0, 0, 0, 0, 0, 0}},
+	}
+	for _, c := range cases {
+		if !bytes.Equal(c.got, c.want) {
+			t.Errorf("%s: % X, want % X", c.name, c.got, c.want)
+		}
+	}
+}
+
+func TestGroupListRaidFlags(t *testing.T) {
+	body := gametest.GroupListAs(game.GroupRaid, game.GroupAssistant|2, 0x2A,
+		game.GroupMember{Name: "Gorm", GUID: 0x30, Status: game.MemberOnline, Flags: 1},
+		game.GroupMember{Name: "Lia", GUID: 0x31, Status: game.MemberOnline, Flags: game.GroupAssistant | 7})
+	g, err := game.ParseGroupList(body)
+	if err != nil || g.Type != game.GroupRaid || g.OwnFlags != 0x82 || len(g.Members) != 2 {
+		t.Fatalf("%+v %v", g, err)
+	}
+	if game.FlagsSubgroup(g.OwnFlags) != 2 || game.FlagsSubgroup(g.Members[0].Flags) != 1 ||
+		game.FlagsSubgroup(g.Members[1].Flags) != 7 || g.Members[1].Flags&game.GroupAssistant == 0 {
+		t.Fatalf("flags %+v", g)
+	}
+}
+
+// A hand-written SMSG_GROUP_LIST of a raid, not built with the test helper: type 1, own flags
+// 0x82 (assistant, subgroup 2), two members, leader, group loot, no looter, threshold 2,
+// difficulty byte (Group.cpp, Group::SendUpdate).
+func TestGroupListRaidBytes(t *testing.T) {
+	body := []byte{
+		0x01, 0x82, // raid; own flags
+		0x02, 0x00, 0x00, 0x00, // two other members
+		'G', 'o', 'r', 'm', 0, 0x30, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x01, // name, guid, status online, subgroup 1
+		'L', 'i', 'a', 0, 0x31, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x87, // assistant in subgroup 8
+		0x2A, 0, 0, 0, 0, 0, 0, 0, // leader
+		0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x00, // loot method, looter, threshold, difficulty
+	}
+	g, err := game.ParseGroupList(body)
+	if err != nil || g.Type != game.GroupRaid || g.OwnFlags != 0x82 || g.Leader != 0x2A || g.LootThreshold != 2 || g.Extra != 1 {
+		t.Fatalf("%+v %v", g, err)
+	}
+	if len(g.Members) != 2 || g.Members[0].Name != "Gorm" || g.Members[0].GUID != 0x30 || g.Members[0].Flags != 0x01 ||
+		g.Members[1].Name != "Lia" || g.Members[1].GUID != 0x31 || g.Members[1].Flags != 0x87 {
+		t.Fatalf("members %+v", g.Members)
+	}
+}

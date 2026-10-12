@@ -75,6 +75,19 @@ func (s *Session) sendMove(op uint16, mi game.MoveInfo, body []byte) error {
 	return nil
 }
 
+// sendWalkMove is sendMove for a packet a running walk makes at now (a heartbeat, a facing,
+// an ack mid-walk). It also records how far along the walk the server now has the player:
+// the point an aborted walk stops at (abortWalk).
+func (s *Session) sendWalkMove(op uint16, mi game.MoveInfo, body []byte, now time.Time) error {
+	if err := s.sendMove(op, mi, body); err != nil {
+		return err
+	}
+	if w := s.walk; w != nil {
+		w.sent = w.walked(now)
+	}
+	return nil
+}
+
 // serverPosition records a position the server put the player at. zKnown is false when
 // the z may be in the air (a GM teleport); the next position from the server settles it.
 func (s *Session) serverPosition(p [3]float32, zKnown bool) {
@@ -365,7 +378,7 @@ func (s *Session) toggleHandler(o toggleOrder) handler {
 		s.mu.Lock()
 		mi := s.moveInfoAt(s.currentFlags(), now)
 		s.mu.Unlock()
-		if err := s.sendMove(o.ack, mi, game.BuildMovementToggleAck(self, c.Counter, mi, o.apply)); err != nil {
+		if err := s.sendWalkMove(o.ack, mi, game.BuildMovementToggleAck(self, c.Counter, mi, o.apply), now); err != nil {
 			return &fatalError{err}
 		}
 		if f := s.fall; f != nil && o.flag == game.MoveSafeFall { // traced after the ack, as a knockback

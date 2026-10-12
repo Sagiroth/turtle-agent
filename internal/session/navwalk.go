@@ -357,5 +357,5 @@ func (s *Session) tickTurn(w *walkState, now time.Time) (bool, error) {
 		s.walk = nil
 		return true, s.abortWalk(w, err)
 	}
-	return true, s.sendMove(opcode.MSGMoveSetFacing, mi, game.BuildMovement(mi))
+	return true, s.sendWalkMove(opcode.MSGMoveSetFacing, mi, game.BuildMovement(mi), now)
 }

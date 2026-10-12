@@ -614,6 +614,81 @@ func TestWalkPathCountsAPathThatDoublesBack(t *testing.T) {
 	h.logout()
 }
 
+// setCheckSpeed sets the run speed checkStep holds each step to and leaves the walk's own
+// speed alone: the walk then steps faster than the bound allows, and the check refuses its
+// next packet.
+func setCheckSpeed(t *testing.T, h *harness, speed float32) {
+	t.Helper()
+	if _, err := h.s.do(context.Background(), func() (any, error) {
+		h.s.runSpeed = speed
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The check refuses a heartbeat: after the first one the bound drops to 3.5 yd/s while the walk
+// still moves at 7, so the next 3.5 yd step is over the 2 yd allowed in 0.5 s. The walk stops
+// where the server last had the player, at that first heartbeat, and walked counts the way there.
+func TestWalkPathCountsToTheLastHeartbeatWhenTheCheckRefuses(t *testing.T) {
+	f := &fakePlanner{replies: []func(from, to navmesh.Vec3) navmesh.Path{straight}}
+	h := start(t, Options{Planner: f})
+	h.enterWorld() // 7 yd/s: a heartbeat every 500 ms, 3.5 yd apart
+	var r WalkReport
+	var err error
+	done := make(chan struct{})
+	go func() {
+		r, err = h.s.WalkPath(context.Background(), me.X+30, me.Y, me.Z)
+		close(done)
+	}()
+	h.expect(opcode.MSGMoveStartForward)
+	beat := moveInfo(h.expect(opcode.MSGMoveHeartbeat).Body)
+	setCheckSpeed(t, h, 3.5)
+	stop := moveInfo(h.expect(opcode.MSGMoveStop).Body)
+	<-done
+	if err == nil || !strings.Contains(err.Error(), "walk stopped") || r.Result != "partial" || kinds(r) != "plan,walk" {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if stop.X != beat.X || stop.Y != beat.Y {
+		t.Fatalf("stopped at %+v, not at the last heartbeat %+v", stop, beat)
+	}
+	if want := beat.X - me.X; math.Abs(float64(r.Walked-want)) > 0.01 {
+		t.Fatalf("walked %.2f, want %.2f to the last heartbeat", r.Walked, want)
+	}
+	h.logout()
+}
+
+// The check refuses the arrival: the bound drops to 3.5 yd/s just after the start of a 3 yd walk
+// at 7 yd/s, which arrives 0.43 s in, before the first heartbeat at 0.5 s. The stop at the goal is
+// the step refused, so the walk stops where the server last had the player, at the start, and
+// walked counts none of the path.
+func TestWalkPathDoesNotCountAnArrivalTheCheckRefuses(t *testing.T) {
+	f := &fakePlanner{replies: []func(from, to navmesh.Vec3) navmesh.Path{straight}}
+	h := start(t, Options{Planner: f})
+	h.enterWorld() // 7 yd/s
+	var r WalkReport
+	var err error
+	done := make(chan struct{})
+	go func() {
+		r, err = h.s.WalkPath(context.Background(), me.X+3, me.Y, me.Z)
+		close(done)
+	}()
+	h.expect(opcode.MSGMoveStartForward)
+	setCheckSpeed(t, h, 3.5)
+	stop := moveInfo(h.expect(opcode.MSGMoveStop).Body)
+	<-done
+	if err == nil || !strings.Contains(err.Error(), "walk stopped") || r.Result != "partial" {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if stop.X != me.X || stop.Y != me.Y {
+		t.Fatalf("stopped at %+v, not where the server had the player", stop)
+	}
+	if r.Walked > 0.01 {
+		t.Fatalf("walked %.2f counts the refused arrival: no packet past the start was accepted", r.Walked)
+	}
+	h.logout()
+}
+
 // A partial path that gained ground is planned on from its end (the tiles round the new
 // start may reach further); one that gained under 10 yd ends the walk.
 func TestWalkPathPlansOnFromAPartialEnd(t *testing.T) {

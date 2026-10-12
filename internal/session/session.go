@@ -192,7 +192,7 @@ type Session struct {
 	self      Character
 	mapID     uint32
 	pos       [4]float32
-	walkDist  float64 // yards along its path the last walk got to when it stopped or arrived; read by walk_path
+	walkDist  float64 // yards along its path the last walk got to when it stopped, arrived or was aborted; read by walk_path
 	latency   uint32
 	unknown   map[uint16]int
 	parseErrs int

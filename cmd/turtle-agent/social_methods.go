@@ -62,6 +62,8 @@ type handshakeResult struct {
 // session cur returns at each call (see registerMethodsFor).
 func registerSocialMethods(srv *rpc.Server, cur func() *session.Session) {
 	log := cur().Log()
+	tr := &tbm.Tracker{}
+	registerTBMClick(srv, cur, tr)
 	srv.Register("addon_send", rpc.Typed(func(ctx context.Context, p addonParams) (empty, error) {
 		return empty{}, rpcErr(cur().AddonSend(ctx, p.Channel, p.Prefix, p.Text, p.To))
 	}))
@@ -77,7 +79,14 @@ func registerSocialMethods(srv *rpc.Server, cur func() *session.Session) {
 				return res, rpcErr(err)
 			}
 		}
+		tr.Reset(cur())
+		tr.NoteRoster(time.Now())
 		res.Next = collectTBM(ctx, log, res.Since, waitBound(p.WaitMS, 5000), &res.Status)
+		// What the module said about the transport and the bots is what a click goes by.
+		key := groupKey(cur())
+		for _, l := range res.Lines {
+			tr.Fold(l, key, time.Now())
+		}
 		return res, nil
 	}))
 	srv.Register("join_channel", rpc.Typed(func(ctx context.Context, p channelParams) (empty, error) {

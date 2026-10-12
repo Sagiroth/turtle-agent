@@ -275,3 +275,104 @@ func TestLoginWindow(t *testing.T) {
 		}
 	}
 }
+
+// In a fleet the reconnect books its login with the supervisor's budget, which counts
+// every child's logins: here a slot taken by another child pushes the reconnect back, and
+// the log says why it waits.
+func TestReconnectWaitsForTheFleetBudget(t *testing.T) {
+	setReconnectTimings(t, 20*time.Millisecond, 300*time.Second)
+	budget := newLoginBudget(1, 700*time.Millisecond)
+	budget.reserve(time.Now()) // another child's login, just now
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	baddr, stop, err := serveLoginBudget(ctx, budget, testBudgetToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	t.Setenv(budgetTokenEnv, testBudgetToken)
+	tk := reconnectTicket()
+	logins := authScript(t, tk)
+	cfg, done := worldSessions(t, tk, dropAfter(100*time.Millisecond), logoutClean)
+	code, _, errOut := runCLI("login", "--config", cfg, "--reconnect", "1", "--login-budget", baddr, "--stay", "2s", "harness", "Harnessb")
+	if code != exitOK {
+		t.Fatalf("code %d stderr %q", code, errOut)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if n := logins(); n != 2 {
+		t.Fatalf("%d realmd logins, want 2", n)
+	}
+	if !strings.Contains(errOut, "fleet's share of realmd's login limit") || !strings.Contains(errOut, "reconnect: in world again") {
+		t.Fatalf("stderr %q", errOut)
+	}
+}
+
+// If the supervisor's budget cannot be reached the child uses its own window.
+func TestReconnectFallsBackWithoutTheFleetBudget(t *testing.T) {
+	setReconnectTimings(t, 20*time.Millisecond, 300*time.Second)
+	t.Setenv(budgetTokenEnv, testBudgetToken)
+	tk := reconnectTicket()
+	logins := authScript(t, tk)
+	cfg, done := worldSessions(t, tk, dropAfter(100*time.Millisecond), logoutClean)
+	code, _, errOut := runCLI("login", "--config", cfg, "--reconnect", "1", "--login-budget", "127.0.0.1:1", "--stay", "2s", "harness", "Harnessb")
+	if code != exitOK || !strings.Contains(errOut, "fleet login budget unavailable") {
+		t.Fatalf("code %d stderr %q", code, errOut)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if n := logins(); n != 2 {
+		t.Fatalf("%d realmd logins, want 2", n)
+	}
+}
+
+func TestLoginBudgetFlagCheck(t *testing.T) {
+	var calls int
+	stubLogin(t, &auth.Ticket{}, &calls)
+	cfg := settingsFile(t, unreachable)
+	t.Setenv(budgetTokenEnv, "")
+	if code, _, errOut := runCLI("login", "--config", cfg, "--login-budget", "127.0.0.1:5000", "harness", "Harnessb"); code != exitUsage || !strings.Contains(errOut, budgetTokenEnv) {
+		t.Fatalf("no token: %d %q", code, errOut)
+	}
+	t.Setenv(budgetTokenEnv, testBudgetToken)
+	for _, bad := range []string{"not-an-address", "10.0.0.1:5000", "127.0.0.1:0"} {
+		if code, _, errOut := runCLI("login", "--config", cfg, "--reconnect", "1", "--login-budget", bad, "harness", "Harnessb"); code != exitUsage || !strings.Contains(errOut, "--login-budget") {
+			t.Fatalf("%s: %d %q", bad, code, errOut)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("realmd login ran %d times", calls)
+	}
+}
+
+// realmd's busy answer at the very first login closes the window for the whole fleet,
+// not only for the child that got it.
+func TestFirstLoginBusyIsReportedToTheFleetBudget(t *testing.T) {
+	budget := newLoginBudget(14, 300*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	baddr, stop, err := serveLoginBudget(ctx, budget, testBudgetToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	t.Setenv(budgetTokenEnv, testBudgetToken)
+	tk := reconnectTicket()
+	authScript(t, tk, &auth.AuthError{Stage: "challenge", Code: auth.ResultDBBusy})
+	cfg, _ := worldSessions(t, tk)
+	code, _, errOut := runCLI("login", "--config", cfg, "--login-budget", baddr, "harness", "Harnessb")
+	if code != exitAuth {
+		t.Fatalf("code %d stderr %q", code, errOut)
+	}
+	budget.mu.Lock()
+	until := budget.busyUntil
+	budget.mu.Unlock()
+	if time.Until(until) < 290*time.Second {
+		t.Fatalf("busy until %s from now", time.Until(until))
+	}
+	if next := budget.reserve(time.Now()); time.Until(next) < 290*time.Second {
+		t.Fatalf("next fleet login in %s", time.Until(next))
+	}
+}

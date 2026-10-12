@@ -89,6 +89,7 @@ type worldSession struct {
 type reconnector struct {
 	total, used int
 	window      *loginWindow
+	budget      *budgetClient // the fleet's shared login budget; nil outside a fleet
 	st          config.Settings
 	account     string
 	password    string
@@ -104,7 +105,7 @@ type reconnector struct {
 func (r *reconnector) next(ctx context.Context) (*worldSession, bool) {
 	for r.used < r.total {
 		r.used++
-		wait := max(backoff(r.used), r.window.wait(time.Now()))
+		wait := r.wait(ctx)
 		fmt.Fprintf(r.stderr, "reconnect: attempt %d of %d in %s\n", r.used, r.total, wait.Round(time.Millisecond))
 		select {
 		case <-time.After(wait):
@@ -125,6 +126,9 @@ func (r *reconnector) next(ctx context.Context) (*worldSession, bool) {
 		var ae *auth.AuthError
 		if errors.As(err, &ae) && ae.Code == auth.ResultDBBusy {
 			r.window.busy(time.Now())
+			if r.budget != nil {
+				r.budget.busy(context.Background())
+			}
 		}
 		if !retryableLogin(err) || ctx.Err() != nil {
 			fmt.Fprintln(r.stderr, "reconnect: giving up; that answer will not change")
@@ -133,6 +137,25 @@ func (r *reconnector) next(ctx context.Context) (*worldSession, bool) {
 	}
 	fmt.Fprintln(r.stderr, "reconnect: no attempts left")
 	return nil, false
+}
+
+// wait is how long to wait before this attempt: the backoff, and what the realmd limit
+// asks on top. In a fleet the supervisor books the login against every child's logins; if
+// it cannot be reached this process's own window is used.
+func (r *reconnector) wait(ctx context.Context) time.Duration {
+	wait := backoff(r.used)
+	if r.budget != nil {
+		d, err := r.budget.reserve(ctx, wait)
+		if err == nil {
+			if d > wait {
+				fmt.Fprintf(r.stderr, "reconnect: waiting %s for the fleet's share of realmd's login limit (%d logins per %s for all characters)\n",
+					d.Round(time.Second), realmdThrottleLogins-1, realmdThrottleWindow.Round(time.Second))
+			}
+			return max(wait, d)
+		}
+		fmt.Fprintln(r.stderr, "reconnect: fleet login budget unavailable, using this process's own window:", err)
+	}
+	return max(wait, r.window.wait(time.Now()))
 }
 
 // login is one attempt: realmd, the world server, then in world. It has no capture tap

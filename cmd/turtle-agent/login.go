@@ -20,6 +20,7 @@ import (
 	"github.com/pjerra/turtle-agent/internal/config"
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/navmesh"
+	"github.com/pjerra/turtle-agent/internal/netutil"
 	"github.com/pjerra/turtle-agent/internal/rpc"
 	"github.com/pjerra/turtle-agent/internal/session"
 	"github.com/pjerra/turtle-agent/internal/worldconn"
@@ -159,6 +160,7 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	stay := fs.Duration("stay", 0, "log out after this long in world (0: until interrupted or the logout RPC)")
 	rpcAddr := fs.String("rpc", "", "JSON-RPC listen address (default: the settings file's rpc)")
 	reconnects := fs.Int("reconnect", 0, "after an unplanned disconnect, log in again up to N times (0: off)")
+	budgetAddr := fs.String("login-budget", "", "loopback address of the fleet's shared login budget (set by `fleet`; its token is in the environment)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -169,6 +171,19 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if *reconnects < 0 {
 		fmt.Fprintln(stderr, "login: --reconnect must be 0 (off) or more")
 		return exitUsage
+	}
+	var budget *budgetClient // the fleet's login budget, if a fleet started this process
+	if *budgetAddr != "" {
+		if _, port, err := netutil.CheckLoopbackAddr(*budgetAddr); err != nil || port == 0 {
+			fmt.Fprintln(stderr, "login: --login-budget must be a loopback address with a port")
+			return exitUsage
+		}
+		tok := os.Getenv(budgetTokenEnv)
+		if tok == "" {
+			fmt.Fprintf(stderr, "login: --login-budget needs the token in %s\n", budgetTokenEnv)
+			return exitUsage
+		}
+		budget = newBudgetClient(*budgetAddr, tok)
 	}
 	if *reconnects > 0 && *capPath != "" {
 		// A reconnect brings a new session key that the capture's redaction list lacks.
@@ -230,6 +245,11 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	ticket, err := authLogin(actx, st.Realmd, account, password)
 	cancel()
 	if err != nil {
+		// A busy answer closes realmd's window for the whole fleet, not just this child.
+		var ae *auth.AuthError
+		if budget != nil && errors.As(err, &ae) && ae.Code == auth.ResultDBBusy {
+			budget.busy(context.Background())
+		}
 		fmt.Fprintln(stderr, withPrefix("realmd:", err))
 		return exitAuth
 	}
@@ -316,6 +336,7 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if *reconnects > 0 {
 		rc = &reconnector{total: *reconnects, window: window, st: st, account: account, password: password,
 			character: character, log: log, stderr: stderr, redact: s.Redact, planner: planner}
+		rc.budget = budget
 	}
 	srv := rpc.NewServer()
 	if rpcToken == "" {

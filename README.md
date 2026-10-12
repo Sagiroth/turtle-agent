@@ -79,7 +79,7 @@ recorded a normal logout each time it was checked.
 
 ```
 turtle-agent login [--config FILE] [--capture FILE] [--stay DURATION] [--rpc ADDR] [--reconnect N] [<account>] <character>
-turtle-agent fleet --config FILE [--settings FILE] [--stagger DURATION] [--wait DURATION]
+turtle-agent fleet --config FILE [--settings FILE] [--stagger DURATION] [--wait DURATION] [--reconnect N] [--stop-on-failure]
 turtle-agent scrub-check [--config FILE] <capture>...
 turtle-agent capture-stats <capture>
 turtle-agent capture events [--from RFC3339] [--to RFC3339] [--kinds a,b] [--out FILE [--force]] <capture>
@@ -96,7 +96,7 @@ turtle-agent version
 | 6 | the server closed the connection |
 | 7 | `scrub-check` found a secret in a capture |
 | 8 | the server kept refusing the logout |
-| 9 | `fleet`: a child failed, or not every character reached the world in time |
+| 9 | `fleet`: a child exited non-zero (the others kept running unless `--stop-on-failure`), or not every character reached the world in time |
 | 10 | a logout did not complete (`lost` or `timeout`); in a fleet, the other characters keep running |
 
 `--capture` records every decrypted packet to a file (opened exclusively, mode 0600). The auth session body and
@@ -612,7 +612,7 @@ battleground sides, each with its own RPC port.
 {
   "members": [
     { "account": "TANKACC",   "character": "Tankone", "rpc": "127.0.0.1:8771" },
-    { "account": "HEALACC",   "character": "Healtwo", "rpc": "127.0.0.1:8772" }
+    { "account": "HEALACC",   "character": "Healtwo", "rpc": "127.0.0.1:8772", "reconnect": 5 }
   ]
 }
 ```
@@ -620,6 +620,7 @@ battleground sides, each with its own RPC port.
 ```sh
 bin/turtle-agent fleet --config fleet.json            # settings from ~/.config/turtle-agent/settings.json
 bin/turtle-agent fleet --config fleet.json --settings other.json --stagger 3s --wait 3m
+bin/turtle-agent fleet --config fleet.json --reconnect 3   # each child logs in again after a dropped connection
 ```
 
 - `account` is a key into the settings file's `accounts`; passwords stay there, are read by each child, and never appear in the
@@ -629,12 +630,36 @@ bin/turtle-agent fleet --config fleet.json --settings other.json --stagger 3s --
 - RPC tokens: each child generates its own and writes `rpc-<port>.token` next to the settings file (one file per member
   port); the supervisor reads the right one for each poll. With `rpc_token` in the settings file every child shares that
   token. Clients of a fleet read the file of the member they talk to.
-- Children start `--stagger` apart (default 2 s, realmd throttles logins). When all are `in_world` the supervisor prints a
-  table of character, RPC address and state; each child's log goes to stderr with a `[Character]` prefix.
-- Ctrl-C (or SIGTERM) sends one interrupt to every child so they all log out cleanly; a child that has not exited after 60 s
-  is killed.
-- A child that exits non-zero, or a fleet that is not fully in world after `--wait` (default 2 m), stops the others and
-  makes `fleet` exit 9. It exits 0 only when every child exited 0.
+- Children start `--stagger` apart (default 2 s). When all are `in_world` the supervisor prints a table of character, RPC
+  address and state; each child's log goes to stderr with a `[Character]` prefix.
+- realmd refuses the 15th account that logs in from one address within 300 s with a busy answer (`AuthSocket.cpp:439-456`: it
+  counts the accounts already logged in in the window, 14, plus the new one), so the fleet shares one login budget of 14
+  per 300 s plus a 10 s margin (a slot is booked before the child starts, realmd stamps the login a few seconds later). The
+  supervisor books a slot for each child it starts; a start that would be the 15th waits until the oldest login has left the
+  window and says so (`fleet: waiting 4m12s to log in Name: realmd allows 14 logins per 5m0s ...`). `--wait` counts from the
+  last start. With `--stop-on-failure` a child that fails during that wait still stops the fleet at once. Logins from other
+  programs on the same address (a game client, another fleet) are not seen. The query compares `last_login` with
+  `NOW() - 300` as a number in `YYYYMMDDHHMMSS` form, which looks like a window nearer 3 minutes than 5 (inferred from the
+  source, not measured), so 300 s is on the safe side.
+- `--reconnect N` (default 0) is passed to every child as `login --reconnect N`: after an unplanned disconnect the child
+  logs in again, up to N times. A member's `"reconnect": N` overrides the flag for that member (`0` turns it off).
+- The children share the budget through a loopback port the supervisor opens (the internal `login --login-budget ADDR`).
+  Every call needs a random bearer token that the supervisor puts in each child's environment
+  (`TURTLE_AGENT_LOGIN_BUDGET_TOKEN`, never argv); calls with an `Origin` header or another `Host` are refused, and bookings
+  are capped (at most one hour ahead, 512 outstanding). Each reconnect books its login there, and a busy answer from realmd,
+  at the first login or at a reconnect, closes the window for the whole fleet. A reconnecting child logs `reconnect: waiting
+  ... for the fleet's share of realmd's login limit` when it has to wait, and falls back to its own window if the
+  supervisor cannot be reached.
+- A child that exits non-zero is reported (`fleet: Healtwo exited with code 6 (the server closed the connection)`) and
+  the others keep running; so does a child whose process could not be launched, or that exits before the fleet is in world.
+  Every exit is reported once, and the fleet ends when all children have exited or on Ctrl-C. `--stop-on-failure` brings back
+  the all-or-nothing fleet: the first failed child stops the rest. An exit 10 (a logout that did not complete) never stops
+  the others.
+- Ctrl-C, SIGTERM or SIGHUP (a closed terminal) sends one interrupt to every child so they all log out cleanly; a child that
+  has not exited after 60 s is killed. On Linux a child also gets an interrupt from the kernel if the supervisor dies without
+  forwarding one (a SIGKILL), so it logs out instead of staying in world.
+- Exit code: 0 only when every child exited 0; 9 when any child exited non-zero, was killed or could not be launched, or when
+  the fleet is not fully in world after `--wait` (default 2 m; it then stops every child). The last line says how many failed.
 
 ## TBM contract test
 

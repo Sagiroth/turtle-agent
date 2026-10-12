@@ -42,7 +42,7 @@ opcodes:
 	$(GO) run ./tools/opcodegen -in $(CORE)/src/game/Protocol/Opcodes_1_12_1.h -out internal/opcode/opcodes_gen.go
 
 spellnames:
-	$(GO) run ./tools/spellnamegen -in $(CORE)/sql/base/tw_world_spell_template.sql -out internal/spells/names.tsv.gz
+	$(GO) run ./tools/spellnamegen -in $(CORE)/sql/base/tw_world_spell_template.sql -out internal/spells/names.tsv.gz -mounts internal/spells/mounts.txt.gz
 
 # Replay TBM: lines through the real TortoiseBotsManager addon (Lua 5.1, fetched at a pinned commit).
 # Needs lua5.1 and, on first run, network; it skips with a message without them. Not part of `make test`.

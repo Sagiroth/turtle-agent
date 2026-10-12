@@ -270,6 +270,7 @@ func readEvents(ctx context.Context, log *events.Log, q events.Query, waitMS int
 // rpcErr maps session errors onto the JSON-RPC codes the Python wrapper branches on.
 func rpcErr(err error) error {
 	var le *session.LogoutError
+	var te *session.TaughtError
 	switch {
 	case err == nil:
 		return nil
@@ -286,6 +287,13 @@ func rpcErr(err error) error {
 		return &rpc.Error{Code: rpc.CodeDisconnected, Message: err.Error()}
 	case errors.Is(err, context.DeadlineExceeded):
 		return &rpc.Error{Code: rpc.CodeTimeout, Message: err.Error()}
+	case errors.As(err, &te):
+		// A bridle taught a spell the agent did not cast: the spell, when there is one.
+		var data map[string]any
+		if te.Spell != 0 {
+			data = map[string]any{"learned_spell": te.Spell}
+		}
+		return &rpc.Error{Code: rpc.CodeGame, Message: err.Error(), Data: data}
 	case errors.As(err, &le):
 		return &rpc.Error{Code: rpc.CodeGame, Message: err.Error(), Data: map[string]any{"reason": le.Reason}}
 	default:

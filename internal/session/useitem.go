@@ -11,6 +11,7 @@ import (
 	"github.com/pjerra/turtle-agent/internal/objects"
 	"github.com/pjerra/turtle-agent/internal/opcode"
 	"github.com/pjerra/turtle-agent/internal/packet"
+	"github.com/pjerra/turtle-agent/internal/spells"
 )
 
 // Core cites in this file are tortoise-wow upstream/1181dev 5784fb0.
@@ -75,7 +76,7 @@ type MountInfo struct {
 	DisplayID uint32 `json:"display_id,omitempty"`    // UNIT_FIELD_MOUNTDISPLAYID
 	Via       string `json:"via,omitempty"`           // item or spell
 	Result    string `json:"result,omitempty"`        // the server's mount result when it sent one
-	Learned   uint32 `json:"learned_spell,omitempty"` // the spell a bridle taught, cast because no mount came with the use
+	Learned   uint32 `json:"learned_spell,omitempty"` // the spell a bridle taught, which the agent cast
 }
 
 // Mounted reports whether the player's mount display is set.
@@ -86,11 +87,12 @@ func (s *Session) Mounted() bool { return s.store.Field(s.selfGUID(), objects.Un
 // or inventory_error events (indoors, in combat, too low a level), or as an SMSG_MOUNTRESULT;
 // when none of those comes in time, the cast may still be running and the call errors.
 //
-// A vanilla mount item is a bridle: using it teaches the mount spell and uses the item up, and no
-// cast follows (the learn effect, SpellEffects.cpp:2241; SMSG_LEARNED_SPELL, Player.cpp:4591). When
-// the use taught one spell and no mount, failure or refusal came, the agent casts that spell as the
-// spellbook would, and reports it as learned_spell. A use that taught several spells is an error:
-// the agent does not guess which one is the mount.
+// A vanilla mount item is a bridle. Its use is a cast of its own (spell 46499, "Add Mount to
+// Collection", about 4 s in agent.cap #4300-#4321) that teaches the mount spell and uses the item
+// up: SMSG_LEARNED_SPELL comes with that cast's end, and no mount follows (SpellEffects.cpp:2241,
+// Player.cpp:4591). After a learn the agent waits learnQuiet for another, then casts the spell it
+// taught when that is a mount spell (spells.IsMount), the wait has not run out and no mount, failure
+// or refusal came. Anything else is an error that names the spell, and nothing is cast.
 func (s *Session) Mount(ctx context.Context, ref MountRef, wait time.Duration) (MountInfo, error) {
 	if ref.Spell == 0 && ref.Item.Entry == 0 && ref.Item.Slot == nil {
 		return MountInfo{}, errors.New("mount needs an item_entry (or bag and slot), or a spell_id")
@@ -127,9 +129,12 @@ func (s *Session) Mount(ctx context.Context, ref MountRef, wait time.Duration) (
 		return MountInfo{}, err
 	}
 	if bridle {
-		taught, cerr := s.castLearned(ctx, learns, failed, seq)
+		if err := s.settleLearns(ctx, learns, deadline); err != nil {
+			return MountInfo{}, err
+		}
+		taught, cerr := s.castLearned(ctx, learns, failed, seq, deadline)
 		if cerr != nil {
-			return MountInfo{}, cerr
+			return info, cerr
 		}
 		if taught != 0 {
 			info.Learned = taught
@@ -145,18 +150,78 @@ func (s *Session) mountSettled(seq, failed uint64) bool {
 	return s.Mounted() || s.mount.failed > failed || (s.mount.seq > seq && s.mount.result != nil && *s.mount.result != mountResultOK)
 }
 
-// castLearned casts the spell a use taught, when it taught one and no answer came with it (see
-// Mount). It returns the spell it cast, 0 when it cast none.
-func (s *Session) castLearned(ctx context.Context, learns, failed, seq uint64) (uint32, error) {
+// learnQuiet is how long no SMSG_LEARNED_SPELL may come before the learns of one use are counted.
+// A second learn can still be in a packet the owner loop has not read: agent.cap #2708 and #2709
+// came in one update tick.
+const learnQuiet = 250 * time.Millisecond
+
+// settleLearns waits until no SMSG_LEARNED_SPELL has come for learnQuiet, or the deadline has
+// passed, so that every spell the use taught is counted. learns is the count when the use began;
+// it returns at once when no learn has come yet.
+func (s *Session) settleLearns(ctx context.Context, learns uint64, deadline time.Time) error {
+	seen, err := s.learnCount(ctx)
+	if err != nil || seen == learns {
+		return err
+	}
+	for {
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			return nil
+		}
+		timer := time.NewTimer(min(learnQuiet, rem))
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-s.done:
+			timer.Stop()
+			return ErrClosed
+		}
+		n, err := s.learnCount(ctx)
+		if err != nil || n == seen {
+			return err
+		}
+		seen = n
+	}
+}
+
+// learnCount is how many SMSG_LEARNED_SPELL the session has handled.
+func (s *Session) learnCount(ctx context.Context) (uint64, error) {
+	v, err := s.do(ctx, func() (any, error) { return s.mount.learns, nil })
+	if err != nil {
+		return 0, err
+	}
+	return v.(uint64), nil
+}
+
+// TaughtError is a mount by item that stopped because the item taught a spell the agent did not
+// cast. Spell is that spell, or 0 when the use taught several (see castLearned).
+type TaughtError struct {
+	Spell uint32
+	msg   string
+}
+
+func (e *TaughtError) Error() string { return e.msg }
+
+// castLearned casts the spell a use taught, once the learns have settled (see Mount). It returns
+// the spell it cast, or 0 when the use taught none or a mount, failure or refusal came first. What
+// it does not cast is a TaughtError that says why: several spells, a spell that is not a mount, or
+// a learn that came after the deadline.
+func (s *Session) castLearned(ctx context.Context, learns, failed, seq uint64, deadline time.Time) (uint32, error) {
 	v, err := s.do(ctx, func() (any, error) {
-		n := s.mount.learns - learns
+		n, spell := s.mount.learns-learns, s.mount.learned
 		switch {
 		case n == 0 || s.mountSettled(seq, failed):
 			return uint32(0), nil
 		case n > 1:
-			return nil, fmt.Errorf("the item taught %d spells (the newest is %d); pass the mount's spell_id", n, s.mount.learned)
+			return uint32(0), &TaughtError{msg: fmt.Sprintf("not mounted: the item taught %d spells (the newest is %d), so the agent cast none; pass the mount's spell_id", n, spell)}
+		case !spells.IsMount(spell):
+			return uint32(0), &TaughtError{Spell: spell, msg: fmt.Sprintf("not mounted: the item taught spell %d, which is not a mount spell, so the agent did not cast it", spell)}
+		case !time.Now().Before(deadline):
+			return uint32(0), &TaughtError{Spell: spell, msg: fmt.Sprintf("not mounted: the item taught spell %d after the wait ran out, so the agent did not cast it; pass its spell_id to mount", spell)}
 		}
-		return s.mount.learned, s.conn.WritePacket(opcode.CMSGCastSpell, game.BuildCastSpell(s.mount.learned, 0))
+		return spell, s.conn.WritePacket(opcode.CMSGCastSpell, game.BuildCastSpell(spell, 0))
 	})
 	if err != nil {
 		return 0, err

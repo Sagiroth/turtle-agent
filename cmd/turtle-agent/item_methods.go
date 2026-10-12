@@ -70,7 +70,8 @@ func registerItemMethods(srv *rpc.Server, cur func() *session.Session) {
 	}))
 	srv.Register("mount", rpc.Typed(func(ctx context.Context, p mountParams) (session.MountInfo, error) {
 		ref := session.MountRef{Item: session.EquipRef{Entry: p.ItemEntry, Bag: p.Bag, Slot: p.Slot}, Spell: p.SpellID}
-		info, err := cur().Mount(ctx, ref, waitBound(p.WaitMS, 8000))
+		// 12 s: a bridle's use is a cast of about 4 s, and the mount spell it teaches another 3 s.
+		info, err := cur().Mount(ctx, ref, waitBound(p.WaitMS, 12000))
 		return info, rpcErr(err)
 	}))
 	srv.Register("dismount", rpc.Typed(func(ctx context.Context, p dismountParams) (session.MountInfo, error) {

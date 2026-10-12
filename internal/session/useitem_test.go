@@ -210,15 +210,18 @@ func TestDismountNeedsTheAuraWhenUnknown(t *testing.T) {
 	if _, err := h.s.Dismount(ctx, 0, time.Second); err == nil || !strings.Contains(err.Error(), "spell_id") {
 		t.Fatalf("%v", err)
 	}
+	done := make(chan error, 1)
 	go func() {
-		if _, err := h.s.Dismount(ctx, 458, 2*time.Second); err != nil {
-			t.Error(err)
-		}
+		_, err := h.s.Dismount(ctx, 458, 2*time.Second)
+		done <- err
 	}()
 	if p := h.expect(opcode.CMSGCancelAura); string(p.Body) != string(game.BuildCancelAura(458)) {
 		t.Fatalf("% X", p.Body)
 	}
 	h.send(opcode.SMSGUpdateObject, selfValues(map[uint16]uint32{objects.UnitMountDisplay: 0}))
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 	h.logout()
 }
 
@@ -237,9 +240,13 @@ func TestDismountWithSeveralNewAuras(t *testing.T) {
 	if p, err := h.srv.Expect(opcode.CMSGCancelAura, 100*time.Millisecond); err == nil {
 		t.Fatalf("sent % X", p.Body)
 	}
-	go func() { h.s.Dismount(ctx, 458, 2*time.Second) }()
+	done := make(chan error, 1)
+	go func() { _, err := h.s.Dismount(ctx, 458, 2*time.Second); done <- err }()
 	h.expect(opcode.CMSGCancelAura)
 	h.send(opcode.SMSGUpdateObject, selfValues(map[uint16]uint32{objects.UnitMountDisplay: 0}))
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 	h.logout()
 }
 

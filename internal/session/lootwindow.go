@@ -35,12 +35,16 @@ func (n *notifier) wake() {
 	n.ch = make(chan struct{})
 }
 
-// lootState is the loot window the server holds open for the player, and the last answer
-// to a CMSG_LOOT. Owner loop only.
+// lootState is the loot window the server holds open for the player, and the first answer
+// to the CMSG_LOOT that is waiting for one. Owner loop only.
 type lootState struct {
-	win  *game.LootResponse // the open window; nil when none
-	seq  uint64             // counts server answers: a window, a refusal or a release
-	last lootAnswer         // the newest answer
+	win *game.LootResponse // the open window; nil when none
+	// pending says OpenLoot waits for an answer. The first answer after the request is kept in
+	// ans, with the window as it stood then: a window with nothing in it is released right
+	// behind its response, and the caller may only look after both have arrived.
+	pending bool
+	ans     lootAnswer
+	ansWin  *LootWindow
 	// skip is the window a new CMSG_LOOT closes first: the core releases the old loot
 	// before it answers the new one (Player.cpp:9304-9305, LootHandler.cpp:463-481), and that release is no answer.
 	skip  packet.GUID
@@ -115,7 +119,7 @@ func (s *Session) OpenLoot(ctx context.Context, g packet.GUID, name string, wait
 	if err != nil {
 		return nil, err
 	}
-	v, err := s.do(ctx, func() (any, error) {
+	_, err = s.do(ctx, func() (any, error) {
 		if err := s.inWorld(); err != nil {
 			return nil, err
 		}
@@ -123,23 +127,22 @@ func (s *Session) OpenLoot(ctx context.Context, g packet.GUID, name string, wait
 		if s.loot.win != nil {
 			s.loot.skip = s.loot.win.GUID
 		}
-		return s.loot.seq, s.conn.WritePacket(opcode.CMSGLoot, game.BuildLoot(g))
+		s.loot.pending, s.loot.ans, s.loot.ansWin = true, lootAnswer{}, nil
+		return nil, s.conn.WritePacket(opcode.CMSGLoot, game.BuildLoot(g))
 	})
 	if err != nil {
 		return nil, err
 	}
-	seq := v.(uint64)
-	// The answer and the window are taken in the same step: an empty window is released at
-	// once, and by a later step the window would be gone.
 	var a lootAnswer
 	var win *LootWindow
 	if err := s.awaitLoot(ctx, wait, func() bool {
-		if s.loot.seq <= seq {
+		if s.loot.pending {
 			return false
 		}
-		a, win = s.loot.last, windowOf(s.loot.win)
+		a, win = s.loot.ans, s.loot.ansWin
 		return true
 	}); err != nil {
+		s.do(context.WithoutCancel(ctx), func() (any, error) { s.loot.pending = false; return nil, nil })
 		return nil, fmt.Errorf("no loot window from the server within %s: %w", wait, err)
 	}
 	switch {
@@ -366,22 +369,29 @@ func (s *Session) CloseLoot(ctx context.Context, wait time.Duration) error {
 	return nil
 }
 
+// answer keeps the first answer after an OpenLoot request.
+func (l *lootState) answer(a lootAnswer, win *LootWindow) {
+	if l.pending {
+		l.pending, l.ans, l.ansWin = false, a, win
+	}
+}
+
 func (s *Session) onLootResponse(body []byte) error {
 	r, err := game.ParseLootResponse(body)
 	if err != nil {
 		return err
 	}
 	l := &s.loot
-	l.seq++
 	l.skip = 0
-	l.last = lootAnswer{guid: r.GUID, refused: r.Refused, err: r.Err}
 	if r.Refused {
+		l.answer(lootAnswer{guid: r.GUID, refused: true, err: r.Err}, nil)
 		s.emit(events.Event{Kind: events.KindLootError, SourceGUID: r.GUID, Text: "loot refused: " + game.LootErrorText(r.Err),
 			Data: map[string]any{"reason": game.LootErrorName(r.Err), "code": r.Err}})
 		l.wakes.wake()
 		return nil
 	}
 	l.win = &r
+	l.answer(lootAnswer{guid: r.GUID}, windowOf(l.win))
 	s.emit(events.Event{Kind: events.KindLootOpen, SourceGUID: r.GUID, Amount: int64(r.Money), Data: lootOpenData(&r)})
 	s.closeIfEmpty()
 	l.wakes.wake()
@@ -421,8 +431,7 @@ func (s *Session) onLootRelease(body []byte) error {
 	if l.skip == g {
 		l.skip = 0
 	} else {
-		l.seq++
-		l.last = lootAnswer{guid: g, released: true}
+		l.answer(lootAnswer{guid: g, released: true}, nil)
 	}
 	if l.win != nil && l.win.GUID == g {
 		l.win = nil

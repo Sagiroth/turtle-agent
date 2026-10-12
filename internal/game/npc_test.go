@@ -252,7 +252,7 @@ func TestParseQuestSmallPackets(t *testing.T) {
 	if id, err := game.ParseQuestID(packet.NewWriter().U32(7).Bytes(), "X"); err != nil || id != 7 {
 		t.Fatalf("%d %v", id, err)
 	}
-	if u, err := game.ParseQuestUpdateItem(packet.NewWriter().U32(4540).U32(3).Bytes()); err != nil || u != (game.QuestUpdateItem{Item: 4540, Count: 3}) {
+	if u, err := game.ParseQuestUpdateItem(packet.NewWriter().U32(4540).U32(3).Bytes()); err != nil || u != (game.QuestUpdateItem{Item: 4540, Added: 3}) {
 		t.Fatalf("%+v %v", u, err)
 	}
 	u, err := game.ParseQuestUpdateKill(gametest.QuestUpdateAddKill(7, 299, 3, 8, npc))

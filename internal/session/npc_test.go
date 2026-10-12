@@ -259,6 +259,11 @@ func TestSellItems(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.expect(opcode.CMSGSellItem)
+	// One sale in flight: a second is refused without a packet until this one resolves.
+	if _, err := h.s.Sell(ctx, vendorGUID, EquipRef{Entry: 118}, 1); err == nil {
+		t.Fatal("second sale accepted while one is in flight")
+	}
+	h.noPacket(opcode.CMSGSellItem)
 	h.send(opcode.SMSGSellItem, gametest.SellItem(vendorGUID, potionGUID, 2))
 	e = lastOfKind(t, h.s.Log(), events.KindVendorSellFailed)
 	if e.Source != "Booty Vendor" || e.Data["item_entry"] != uint32(118) || e.Data["reason"] != "cant_sell_item" || e.Data["item_guid"] != potionGUID {
@@ -516,6 +521,9 @@ func TestQuestHandIn(t *testing.T) {
 	}
 	if k := ofKind(h.s.Log(), events.KindQuestUpdate)[0]; k.Data["quest_id"] != uint32(102) || k.Data["entry"] != uint32(299) || k.Data["count"] != uint32(3) || k.Data["required"] != uint32(8) || k.TargetGUID != wolfGUID {
 		t.Fatalf("%+v", k)
+	}
+	if k := ofKind(h.s.Log(), events.KindQuestUpdate)[1]; k.Data["added"] == nil || k.Data["count"] != nil {
+		t.Fatalf("item update must carry the amount added, not a total: %+v", k)
 	}
 	if st := h.s.Status(); st.ParseErrors != 0 || len(st.Unknown) != 0 {
 		t.Fatalf("parse errors %d, unknown opcodes %v", st.ParseErrors, st.Unknown)

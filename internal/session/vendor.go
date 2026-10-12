@@ -156,6 +156,12 @@ func (s *Session) Sell(ctx context.Context, vendor packet.GUID, ref EquipRef, co
 		if it.Count != 0 && count > it.Count {
 			return nil, fmt.Errorf("sell: the stack holds %d, not %d", it.Count, count)
 		}
+		s.prunePending(s.now())
+		// One sale in flight: the core sends nothing for a sale, so the money it brings is
+		// only attributable when no other sale waits for the same money.
+		if len(s.npc.sells) != 0 {
+			return nil, errors.New("sell: the previous sale is still waiting for its vendor_sell or vendor_sell_failed (up to 5 s); sell one item at a time")
+		}
 		s.noteSell(vendor, it, count)
 		return it, s.conn.WritePacket(opcode.CMSGSellItem, game.BuildSellItem(vendor, it.GUID, uint8(count)))
 	})
@@ -240,9 +246,10 @@ func (s *Session) onSellItem(body []byte) error {
 
 // checkSells emits vendor_sell for each pending sale whose item has left its slot (or whose
 // stack shrank) while the player's money went up. The event is inferred: the core sends no
-// packet for a sale. The money test keeps a move, an equip, a use or a destroy of the same
-// item from passing for a sale, and a sale the core drops silently (ItemHandler.cpp:553-554)
-// from passing either.
+// packet for a sale. The money test keeps an equip, a use or a destroy of the same item from
+// passing for a sale, and a sale the core drops silently (ItemHandler.cpp:553-554) from
+// passing either; an item still in some bag has moved, not sold. Money that arrives meanwhile
+// (loot, a quest) with a real sale in flight is still counted as its price.
 func (s *Session) checkSells() {
 	self := s.selfGUID()
 	money, _ := s.store.Money(self)
@@ -252,6 +259,10 @@ func (s *Session) checkSells() {
 		sold := uint32(0)
 		switch {
 		case !ok || cur.GUID != p.item.GUID:
+			if s.inBags(self, p.item.GUID) {
+				kept = append(kept, p) // moved to another slot, not sold
+				continue
+			}
 			sold = p.item.Count // 0 when the stack was never seen
 		case p.item.Count != 0 && cur.Count < p.item.Count:
 			sold = p.item.Count - cur.Count
@@ -270,6 +281,18 @@ func (s *Session) checkSells() {
 		s.emit(events.Event{Kind: events.KindVendorSell, SourceGUID: p.vendor, Data: d})
 	}
 	s.npc.sells = kept
+}
+
+// inBags reports whether the item g is still in the player's backpack or bags.
+func (s *Session) inBags(self, g packet.GUID) bool {
+	for _, list := range [][]objects.Item{s.store.Backpack(self), s.store.Bags(self)} {
+		for _, it := range list {
+			if it.GUID == g {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // TrainerList asks a trainer for its list (CMSG_TRAINER_LIST). The answer is a trainer_list

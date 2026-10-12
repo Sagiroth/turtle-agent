@@ -1,0 +1,32 @@
+# SYNTHETIC. No capture of a live server has a non-empty roster yet (every hired bot reported ROSTER_BEGIN|0), so
+# this is built by hand from the format commands/BotCommands.cpp emits (TortoiseBots 18d4d14, lines 1920-2023):
+# a roster with online, offline and grouped bots, the CC_ASSIGN snapshot and a stand-alone CC ACK, the claimed
+# list, a BOTSTATE block then a single-bot update, an inventory, and a ROSTER_ERROR. Replace it with a real
+# capture once a handshake with owned bots exists.
+system	TBM:VERSION|2026-10-12-v17
+system	TBM:ROSTER_BEGIN|3
+system	TBM:ROSTER|101|Alpha|8|online|1|The Barrens
+system	TBM:ROSTER|102|Bravo|5|offline|0|-
+system	TBM:ROSTER|103|Charlie|11|online|1|Crossroads|-
+system	TBM:ROSTER_END
+system	TBM:CC_ASSIGN_BEGIN|1
+system	TBM:CC_ASSIGN|Alpha|moon
+system	TBM:CC_ASSIGN_END
+system	TBM:CLAIMED_BEGIN|2
+system	TBM:CLAIMED|201|Delta|3|60|online|0|Orgrimmar|1
+system	TBM:CLAIMED|202|Echo|7|25|offline|0|-|0
+system	TBM:CLAIMED_END
+addon	GUILD	TBM:BOTSTATE_BEGIN|2
+addon	GUILD	TBM:BOTSTATE|Alpha|move=follow,loot=on,aoe=off,autocc=off,savemana=off,boost=on,threat=on,potions=on,mimic=off,spread=off
+addon	GUILD	TBM:BOTSTATE|Charlie|move=flee,loot=off,aoe=on,autocc=on,savemana=on,boost=off,threat=off,potions=off,mimic=on,spread=on
+addon	GUILD	TBM:BOTSTATE_END
+addon	GUILD	TBM:BOTSTATE|Alpha|move=stay,loot=off,aoe=off,autocc=off,savemana=off,boost=on,threat=on,potions=on,mimic=off,spread=off
+system	TBM:ACTION_ACK|cc circle Charlie|bot:Charlie|1|Charlie
+system	TBM:INV_BEGIN|Alpha|123456
+system	TBM:INV_EQ|0|14200|45|45
+system	TBM:INV_ITEM|255|23|6948|1|be
+system	TBM:INV_ITEM|1|2|8957|20|u
+system	TBM:INV_END|Alpha|30|36
+system	TBM:ROSTER_ERROR|not-in-game|You must be in-game.
+addon	GUILD	TBM:CAPS|pull-seconds,flee,inventory,behavior,claimed-roster
+addon	GUILD	TBM:TRANSPORT|party

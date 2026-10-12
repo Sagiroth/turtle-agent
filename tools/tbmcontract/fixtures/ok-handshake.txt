@@ -1,0 +1,38 @@
+# Real TBM lines from a live TortoiseBots build 16 server (turtle-agent tbm_handshake, 2026-10-12): the chat-transport
+# handshake with an empty roster (transport none), then the addon-channel reply with three bots' BOTSTATE rows (transport party).
+# Bot names scrubbed to Alpha/Bravo/Charlie.
+system	TBM:VERSION|2026-10-12-v16
+system	TBM:VERSION|2026-10-12-v16
+system	TBM:ROSTER_BEGIN|0
+system	TBM:ROSTER_END
+system	TBM:CC_ASSIGN_BEGIN|0
+system	TBM:CC_ASSIGN_END
+system	TBM:CLAIMED_BEGIN|0
+system	TBM:CLAIMED_END
+system	TBM:BOTSTATE_BEGIN|0
+system	TBM:BOTSTATE_END
+system	TBM:VERSION|2026-10-12-v16
+system	TBM:CAPS|pull-seconds,flee,inventory,behavior,claimed-roster
+system	TBM:TRANSPORT|none
+addon	GUILD	TBM:VERSION|2026-10-12-v16
+addon	GUILD	TBM:ROSTER_BEGIN|0
+addon	GUILD	TBM:ROSTER_END
+addon	GUILD	TBM:CC_ASSIGN_BEGIN|0
+addon	GUILD	TBM:CC_ASSIGN_END
+addon	GUILD	TBM:CLAIMED_BEGIN|0
+addon	GUILD	TBM:CLAIMED_END
+addon	GUILD	TBM:BOTSTATE_BEGIN|3
+addon	GUILD	TBM:BOTSTATE|Alpha|move=follow,loot=on,aoe=on,autocc=off,savemana=off,boost=on,threat=off,potions=on,mimic=off,spread=off
+addon	GUILD	TBM:BOTSTATE|Bravo|move=follow,loot=on,aoe=on,autocc=off,savemana=off,boost=on,threat=on,potions=on,mimic=off,spread=off
+addon	GUILD	TBM:BOTSTATE|Charlie|move=follow,loot=on,aoe=on,autocc=off,savemana=off,boost=on,threat=on,potions=on,mimic=off,spread=off
+addon	GUILD	TBM:BOTSTATE_END
+addon	GUILD	TBM:VERSION|2026-10-12-v16
+addon	GUILD	TBM:CAPS|pull-seconds,flee,inventory,behavior,claimed-roster
+addon	GUILD	TBM:TRANSPORT|party
+system	TBM:VERSION|2026-10-12-v16
+system	TBM:ROSTER_BEGIN|0
+system	TBM:ROSTER_END
+system	TBM:CC_ASSIGN_BEGIN|0
+system	TBM:CC_ASSIGN_END
+system	TBM:CLAIMED_BEGIN|0
+system	TBM:CLAIMED_END

@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,6 +41,12 @@ func start(t *testing.T, opts Options) *harness {
 // the form the world server derives from the account's stored K.
 func startKeyed(t *testing.T, opts Options, clientKey, serverKey []byte) *harness {
 	t.Helper()
+	return startWrapped(t, opts, clientKey, serverKey, nil)
+}
+
+// startWrapped is startKeyed with the client's end of the pipe wrapped (nil: as is).
+func startWrapped(t *testing.T, opts Options, clientKey, serverKey []byte, wrap func(net.Conn) net.Conn) *harness {
+	t.Helper()
 	cli, srvConn := net.Pipe()
 	t.Cleanup(func() { cli.Close(); srvConn.Close() })
 	ch := make(chan *worldtest.Server, 1)
@@ -50,7 +57,11 @@ func startKeyed(t *testing.T, opts Options, clientKey, serverKey []byte) *harnes
 		}
 		ch <- srv
 	}()
-	conn, err := worldconn.Client(cli, "TESTACC", clientKey, nil)
+	var nc net.Conn = cli
+	if wrap != nil {
+		nc = wrap(cli)
+	}
+	conn, err := worldconn.Client(nc, "TESTACC", clientKey, nil)
 	if err != nil {
 		<-ch // the server goroutine reports through t; let it finish before the test does
 		t.Fatal(err)
@@ -127,15 +138,29 @@ func (h *harness) enterWorld() {
 	}
 }
 
+type logoutRes struct {
+	outcome LogoutOutcome
+	err     error
+}
+
+// logoutAsync starts a Logout and returns its result channel.
+func (h *harness) logoutAsync() <-chan logoutRes {
+	done := make(chan logoutRes, 1)
+	go func() {
+		o, err := h.s.Logout(context.Background())
+		done <- logoutRes{o, err}
+	}()
+	return done
+}
+
 func (h *harness) logout() {
 	h.t.Helper()
-	done := make(chan error, 1)
-	go func() { done <- h.s.Logout(context.Background()) }()
+	done := h.logoutAsync()
 	h.expect(opcode.CMSGLogoutRequest)
 	h.send(opcode.SMSGLogoutResponse, packet.NewWriter().U32(0).U8(1).Bytes())
 	h.send(opcode.SMSGLogoutComplete, nil)
-	if err := <-done; err != nil {
-		h.t.Fatal(err)
+	if r := <-done; r.err != nil || r.outcome != LogoutComplete {
+		h.t.Fatal(r.outcome, r.err)
 	}
 	if err := <-h.run; err != nil {
 		h.t.Fatal(err)
@@ -208,21 +233,145 @@ func TestDisconnectInWorld(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := h.s.Logout(ctx); !errors.Is(err, ErrClosed) {
+	if _, err := h.s.Logout(ctx); !errors.Is(err, ErrClosed) {
 		t.Fatalf("logout after disconnect: %v", err)
 	}
 }
 
-func TestDisconnectDuringLogout(t *testing.T) {
+// Issues #9 and #18: however the server ends an accepted logout, the caller gets a result
+// and Run ends; only a close after a refusal is an ordinary disconnect.
+func TestLogoutEnds(t *testing.T) {
+	accepted := packet.NewWriter().U32(0).U8(0).Bytes()
+	for _, tc := range []struct {
+		name    string
+		server  func(h *harness)
+		outcome LogoutOutcome
+		err     error // from Logout
+		run     error // from Run; nil: nil
+		state   Status
+		last    string // last session event state
+	}{
+		{"response and complete", func(h *harness) {
+			h.send(opcode.SMSGLogoutResponse, accepted)
+			h.send(opcode.SMSGLogoutComplete, nil)
+		}, LogoutComplete, nil, nil, StatusLoggedOut, "logged_out"},
+		{"close after response", func(h *harness) {
+			h.send(opcode.SMSGLogoutResponse, accepted)
+			h.srv.Close()
+		}, LogoutClosedByServer, nil, ErrClosedAtLogout, StatusLoggedOut, "logged_out"},
+		// Not accepted yet: the core keeps a dropped character in world (ForcePlayerLogoutDelay).
+		{"close without response", func(h *harness) { h.srv.Close() },
+			LogoutLost, ErrLostAtLogout, ErrLostAtLogout, StatusDisconnected, "disconnected"},
+		{"never answers", func(h *harness) {},
+			LogoutTimedOut, ErrLogoutTimeout, ErrLogoutTimeout, StatusDisconnected, "disconnected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := start(t, Options{LogoutTimeout: 300 * time.Millisecond})
+			h.enterWorld()
+			done := h.logoutAsync()
+			h.expect(opcode.CMSGLogoutRequest)
+			tc.server(h)
+			select {
+			case r := <-done:
+				if r.outcome != tc.outcome || !errors.Is(r.err, tc.err) || (tc.err == nil) != (r.err == nil) {
+					t.Fatalf("logout = %q, %v", r.outcome, r.err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("logout never answered")
+			}
+			select {
+			case err := <-h.run:
+				if !errors.Is(err, tc.run) || (tc.run == nil) != (err == nil) || errors.Is(err, ErrDisconnected) {
+					t.Fatalf("run err = %v", err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("Run still running")
+			}
+			if st := h.s.Status(); st.State != tc.state {
+				t.Fatalf("%+v", st)
+			}
+			if states := sessionStates(h.s.Log()); states[len(states)-1] != tc.last {
+				t.Fatalf("events %v", states)
+			}
+			evs := ofKind(h.s.Log(), events.KindSession)
+			if got := evs[len(evs)-1].Data["outcome"]; got != string(tc.outcome) {
+				t.Fatalf("final session event outcome %v", got)
+			}
+		})
+	}
+}
+
+// brokenWrites fails every write once broken is set; reads go on.
+type brokenWrites struct {
+	net.Conn
+	broken atomic.Bool
+}
+
+func (b *brokenWrites) Write(p []byte) (int, error) {
+	if b.broken.Load() {
+		return 0, errors.New("broken pipe")
+	}
+	return b.Conn.Write(p)
+}
+
+// A ping that fails to write while an unanswered logout is pending is a lost logout,
+// never closed_by_server: the server had not accepted it.
+func TestPingWriteFailsDuringLogout(t *testing.T) {
+	var bw *brokenWrites
+	h := startWrapped(t, Options{PingInterval: 50 * time.Millisecond}, testKey, testKey, func(c net.Conn) net.Conn {
+		bw = &brokenWrites{Conn: c}
+		return bw
+	})
+	h.enterWorld()
+	done := h.logoutAsync()
+	h.expect(opcode.CMSGLogoutRequest)
+	bw.broken.Store(true)
+	select {
+	case r := <-done:
+		if r.outcome != LogoutLost || !errors.Is(r.err, ErrLostAtLogout) {
+			t.Fatalf("logout = %q, %v", r.outcome, r.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("logout never answered")
+	}
+	if err := <-h.run; !errors.Is(err, ErrLostAtLogout) || errors.Is(err, ErrDisconnected) {
+		t.Fatalf("run err = %v", err)
+	}
+}
+
+// A second Logout while one is pending sends no second request and gets the same end.
+func TestSecondLogoutJoinsThePendingOne(t *testing.T) {
 	h := start(t, Options{})
 	h.enterWorld()
-	done := make(chan error, 1)
-	go func() { done <- h.s.Logout(context.Background()) }()
+	first := h.logoutAsync()
 	h.expect(opcode.CMSGLogoutRequest)
-	h.srv.Close()
-	if err := <-done; !errors.Is(err, ErrDisconnected) {
-		t.Fatalf("logout err = %v", err)
+	second := h.logoutAsync()
+	if _, err := h.srv.Expect(opcode.CMSGLogoutRequest, 200*time.Millisecond); err == nil {
+		t.Fatal("second CMSG_LOGOUT_REQUEST sent")
 	}
+	h.send(opcode.SMSGLogoutResponse, packet.NewWriter().U32(0).U8(1).Bytes())
+	h.send(opcode.SMSGLogoutComplete, nil)
+	for _, c := range []<-chan logoutRes{first, second} {
+		if r := <-c; r.err != nil || r.outcome != LogoutComplete {
+			t.Fatalf("logout = %q, %v", r.outcome, r.err)
+		}
+	}
+	if err := <-h.run; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A close after a refused logout is an ordinary disconnect: no logout is pending.
+func TestDisconnectAfterRefusedLogout(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	done := h.logoutAsync()
+	h.expect(opcode.CMSGLogoutRequest)
+	h.send(opcode.SMSGLogoutResponse, packet.NewWriter().U32(1).U8(0).Bytes())
+	if r := <-done; r.err == nil {
+		t.Fatal("refusal not reported")
+	}
+	h.srv.Close()
 	if err := <-h.run; !errors.Is(err, ErrDisconnected) {
 		t.Fatalf("run err = %v", err)
 	}
@@ -231,13 +380,12 @@ func TestDisconnectDuringLogout(t *testing.T) {
 func TestLogoutRefusedInCombat(t *testing.T) {
 	h := start(t, Options{})
 	h.enterWorld()
-	done := make(chan error, 1)
-	go func() { done <- h.s.Logout(context.Background()) }()
+	done := h.logoutAsync()
 	h.expect(opcode.CMSGLogoutRequest)
 	h.send(opcode.SMSGLogoutResponse, packet.NewWriter().U32(1).U8(0).Bytes())
 	var le *LogoutError
-	if err := <-done; !errors.As(err, &le) || le.Reason != 1 {
-		t.Fatalf("err = %v", err)
+	if r := <-done; !errors.As(r.err, &le) || le.Reason != 1 {
+		t.Fatalf("err = %v", r.err)
 	}
 	if h.s.State() != StatusInWorld {
 		t.Fatalf("state %s", h.s.State())
@@ -328,8 +476,7 @@ func TestZeroHighByteKeyEndToEnd(t *testing.T) {
 func TestPacketsBeforeCloseAreHandled(t *testing.T) {
 	h := start(t, Options{})
 	h.enterWorld()
-	done := make(chan error, 1)
-	go func() { done <- h.s.Logout(context.Background()) }()
+	done := h.logoutAsync()
 	h.expect(opcode.CMSGLogoutRequest)
 	// Hold the owner loop so the packets and the read error are all queued when it resumes.
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -344,8 +491,8 @@ func TestPacketsBeforeCloseAreHandled(t *testing.T) {
 	h.srv.Close()
 	time.Sleep(50 * time.Millisecond) // let the reader see the close before the loop resumes
 	close(release)
-	if err := <-done; err != nil {
-		t.Fatalf("logout err = %v", err)
+	if r := <-done; r.err != nil || r.outcome != LogoutComplete {
+		t.Fatalf("logout = %q, %v", r.outcome, r.err)
 	}
 	if err := <-h.run; err != nil {
 		t.Fatalf("run err = %v", err)

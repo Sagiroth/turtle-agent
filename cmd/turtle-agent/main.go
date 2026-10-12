@@ -25,6 +25,9 @@ const (
 	// ran out; the agent closed the socket and the character may stay in world.
 	exitLogoutRefused = 8
 	// exitFleet (fleet.go) is 9: a fleet child failed or the fleet never got into world.
+	// exitLogoutIncomplete: a logout ended without one: the server never answered, or the
+	// socket died before the server accepted it. The character may stay in world for a while.
+	exitLogoutIncomplete = 10
 )
 
 func main() {

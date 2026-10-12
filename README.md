@@ -52,6 +52,20 @@ bin/turtle-agent login --rpc 127.0.0.1:8765 MYACCOUNT MyCharacter
 When the settings file holds exactly one account, leave the account name off (`login MyCharacter`): it then stays out of `ps` and shell history.
 
 Ctrl-C logs out cleanly. If the server refuses the logout (in combat), the agent retries for 35 s; a second Ctrl-C quits.
+If the server never answers the logout, the agent closes the socket after 30 s and exits 10.
+
+A logout, from Ctrl-C, `--stay` or the `logout` RPC, always ends the process at once (no disconnect grace window).
+The final `session` event carries `data.outcome`:
+- `complete`: `SMSG_LOGOUT_COMPLETE` arrived. Exit 0.
+- `closed_by_server`: the server accepted the logout (`SMSG_LOGOUT_RESPONSE` reason 0) and then closed the socket
+  instead of completing it. Exit 0, state `logged_out`.
+- `lost`: the socket died before the server accepted the logout. The core keeps a dropped character in world for
+  about 20 s (`ForcePlayerLogoutDelay`), so this is not a logout. RPC -32002, exit 10, state `disconnected`.
+- `timeout`: no answer within 30 s; the agent closes the socket. RPC -32004, exit 10; the character may stay in world.
+
+Tortoise 1.18.1 sometimes closes the socket right after a GM's logout request without sending either packet
+(issues #9, #18; seen in the open world and inside instances). That ends as `lost`, although the server's char.log
+recorded a normal logout each time it was checked.
 
 ## CLI
 
@@ -74,6 +88,7 @@ turtle-agent version
 | 7 | `scrub-check` found a secret in a capture |
 | 8 | the server kept refusing the logout |
 | 9 | `fleet`: a child failed, or not every character reached the world in time |
+| 10 | a logout did not complete (`lost` or `timeout`); in a fleet, the other characters keep running |
 
 `--capture` records every decrypted packet to a file (opened exclusively, mode 0600). The auth session body and
 Warden packets are never written, and any packet holding the account name, password or session key is redacted.
@@ -126,7 +141,7 @@ browser (`Origin` header) and other `Host` names are refused.
 | `join_channel` / `leave_channel` | `name`, `password` / `name` | |
 | `gossip_hello` | `guid`, `wait_ms` | `since`, `event` (the menu, with `wait_ms`) |
 | `gossip_select` | `guid`, `option`, `code` (coded options only), `wait_ms` | `since`, `event` (next menu or `gossip_complete`) |
-| `logout` | | |
+| `logout` | | `outcome` (`complete` or `closed_by_server`); `lost` (-32002) and `timeout` (-32004) are errors with `data.outcome`; the reply is written before the process exits |
 
 Events have `seq`, `time`, `kind`, `source`, `target`, `spell_id`, `amount`, `crit`, `text`, `party` and `data`.
 Kinds cover chat, system, whispers, melee, spell damage, periodic ticks, heals, energize, spell start/go/miss/fail,

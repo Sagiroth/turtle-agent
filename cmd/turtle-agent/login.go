@@ -37,6 +37,9 @@ var (
 	logoutRetryEvery = 2 * time.Second
 	// logoutWait bounds one logout attempt (the server's 20 s logout timer plus margin).
 	logoutWait = 35 * time.Second
+	// logoutTimeout is the session's wait for SMSG_LOGOUT_COMPLETE or the server's close
+	// after an accepted request; past it the session ends (session.ErrLogoutTimeout).
+	logoutTimeout = 30 * time.Second
 	// disconnectGrace keeps the RPC up after the server drops the session, so status
 	// shows the disconnect and its reason (spec: error handling, review I2).
 	disconnectGrace = 30 * time.Second
@@ -72,7 +75,8 @@ func checkCapture(path, account, password string) error {
 // mmaps_dir is not set.
 func sessionOptions(character string, log *events.Log, stderr io.Writer, accounts []string, password string,
 	planner *navmesh.Planner) session.Options {
-	o := session.Options{Character: character, Log: log, Logger: stderr, Redact: accounts, RedactAnywhere: []string{password}}
+	o := session.Options{Character: character, Log: log, Logger: stderr, Redact: accounts, RedactAnywhere: []string{password},
+		LogoutTimeout: logoutTimeout}
 	if planner != nil { // a nil *Planner in the interface would not read as nil
 		o.Planner = planner
 	}
@@ -270,8 +274,11 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			return logoutAndWait(s, conn, runErr, stderr)
 		case err := <-runErr:
 			code := sessionExit(s, err, stderr)
-			if err == nil {
-				return code // a logout through the RPC: done at once
+			if err == nil || errors.Is(err, session.ErrClosedAtLogout) || errors.Is(err, session.ErrLostAtLogout) ||
+				errors.Is(err, session.ErrLogoutTimeout) {
+				// A logout through the RPC, however it ended: done at once. The deferred RPC
+				// shutdown lets the logout call in flight write its reply first.
+				return code
 			}
 			// --reconnect: an unplanned disconnect of a session that was in world logs in again.
 			if rc != nil && errors.Is(err, session.ErrDisconnected) {
@@ -314,11 +321,11 @@ func logoutAndWait(s *session.Session, conn *worldconn.Conn, runErr <-chan error
 	var refused *session.LogoutError
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), logoutWait)
-		err := s.Logout(ctx)
+		_, err := s.Logout(ctx)
 		cancel()
 		var le *session.LogoutError
 		if !errors.As(err, &le) {
-			if err != nil {
+			if err != nil && !errors.Is(err, session.ErrLogoutTimeout) && !errors.Is(err, session.ErrLostAtLogout) { // sessionExit says those
 				fmt.Fprintln(stderr, "logout:", s.Redact(err.Error()))
 			}
 			break
@@ -337,8 +344,8 @@ func logoutAndWait(s *session.Session, conn *worldconn.Conn, runErr <-chan error
 		case <-time.After(logoutRetryEvery):
 		}
 	}
-	// Logout returned nil after SMSG_LOGOUT_COMPLETE, and Run then ends at once; after an
-	// error (a lost connection, no SMSG_LOGOUT_COMPLETE in time) it may not.
+	// Run ends at once after any logout end (complete, closed by the server, timed out);
+	// after another error (the caller's context, a failed write) it may not.
 	select {
 	case err := <-runErr:
 		return sessionExit(s, err, stderr)
@@ -359,9 +366,21 @@ func closeAndExit(conn *worldconn.Conn, runErr <-chan error, code int) int {
 // sessionExit maps Run's result to an exit code. The error is scrubbed like the session's
 // own lastErr before it reaches the stderr log.
 func sessionExit(s *session.Session, err error, stderr io.Writer) int {
-	if err == nil {
+	switch {
+	case err == nil:
 		fmt.Fprintln(stderr, "logout: complete")
 		return exitOK
+	case errors.Is(err, session.ErrClosedAtLogout):
+		// The server ended the logout by closing the socket (issues #9, #18): the logout
+		// was asked for and the session is over, so this is a clean exit.
+		fmt.Fprintln(stderr, "logout: the server closed the connection (no SMSG_LOGOUT_COMPLETE)")
+		return exitOK
+	case errors.Is(err, session.ErrLogoutTimeout):
+		fmt.Fprintln(stderr, "logout: timed out without SMSG_LOGOUT_COMPLETE; connection closed, the character may stay in world")
+		return exitLogoutIncomplete
+	case errors.Is(err, session.ErrLostAtLogout):
+		fmt.Fprintln(stderr, "logout:", s.Redact(err.Error())+"; the character may stay in world for a while")
+		return exitLogoutIncomplete
 	}
 	fmt.Fprintln(stderr, "session:", s.Redact(err.Error()))
 	if errors.Is(err, session.ErrDisconnected) {

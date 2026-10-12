@@ -177,6 +177,34 @@ func TestFleetChildFailureStopsTheRestAndFails(t *testing.T) {
 	}
 }
 
+// A child whose own RPC logout did not complete (exit 10) does not stop the rest; the
+// fleet still reports it in its exit code once everyone is done.
+func TestFleetIncompleteLogoutDoesNotStopTheRest(t *testing.T) {
+	ff := newFakeFleet()
+	for _, m := range party {
+		ff.setState(m.RPC, "in_world")
+	}
+	var out, errOut syncBuf
+	code := make(chan int, 1)
+	go func() { code <- runFleet(context.Background(), party, ff.deps(), fastOpts, &out, &errOut) }()
+	waitFor(t, "table", func() bool { return strings.Contains(out.String(), "Dpsthree") })
+	ff.child("127.0.0.1:9002").exit(exitLogoutIncomplete)
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case c := <-code:
+		t.Fatalf("fleet ended with %d after one incomplete logout", c)
+	default:
+	}
+	if ff.child("127.0.0.1:9001").stopped || ff.child("127.0.0.1:9003").stopped {
+		t.Fatal("survivors stopped")
+	}
+	ff.child("127.0.0.1:9001").exit(0)
+	ff.child("127.0.0.1:9003").exit(0)
+	if c := <-code; c != exitFleet || !strings.Contains(errOut.String(), "Healtwo exited with code 10") {
+		t.Fatalf("exit %d, stderr:\n%s", c, errOut.String())
+	}
+}
+
 func TestFleetChildFailsBeforeWorld(t *testing.T) {
 	ff := newFakeFleet()
 	var out, errOut syncBuf

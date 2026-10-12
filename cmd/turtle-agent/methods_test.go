@@ -289,6 +289,8 @@ func TestRPCErrMapping(t *testing.T) {
 		{session.ErrDisconnected, rpc.CodeDisconnected},
 		{session.ErrClosed, rpc.CodeDisconnected},
 		{context.DeadlineExceeded, rpc.CodeTimeout},
+		{session.ErrLogoutTimeout, rpc.CodeTimeout},
+		{session.ErrLostAtLogout, rpc.CodeDisconnected},
 		{context.Canceled, rpc.CodeDisconnected},
 		{&session.LogoutError{Reason: 1}, rpc.CodeGame},
 		{fmt.Errorf("%w: CMSG_PING: %w", worldconn.ErrWrite, net.ErrClosed), rpc.CodeDisconnected},
@@ -322,7 +324,7 @@ func TestLogoutRefusedThenComplete(t *testing.T) {
 	r.expect(opcode.CMSGLogoutRequest)
 	r.srv.Send(opcode.SMSGLogoutResponse, packet.NewWriter().U32(0).U8(1).Bytes())
 	r.srv.Send(opcode.SMSGLogoutComplete, nil)
-	if out := <-got; out["error"] != nil || len(out["result"].(map[string]any)) != 0 {
+	if out := <-got; out["error"] != nil || out["result"].(map[string]any)["outcome"] != "complete" {
 		t.Fatalf("logout: %v", out)
 	}
 	if err := <-r.run; err != nil {

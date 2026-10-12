@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"math"
 	"testing"
 
 	"github.com/pjerra/turtle-agent/internal/objects/objtest"
@@ -124,5 +125,78 @@ func TestCompressedMovesEdges(t *testing.T) {
 	}
 	if _, err := SplitCompressedMoves(objtest.Compress(plain)[:6]); err == nil {
 		t.Fatal("truncated zlib accepted")
+	}
+}
+
+// A destination of +Inf or 1e10 used to hang the session goroutine in linearPath's unwrap
+// loop (float32 p-512 == p). Such a move is now rejected, bounded, and returns at once.
+func TestMonsterMoveOutOfWorldRejected(t *testing.T) {
+	for _, bad := range []float32{float32(math.Inf(1)), float32(math.Inf(-1)), float32(math.NaN()), 1e10, -3e38} {
+		w := packet.NewWriter().PackedGUID(wolf).F32(1).F32(2).F32(3).U32(9).U8(0).
+			U32(0x100).U32(1500).U32(2).F32(bad).F32(12).F32(13).U32(0x01020304)
+		if _, err := ParseMonsterMove(w.Bytes()); err == nil {
+			t.Errorf("linear destination %v accepted", bad)
+		}
+		s := packet.NewWriter().PackedGUID(wolf).F32(bad).F32(2).F32(3).U32(9).U8(0).
+			U32(0x100).U32(1500).U32(1).F32(1).F32(1).F32(1)
+		if _, err := ParseMonsterMove(s.Bytes()); err == nil {
+			t.Errorf("start %v accepted", bad)
+		}
+		sm := packet.NewWriter().PackedGUID(wolf).F32(1).F32(2).F32(3).U32(9).U8(0).
+			U32(splineFlying).U32(800).U32(1).F32(1).F32(bad).F32(1)
+		if _, err := ParseMonsterMove(sm.Bytes()); err == nil {
+			t.Errorf("smooth point %v accepted", bad)
+		}
+	}
+}
+
+// The unwrap picks the wrap nearest the previous point, in one step for any distance.
+func TestLinearPathUnwrap(t *testing.T) {
+	// offset 0xFF in x is -1 -> 0.25 yd past dest; a dest 5000 yd from start still lands within span/2 of it.
+	path, err := linearPath(packet.NewReader(packet.NewWriter().U32(0x000003FF).Bytes()), [3]float32{0, 0, 0}, [3]float32{5000, 0, 0}, 2)
+	if err != nil || len(path) != 3 {
+		t.Fatalf("%v", path)
+	}
+	if d := path[1][0] - path[0][0]; d > 256 || d < -256 {
+		t.Fatalf("unwrapped point %v not within half a span of the start", path[1])
+	}
+}
+
+func FuzzParseMonsterMove(f *testing.F) {
+	f.Add(linearMove(wolf))
+	f.Add(packet.NewWriter().PackedGUID(wolf).F32(5).F32(6).F32(7).U32(9).U8(1).Bytes())
+	f.Add(packet.NewWriter().PackedGUID(wolf).F32(1).F32(2).F32(3).U32(9).U8(4).F32(0.5).
+		U32(splineFlying).U32(800).U32(2).F32(4).F32(4).F32(4).F32(8).F32(8).F32(8).Bytes())
+	f.Add(packet.NewWriter().PackedGUID(wolf).F32(1).F32(2).F32(3).U32(9).U8(0).
+		U32(0x100).U32(1500).U32(2).F32(float32(math.Inf(1))).F32(12).F32(13).U32(0x01020304).Bytes())
+	f.Fuzz(func(t *testing.T, b []byte) {
+		m, err := ParseMonsterMove(b)
+		if err != nil {
+			return
+		}
+		for _, p := range m.Path {
+			if checkInWorld(p) != nil {
+				t.Fatalf("accepted a path point out of the world: %v", p)
+			}
+		}
+	})
+}
+
+// Each rebuilt point can sit up to 256 yd from the one before, so a crafted run of offsets
+// walks the path out of the world even with the start and destination in range.
+func TestMonsterMoveWalkedOutOfWorld(t *testing.T) {
+	const n = 999
+	w := packet.NewWriter().PackedGUID(wolf).F32(0).F32(0).F32(0).U32(9).U8(0).
+		U32(0x100).U32(1500).U32(n + 1).F32(0).F32(0).F32(0)
+	x := float32(0) // the x the parser rebuilds so far
+	for i := 0; i < n; i++ {
+		// pick the offset whose point is 255 yd past the previous one (mod the 512 yd span)
+		off := int32(-(x + 255) * 4)
+		off = (off&0x7FF ^ 0x400) - 0x400 // wrap to 11 signed bits
+		w.U32(uint32(off) & 0x7FF)
+		x += 255
+	}
+	if _, err := ParseMonsterMove(w.Bytes()); err == nil {
+		t.Fatal("path walked out of the world accepted")
 	}
 }

@@ -4,7 +4,7 @@ GOFMT := $(GOROOT_LOCAL)/bin/gofmt
 CORE ?= $(HOME)/tortoise-wow
 export GOTOOLCHAIN := local
 
-.PHONY: test fmt fmt-check vet nocgo build opcodes spellnames tbm-contract
+.PHONY: fuzz-moves test fmt fmt-check vet nocgo build opcodes spellnames tbm-contract
 
 test: fmt-check vet nocgo
 	$(GO) test -race -count=1 ./...
@@ -17,6 +17,11 @@ fmt-check:
 
 vet:
 	$(GO) vet ./...
+
+# Fuzz the SMSG_MONSTER_MOVE parser (FUZZTIME=30s to bound it). `make test` only runs the seed corpus.
+FUZZTIME ?= 30s
+fuzz-moves:
+	$(GO) test -run xxx -fuzz FuzzParseMonsterMove -fuzztime $(FUZZTIME) ./internal/objects
 
 # A build without cgo still works, without path_to and walk_path (navmesh.ErrNoEngine).
 nocgo:

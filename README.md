@@ -15,7 +15,7 @@ server: log in, hire or invite bots, start a fight, then read back the combat lo
 Testing TortoiseBots with it? Follow the maintainer's vision in [docs/TORTOISEBOTS-VISION.md](docs/TORTOISEBOTS-VISION.md)
 and the rules for agents in [AGENTS.md](AGENTS.md).
 
-> Use it only on servers you run or are allowed to test on. It has no Warden emulation and does no rendering or
+> Use it only on servers you run or are allowed to test on. It has no Warden emulation (see [What the server sees](#what-the-server-sees)) and does no rendering or
 > inventory management beyond listing the bags, using and equipping items, taking corpse loot, and buying and selling.
 
 ## Quick start
@@ -48,7 +48,8 @@ users can read):
 Only `realmd` and `accounts` are required. `rpc` must be a loopback address. `realm` and `world_addr` override what the
 realm list returns; `rpc_token` and `rpc_auth` set the [RPC authentication](#rpc-authentication); `bots`, `spot` and `test_spell` are optional hints for scripts. `mmaps_dir` is a folder holding
 copies of the server's navmesh files, for `path_to` and `walk_path` (see [Navmesh walking](#navmesh-walking)), and to
-land falls and knockbacks on the ground (see [Falling](#falling-and-knockbacks)).
+land falls and knockbacks on the ground (see [Falling](#falling-and-knockbacks)). `addons` replaces the addon list sent
+at world login (see [What the server sees](#what-the-server-sees)).
 
 Log a character in and keep it online with the RPC server running:
 
@@ -128,6 +129,50 @@ that cannot change (unknown account, wrong password, ban, build) stops the attem
 towards realmd's autoban. The RPC address and the event log stay the same across a reconnect, so event cursors stay
 valid; a `session` event with state `reconnected` marks the new session. Out of attempts, the agent behaves as without
 the flag (status stays up for 30 s, then exit 6). `--reconnect` cannot be combined with `--capture`.
+
+## What the server sees
+
+**Warden is never answered.** The agent drops `SMSG_WARDEN_DATA` and never sends `CMSG_WARDEN_DATA`. What that does
+depends on the core (tortoise-wow 1181dev, read, not tested against every build):
+
+- With `USE_ANTICHEAT` (the default), `Anticheat/Warden/Warden.cpp` makes a Warden for every session (the agent says
+  it is a Windows x86 client). Its constructor sends `WARDEN_SMSG_MODULE_USE` **only if a Windows module file exists in
+  `Warden.ModuleDir`** (`WardenModuleMgr.cpp:88-93`, `Warden.cpp:81-95`) and then starts the response clock. Without a
+  module the agent sees no Warden packet at all.
+- With a module, the clock runs out after `Warden.Timeout` seconds (anticheat.conf, default 30). `Warden::Update` then
+  logs `WARDEN: Account <id> ip <ip> timeout` to the anticheat log, **once per session** (the clock is zeroed), and
+  the `KickPlayer()` next to it is commented out (`Warden.cpp:494-500`). That commented line is the only thing keeping an
+  agent online: a server that enables it kicks every agent about `Warden.Timeout` seconds after login. No config key
+  does that; it is a source change. The other Warden kicks (a failed challenge, a failed module load, an unknown
+  opcode) need a client reply, which the agent never sends.
+- `Warden.WinEnabled` / `Warden.OSXEnabled` (mangosd.conf, `0` in the template and on the test server) gate the older
+  `Anticheat/WardenAnticheat` code, built without `USE_ANTICHEAT`; there `0` means no Warden and no timeout. In the
+  `USE_ANTICHEAT` build `WinEnabled` only feeds an assert (`Warden.cpp:61`), so `0` does **not** stop the request when a
+  module is present. `Warden.Enable` in anticheat.conf is read into the config and, as far as the code shows, nothing
+  tests it. The old code kicks after `Warden.ClientResponseDelay` (120 s) without an answer.
+- `Warden.PlayersOnly` and the level gates (`Warden.MinimumLevel`) only matter once scans are answered.
+
+So: expect one `WARDEN: ... timeout` line per agent session on a server that ships a module, and treat it as noise.
+Answering Warden is not implemented (it needs the module's own check logic); see the issue "Answer Warden requests".
+
+**Addon list and fingerprint.** CMSG_AUTH_SESSION lists the 11 `Blizzard_*` addons a stock 1.12.1 client ships
+(`worldconn.StockAddons`), each enabled with the standard modulus CRC. The anticheat keeps a per-client fingerprint in
+the flags byte of four of them (BindingUI, InspectUI, MacroUI, RaidUI); a client that sends flag `0x01` on all four has
+none yet and the server generates one (`ADDON: Generated new fingerprint: 0x...` in the anticheat log) and answers with
+it in `SMSG_ADDON_INFO`. A real client stores it and presents it at every later login. The agent does the same:
+it saves the announced value in `addon-fingerprint-<hash of the account name>` (mode 0600) next to the settings file
+and sends it back at every login of that account. The file is read only if it is a regular file (not a symlink)
+that only you can access. Two logins of the same account saving at once keep whichever linked its file first; the
+other presents that value from its next login. Delete the file to look like a new installation.
+
+The file is per account on purpose: the core's account analyser bans by a "HWprint", a hash that includes the
+fingerprint and the IP (`AccountAnalyser.cpp`), so one fingerprint shared by a whole fleet would let a single marked
+print hit every account. Set `"shared_fingerprint": true` to use one `addon-fingerprint` for all accounts (one PC
+with several accounts) and accept that.
+
+Set `"addons": [...]` in the settings file to send another list; it must contain the four fingerprint addons above.
+A real Tortoise 1.18.1 client may also list `Turtle_General` and `Turtle_GroupUI` (the core accepts them when built
+with `ALLOW_TURTLE_ADDONS`); add them there if you want to look like that. This was not checked against a real client.
 
 ## JSON-RPC API
 

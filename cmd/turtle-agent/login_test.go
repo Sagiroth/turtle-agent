@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,8 +13,11 @@ import (
 
 	"github.com/pjerra/turtle-agent/internal/auth"
 	"github.com/pjerra/turtle-agent/internal/capture"
+	"github.com/pjerra/turtle-agent/internal/config"
 	"github.com/pjerra/turtle-agent/internal/opcode"
+	"github.com/pjerra/turtle-agent/internal/packet"
 	"github.com/pjerra/turtle-agent/internal/worldconn"
+	"github.com/pjerra/turtle-agent/internal/worldconn/worldtest"
 )
 
 func settingsFile(t *testing.T, body string) string {
@@ -68,7 +74,7 @@ func TestDialWorldUsesKeyBytes(t *testing.T) {
 	old := dial
 	t.Cleanup(func() { dial = old })
 	var got []byte
-	dial = func(_ context.Context, _, account string, key []byte, _ worldconn.Tap) (*worldconn.Conn, error) {
+	dial = func(_ context.Context, _, account string, key []byte, _ worldconn.Tap, _ ...worldconn.Option) (*worldconn.Conn, error) {
 		got = append([]byte(nil), key...)
 		return nil, context.Canceled
 	}
@@ -128,5 +134,53 @@ func TestCaptureStats(t *testing.T) {
 	code, out, _ := runCLI("capture-stats", path)
 	if code != exitOK || !strings.Contains(out, "SMSG_CHAR_ENUM") || !strings.Contains(out, "TOTAL") {
 		t.Fatalf("%d %q", code, out)
+	}
+}
+
+// The first login stores the fingerprint the server announces; the next one presents it.
+func TestAddonOptionKeepsFingerprintBetweenLogins(t *testing.T) {
+	st := config.Settings{FingerprintDir: t.TempDir()}
+	f := &worldconn.FingerprintFile{Path: fingerprintPath(st, "harness")}
+	if f.Load() != 0 {
+		t.Fatal("fresh path holds a fingerprint")
+	}
+	if err := f.Save(0x7A6B5C4D); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	opt := addonOption(st, "Harness", &stderr)
+	// Apply the option to a Conn by authenticating against the scripted server.
+	cli, srv := net.Pipe()
+	defer cli.Close()
+	defer srv.Close()
+	ch := make(chan *worldtest.Server, 1)
+	go func() {
+		s, _ := worldtest.Accept(srv, bytes.Repeat([]byte{1, 2, 3, 4}, 10), worldtest.Options{})
+		ch <- s
+	}()
+	if _, err := worldconn.Client(cli, "HARNESS", bytes.Repeat([]byte{1, 2, 3, 4}, 10), nil, opt); err != nil {
+		t.Fatal(err)
+	}
+	s := <-ch
+	r := packet.NewReader(s.AddonBlock)
+	r.U32()
+	zr, _ := zlib.NewReader(bytes.NewReader(r.Bytes(r.Remaining())))
+	plain, _ := io.ReadAll(zr)
+	if !bytes.Contains(plain, append([]byte("Blizzard_BindingUI\x00"), 0x4D)) {
+		t.Fatalf("stored fingerprint not sent: %q", plain)
+	}
+}
+
+// One account's fingerprint must not be presented by another: the core bans by a hash of
+// fingerprint and IP, so a shared print would spread a ban. shared_fingerprint opts in.
+func TestFingerprintFilePerAccount(t *testing.T) {
+	st := config.Settings{FingerprintDir: "/cfg"}
+	a, b := fingerprintPath(st, "alpha"), fingerprintPath(st, "beta")
+	if a == b || a != fingerprintPath(st, "ALPHA") || strings.Contains(a, "alpha") {
+		t.Fatalf("paths %q %q", a, b)
+	}
+	st.SharedFingerprint = true
+	if got := fingerprintPath(st, "alpha"); got != "/cfg/addon-fingerprint" || got != fingerprintPath(st, "beta") {
+		t.Fatalf("shared path %q", got)
 	}
 }

@@ -13,6 +13,22 @@ so every live run so far (GM level 3) never exercised the flag-based checks.
 3. Run `walk_to`, `face`, then a walk that stops, and read the server log for anticheat lines (FLY_HACK, WATER_WALK,
    ROOT_MOVE, FIXED_Z, ...). Expect none.
 
+## Warden timeout and addon fingerprint (issue #47)
+
+What to expect is in the README, "What the server sees". Grep the server's anticheat log after a run:
+
+1. `grep -c 'WARDEN: Account .* timeout'`: at most one line per agent session, and only when `Warden.ModuleDir` holds a
+   Windows module. Note it as expected; it is not a failure of the run. If the agent is disconnected (exit 6) about
+   `Warden.Timeout` seconds after login, the server's `Warden.cpp:498` `KickPlayer()` is live: say so in the report.
+2. `grep 'Generated new fingerprint'`: log in twice with the same settings file. Expect the line at the first login
+   only (or none, if the account's `addon-fingerprint-*` file already existed), and never at the second. The agent's
+   file holds the same value as the line's `0x...`. With `LOG_ANTICHEAT_DEBUG` on, `ADDON: Found fingerprint` marks the
+   second login.
+3. `ADDON: Found invalid fingerprint` or a new `Generated` line at the second login means the stored value was not
+   presented: check the file is next to the settings file in use, and that the same account logged in both times (the file is per account).
+
+Not yet run live: this was added with unit tests against the core's layout only.
+
 ## Chat language (final review M5)
 
 `BuildMessageChat` sends every say, party and whisper in LANG_UNIVERSAL. The core accepts it (skill 0,

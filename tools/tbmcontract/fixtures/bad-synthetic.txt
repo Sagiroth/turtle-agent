@@ -1,0 +1,29 @@
+# expect-mismatches: 12
+# DELIBERATELY BROKEN. Every line below must be reported; if one passes, the contract has lost a check.
+# a roster that says 2 rows and sends 1
+system	TBM:ROSTER_BEGIN|2
+system	TBM:ROSTER|101|Alpha|8|online|1|The Barrens
+system	TBM:ROSTER_END
+# a roster row with a bad group flag
+system	TBM:ROSTER_BEGIN|1
+system	TBM:ROSTER|101|Alpha|8|online|yes|The Barrens
+system	TBM:ROSTER_END
+# a CC mark the addon does not know
+system	TBM:CC_ASSIGN_BEGIN|1
+system	TBM:CC_ASSIGN|Alpha|banana
+system	TBM:CC_ASSIGN_END
+# BOTSTATE with a pair that is not key=value
+addon	GUILD	TBM:BOTSTATE|Alpha|move=follow,loot
+# an ACK with a |-containing executor (five fields)
+system	TBM:ACTION_ACK|pull|party|1|Alpha|body-pull
+# an ACK with a non-numeric count
+system	TBM:ACTION_ACK|stay|party|many|-
+# an inventory whose END names another bot
+system	TBM:INV_BEGIN|Alpha|10
+system	TBM:INV_END|Bravo|1|2
+# colour codes in front of the protocol line: the chat filter would show it
+system	|cffffffffTBM:VERSION|2026-10-12-v17
+# a verb the addon has never heard of
+system	TBM:FROBNICATE|1|2
+# the colour-stripped form the agent shows in "text" when data.raw is missing: |r ate the separator
+system	TBM:ACTION_ACKeady|party|3|-

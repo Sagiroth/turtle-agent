@@ -1,0 +1,8 @@
+# expect-mismatches: 3
+# Real lines the build 16/17 server sends that the TBM addon rejects as "Malformed action response":
+# an ACTION_ERR with an empty intent (the .bot action usage error, BotCommands.cpp:2697) and the party:/raid: scope
+# of "behavior mimic" (BotCommands.cpp:2486). The contract must fail here; when server or addon is fixed, move
+# these lines to ok-actions.txt.
+system	TBM:ACTION_ERR||invalid|Usage: .bot action attack/interrupt/stop/pull [seconds]/pullback [seconds]/come/stay/hold/follow/flee/focus skull/cc <mark> [bot]/cc clear [bot]/auto cc [on/off]/sap [on/off] [bot]/aoe [on/off]/loot [on/off]/repair/sell/rest/drink/eat/release/corpse run/learn/trade/ready/raid [status/tankface/douse/custom status/custom on/custom off]
+system	TBM:ACTION_ACK|behavior mimic|party:mimic|3|on
+system	TBM:ACTION_ACK|behavior mimic|raid:mimic|3|on

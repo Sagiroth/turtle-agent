@@ -1,0 +1,77 @@
+# Real TBM lines from live TortoiseBots build 16/17 servers (turtle-agent events, 2026-10-12): one ACTION_ACK or
+# ACTION_ERR per distinct intent, scope kind and outcome seen, then an INV_* snapshot. Bot names scrubbed.
+system	TBM:ACTION_ACK|ready|party|3|-
+system	TBM:ACTION_ACK|stay|party|3|-
+system	TBM:ACTION_ACK|follow|party|3|-
+system	TBM:ACTION_ACK|attack|party|3|-
+system	TBM:ACTION_ERR|interrupt|not-casting|The target is not casting an interruptible spell.
+system	TBM:ACTION_ACK|stop|party|3|-
+system	TBM:ACTION_ACK|flee|party|3|-
+system	TBM:ACTION_ERR|pull|failed|The native pull strategy rejected the target.
+system	TBM:ACTION_ERR|pullback|failed|The native pull strategy rejected the target.
+system	TBM:ACTION_ERR|focus skull|failed|No scoped bot accepted the mature action.
+system	TBM:ACTION_ACK|focus skull|party|3|-
+system	TBM:ACTION_ACK|pull|party|1|Alpha body-pull
+system	TBM:ACTION_ERR|rest|failed|No scoped bot accepted the mature action.
+system	TBM:ACTION_ACK|behavior loot|bot:Bravo|1|off
+system	TBM:ACTION_ERR|behavior bogus|invalid|Usage: .bot behavior <bot party raid> <loot aoe autocc savemana boost threat potions mimic spread> <on off>
+system	TBM:ACTION_ERR|behavior loot|no-bot|Unknown or uncontrollable bot name.
+system	TBM:ACTION_ACK|aoe|party|3|off
+system	TBM:ACTION_ACK|loot|party|3|off
+system	TBM:ACTION_ACK|auto cc|party|3|on
+system	TBM:ACTION_ERR|sap|no-rogue|No rogue bot in scope: name, select or group a rogue bot.
+system	TBM:ACTION_ACK|cc moon Charlie|bot:Charlie|1|Charlie
+system	TBM:ACTION_ERR|cc square|no-target|Select an enemy target or an owned bot with an existing raid mark.
+system	TBM:ACTION_ACK|cc clear|party|3|Charlie
+system	TBM:ACTION_ERR|cc skull Nobody|no-bot|Unknown or uncontrollable bot name for cc assignment.
+system	TBM:ACTION_ERR|come|failed|No scoped bot accepted the mature action.
+system	TBM:ACTION_ERR|hold|failed|No scoped bot accepted the mature action.
+system	TBM:ACTION_ERR|repair|failed|No scoped bot accepted the mature action.
+system	TBM:ACTION_ERR|sell|failed|No scoped bot accepted the mature action.
+system	TBM:ACTION_ACK|drink|party|3|-
+system	TBM:ACTION_ACK|eat|party|3|-
+system	TBM:ACTION_ERR|release|failed|No scoped bot accepted the mature action.
+system	TBM:ACTION_ERR|corpse run|failed|No scoped bot accepted the mature action.
+system	TBM:ACTION_ERR|learn|failed|No scoped bot accepted the mature action.
+system	TBM:ACTION_ERR|trade|failed|No scoped bot accepted the mature action.
+system	TBM:ACTION_ACK|raid status|bot:Alpha|1|outdoor
+system	TBM:ACTION_ACK|raid custom status|party|3|-
+system	TBM:ACTION_ERR|raid tankface|failed|No scoped bot accepted the mature action.
+system	TBM:ACTION_ACK|come|party|3|-
+system	TBM:ACTION_ACK|hold|party|3|-
+system	TBM:ACTION_ACK|item trade|bot:Charlie|1|open
+system	TBM:INV_BEGIN|Charlie|41
+system	TBM:INV_EQ|0|14200|45|45
+system	TBM:INV_EQ|1|12022|0|0
+system	TBM:INV_EQ|2|9824|45|45
+system	TBM:INV_EQ|3|41285|0|0
+system	TBM:INV_EQ|4|6609|70|70
+system	TBM:INV_EQ|5|4328|25|25
+system	TBM:INV_EQ|6|9999|55|55
+system	TBM:INV_EQ|7|4325|35|35
+system	TBM:INV_EQ|8|4979|25|25
+system	TBM:INV_EQ|9|9390|25|25
+system	TBM:INV_EQ|10|12009|0|0
+system	TBM:INV_EQ|11|55323|0|0
+system	TBM:INV_EQ|12|58100|0|0
+system	TBM:INV_EQ|13|61555|0|0
+system	TBM:INV_EQ|14|15594|0|0
+system	TBM:INV_EQ|15|7757|100|100
+system	TBM:INV_EQ|17|10766|65|65
+system	TBM:INV_ITEM|255|23|6948|1|b
+system	TBM:INV_ITEM|255|24|8957|20|-
+system	TBM:INV_ITEM|255|25|8766|20|-
+system	TBM:INV_ITEM|255|26|6256|1|e
+system	TBM:INV_ITEM|255|27|20749|1|-
+system	TBM:INV_ITEM|255|28|2901|1|e
+system	TBM:INV_ITEM|255|29|7005|1|e
+system	TBM:INV_ITEM|255|30|17056|20|-
+system	TBM:INV_ITEM|255|31|17056|12|-
+system	TBM:INV_ITEM|255|32|17031|8|-
+system	TBM:INV_ITEM|255|33|17032|10|-
+system	TBM:INV_ITEM|255|34|17032|10|-
+system	TBM:INV_ITEM|255|35|4471|1|-
+system	TBM:INV_ITEM|255|36|20749|1|-
+system	TBM:INV_ITEM|255|37|8545|10|-
+system	TBM:INV_END|Charlie|43|58
+system	TBM:ACTION_ACK|drink|bot:Delta|1|-

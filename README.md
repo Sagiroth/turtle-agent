@@ -27,6 +27,7 @@ engine), and a server whose realmd and world ports you can reach. `CGO_ENABLED=0
 ```sh
 make build                      # bin/turtle-agent
 make test                       # gofmt check, go vet, a no-cgo build, go test -race
+make tbm-contract               # TBM addon protocol check (needs lua5.1; see TBM contract test)
 ```
 
 Create the settings file (default `~/.config/turtle-agent/settings.json`, mode **0600**; the agent refuses a file other
@@ -470,6 +471,38 @@ bin/turtle-agent fleet --config fleet.json --settings other.json --stagger 3s --
 - A child that exits non-zero, or a fleet that is not fully in world after `--wait` (default 2 m), stops the others and
   makes `fleet` exit 9. It exits 0 only when every child exited 0.
 
+## TBM contract test
+
+`make tbm-contract` checks that the TortoiseBots server module and its TortoiseBotsManager addon (TBM) still
+understand each other. It loads the real addon (Lua 5.1, [Sagiroth/TortoiseBotsManager](https://github.com/Sagiroth/TortoiseBotsManager),
+MIT) under a mock of the 1.12 widget API, replays `TBM:` lines as `CHAT_MSG_SYSTEM` and `CHAT_MSG_ADDON` events, and
+compares the addon's state with what the lines say: `TBM:VERSION`, `CAPS` and `TRANSPORT`, the roster (`ROSTER_*`), CC
+assignments, the claimed list, per-bot `BOTSTATE` (move, loot, aoe, autocc, ... spread), `INV_*` snapshots, and `ACTION_ACK` /
+`ACTION_ERR`. It also fails when the addon refuses a line the protocol allows ("Malformed action response", a roster
+snapshot error), when the addon's chat filter would let a protocol line reach the chat frame, and for a `TBM:` verb it has
+no parser for.
+
+```sh
+make tbm-contract                                # the fixtures: ok-*.txt must match, bad-*.txt must fail
+make tbm-contract EVENTS="run1/events.json"      # replay the TBM: lines of a saved events reply
+```
+
+`EVENTS` takes what the `events` RPC returns, saved to a file (a bare array, `{"events": [...]}` or the whole reply).
+`tools/tbmlines` extracts the lines; it reads `data.raw` when present, because the colour-stripped `text` has lost the
+`|r` of fields such as `|ready`. The addon is downloaded at the commit pinned in `tools/tbmcontract/fetch.sh` into
+`.cache/` (ignored, never vendored); bump the commit there on purpose. The mock in `tools/tbmcontract/mock.lua` is copied
+from the addon's own `tests/regression.lua` (MIT). Without `lua5.1` or network the target skips with a message
+(`TBM_CONTRACT_STRICT=1` makes that an error); it is not part of `make test`. The expectations are in
+`tools/tbmcontract/contract.lua`, written from `commands/BotCommands.cpp` and the protocol comments in the addon, not
+copied from its parser.
+
+Fixtures (`tools/tbmcontract/fixtures/`) are scrubbed lines from live build 16/17 captures (bot names replaced). No
+capture has a non-empty roster yet, so `ok-roster-synthetic.txt` is built by hand from the server's format, and says so.
+`bad-known-build16.txt` holds real lines the addon rejects today (an `ACTION_ERR` with an empty intent from the
+`.bot action` usage error, and `ACTION_ACK|behavior mimic|party:mimic|...`, whose scope is neither `party` nor
+`bot:<name>`); `bad-synthetic.txt` is deliberately broken. A bad fixture states `# expect-mismatches: N` and must fail
+with exactly N. Offline only: not run against a live server.
+
 ## Python
 
 The companion test harness (wow-play-harness, not public yet) has a `HeadlessClient` that wraps this API
@@ -489,6 +522,7 @@ with the same calls as its real-client backend (`chat`, `gm`, `state`, `tail_cha
 | `internal/navmesh` | tile loading and path planning over the core's Detour (cgo); `navfixture` builds synthetic tiles |
 | `internal/events` | ordered event log with cursors |
 | `internal/tbm` | the TortoiseBots addon (TBM) protocol: handshake commands and the `TBM:` reply lines |
+| `tools/tbmlines`, `tools/tbmcontract` | extract `TBM:` lines from an events file; replay them through the real TBM addon (Lua) |
 | `internal/capture` | packet capture files and the secret scan |
 | `internal/rpc`, `internal/netutil` | loopback JSON-RPC server |
 | `cmd/turtle-agent` | the CLI (`login`, `fleet`, capture tools) |

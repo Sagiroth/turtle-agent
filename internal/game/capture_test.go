@@ -1,12 +1,15 @@
 package game
 
 import (
+	"math"
 	"strings"
 	"testing"
 
 	"github.com/pjerra/turtle-agent/internal/capture"
 	"github.com/pjerra/turtle-agent/internal/opcode"
+	"github.com/pjerra/turtle-agent/internal/packet"
 	"github.com/pjerra/turtle-agent/internal/testfixture"
+	"github.com/pjerra/turtle-agent/internal/worldconn"
 )
 
 // fixture loads a capture recorded on m910q by a milestone's live step (ruling P11:
@@ -117,5 +120,108 @@ func TestM5ActionsFromCapture(t *testing.T) {
 	}
 	if teleports == 0 {
 		t.Fatal("no teleport captured")
+	}
+}
+
+// m5Player is Tagentone's GUID in m5-attack.twcap (the "in world" line of the Task 25 run).
+const m5Player packet.GUID = 0x1FA
+
+// clientBodies is capture.Bodies for the packets the agent sent (Bodies keeps only the server's).
+func clientBodies(recs []capture.Record, op uint16) [][]byte {
+	var out [][]byte
+	for _, r := range recs {
+		if r.Op == op && r.Dir == worldconn.ClientToServer && !r.Redacted {
+			out = append(out, r.Body)
+		}
+	}
+	return out
+}
+
+// Milestone 5 content: the player swung at the giraffe and hit it, Heroic Strike (78) went out and
+// came back refused for the missing weapon (reason 25, SPELL_FAILED_EQUIPPED_ITEM_CLASS), and every
+// GM teleport was acked with the server's counter, ending at the requested point.
+func TestM5ContentFromCapture(t *testing.T) {
+	recs := fixture(t, "m5-attack.twcap")
+
+	swing := false
+	for _, b := range capture.Bodies(recs, opcode.SMSGAttackstart) {
+		a, err := ParseAttackStart(b)
+		if err != nil {
+			t.Fatalf("% X: %v", b, err)
+		}
+		swing = swing || (a.Attacker == m5Player && a.Victim != 0 && a.Victim != m5Player)
+	}
+	if !swing {
+		t.Error("no SMSG_ATTACKSTART from the player on a unit")
+	}
+
+	hits := 0
+	for _, b := range capture.Bodies(recs, opcode.SMSGAttackerstateupdate) {
+		m, err := ParseAttackerStateUpdate(b)
+		if err != nil {
+			t.Fatalf("% X: %v", b, err)
+		}
+		if m.Attacker == m5Player && m.Victim != 0 && m.Total > 0 {
+			hits++
+		}
+	}
+	if hits == 0 {
+		t.Error("no SMSG_ATTACKERSTATEUPDATE from the player with damage")
+	}
+
+	const heroicStrike, equippedItemClass = 78, 25
+	casts := 0
+	for _, b := range clientBodies(recs, opcode.CMSGCastSpell) {
+		r := packet.NewReader(b)
+		if spell := r.U32(); r.Err() == nil && spell == heroicStrike {
+			casts++
+		}
+	}
+	if casts == 0 {
+		t.Error("no CMSG_CAST_SPELL for spell 78")
+	}
+	refused := 0
+	for _, b := range capture.Bodies(recs, opcode.SMSGCastResult) {
+		c, err := ParseCastResult(b)
+		if err != nil {
+			t.Fatalf("% X: %v", b, err)
+		}
+		if c.SpellID == heroicStrike && c.Failed && c.Reason == equippedItemClass {
+			refused++
+		}
+	}
+	if refused == 0 {
+		t.Error("no SMSG_CAST_RESULT refusing spell 78 with reason 25")
+	}
+
+	// The server numbers its teleports 0, 1, 2, …; the client acks each with the same counter.
+	acked := map[uint32]bool{}
+	for _, b := range clientBodies(recs, opcode.MSGMoveTeleportAck) {
+		r := packet.NewReader(b)
+		g, counter := r.GUID(), r.U32()
+		if r.Err() == nil && g == m5Player {
+			acked[counter] = true
+		}
+	}
+	var acks []TeleportAck
+	for _, b := range capture.Bodies(recs, opcode.MSGMoveTeleportAck) {
+		a, err := ParseTeleportAck(b)
+		if err != nil {
+			t.Fatalf("% X: %v", b, err)
+		}
+		acks = append(acks, a)
+	}
+	if len(acks) == 0 {
+		t.Fatal("no MSG_MOVE_TELEPORT_ACK from the server")
+	}
+	for i, a := range acks {
+		if a.GUID != m5Player || a.Counter != uint32(i) || !acked[a.Counter] {
+			t.Errorf("teleport %d: guid %v counter %d, client acked %v", i, a.GUID, a.Counter, acked[a.Counter])
+		}
+	}
+	// The last teleport is the ground-level Barrens spot (-1287, -2379.6, 91.7).
+	last := acks[len(acks)-1].Move
+	if math.Abs(float64(last.X+1287)) > 0.1 || math.Abs(float64(last.Y+2379.6)) > 0.1 || math.Abs(float64(last.Z-91.7)) > 0.1 {
+		t.Errorf("last teleport at (%v, %v, %v), want (-1287, -2379.6, 91.7)", last.X, last.Y, last.Z)
 	}
 }

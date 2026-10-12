@@ -110,8 +110,12 @@ func ParseMonsterMove(body []byte) (MonsterMove, error) {
 // linearPath rebuilds a linear path from the packed offsets after the destination:
 // WriteLinearPath writes destination - point for the points from the first one on, each
 // as 11, 11 and 10 signed bits of quarter yards (packet_builder.cpp:78-112,
-// ByteBuffer::appendPackXYZ). The count is not trusted (a two-point path writes no
-// offsets at all), so it reads at most count-1 offsets and only the bytes that are there.
+// ByteBuffer::appendPackXYZ). A linear spline is laid out as a Catmull-Rom one (the
+// initializers table, spline.cpp:49-55: a virtual point before the first, a copy of the
+// last after it), so last_idx is the path's point count - 1 and the core writes no offsets
+// for a two-point path (last_idx 1, packet_builder.cpp:94) and two for a three-point one.
+// The count is therefore not trusted: at most count-1 offsets are read, and only the
+// bytes that are there.
 // An offset only spans 512 yards across (256 up and down) and wraps beyond that, so each
 // axis takes the wrap that puts the point nearest the one before it.
 func linearPath(r *packet.Reader, start, dest [3]float32, count uint32) [][3]float32 {

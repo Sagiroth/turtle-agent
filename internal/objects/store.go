@@ -153,7 +153,9 @@ func (s *Store) moveObject(o *object, m *Movement) {
 	o.x, o.y, o.z, o.o, o.posAt, o.track = m.X, m.Y, m.Z, m.O, now, nil
 	if sp := m.Spline; sp != nil && sp.Flags&splineDone == 0 && len(sp.Points) >= 3 {
 		// The first and last points of the path are Spline's virtual points
-		// (SplineBase::InitCatmullRom, spline.cpp:240-271, used for linear paths too).
+		// (SplineBase::InitCatmullRom, spline.cpp:240-271), linear paths included: the
+		// initializers table maps ModeLinear to InitCatmullRom (spline.cpp:49-55), and
+		// every create-block spline in the captures has them (TestCapturedCreateSplines).
 		pts := sp.Points[1 : len(sp.Points)-1]
 		start := now.Add(-time.Duration(sp.TimePassed) * time.Millisecond)
 		o.track = newTrack(pts, start, time.Duration(sp.Duration)*time.Millisecond, sp.Flags&splineCyclic != 0)
@@ -220,16 +222,24 @@ func (s *Store) MoveSpline(m MonsterMove) {
 	}
 	now := s.now()
 	_, ob.o, _ = ob.pos(now) // the facing it has now, partway along an earlier spline
-	ob.x, ob.y, ob.z, ob.posAt, ob.track = m.Dest[0], m.Dest[1], m.Dest[2], now, nil
-	if m.Stop {
-		return
-	}
 	path := m.Path
 	if len(path) < 2 {
 		path = [][3]float32{m.Start, m.Dest}
 	}
+	// A linear path of more than Movement.MaxPointsPerPacket (80) points goes out in
+	// parts: each later SMSG_MONSTER_MOVE of the same spline repeats the first point, then
+	// the points after those sent, with the time left to its last point (Unit.cpp:11437-11442,
+	// packet_builder.cpp:78-150). The unit carries on from where it is, through the points
+	// of the earlier part it has not reached yet.
+	if t := ob.track; t != nil && !m.Stop && m.ID != 0 && t.id == m.ID {
+		path = append(t.rest(now), path[1:]...)
+	}
+	ob.x, ob.y, ob.z, ob.posAt, ob.track = m.Dest[0], m.Dest[1], m.Dest[2], now, nil
+	if m.Stop {
+		return
+	}
 	if ob.track = newTrack(path, now, time.Duration(m.Duration)*time.Millisecond, m.Flags&splineCyclic != 0); ob.track != nil {
-		ob.track.finalO, ob.track.hasFinalO = m.FinalAngle, m.HasFinalAngle
+		ob.track.id, ob.track.finalO, ob.track.hasFinalO = m.ID, m.FinalAngle, m.HasFinalAngle
 		return
 	}
 	// No time to take or no way to go: the unit is at the destination at once.

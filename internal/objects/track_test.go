@@ -97,11 +97,13 @@ func TestCyclicSpline(t *testing.T) {
 }
 
 // A create block for a unit on a spline carries the route and how far along it the unit
-// is (packet_builder.cpp:154-180); the route's first and last points are virtual.
+// is (packet_builder.cpp:154-180), in the layout of InitCatmullRom for linear paths too:
+// lerp(c0, c1, -1), c0..cN-1, cN-1 again (spline.cpp:49-55, :240-271). This is a
+// two-point chase: c0 (0,0,0) to c1 (20,0,0).
 func TestCreateBlockSplineCarriesOn(t *testing.T) {
 	s, c := newClockStore()
 	b := createBlock(wolf, TypeUnit, 10, 0, nil)
-	b.Move.Spline = &Spline{TimePassed: 1000, Duration: 2000, Points: [][3]float32{{-10, 0, 0}, {0, 0, 0}, {20, 0, 0}, {20, 0, 0}}, Dest: [3]float32{20, 0, 0}}
+	b.Move.Spline = &Spline{TimePassed: 1000, Duration: 2000, Points: [][3]float32{{-20, 0, 0}, {0, 0, 0}, {20, 0, 0}, {20, 0, 0}}, Dest: [3]float32{20, 0, 0}}
 	s.Apply([]Block{b})
 	if u, _ := s.Get(wolf, 0, 0, 0); !at(u, 10, 0, 0) || !u.Moving || u.PosAgeMS != 0 {
 		t.Fatalf("at receipt: %+v", u)
@@ -236,5 +238,84 @@ func TestMonsterMoveLinearPathOffsets(t *testing.T) {
 	want = [][3]float32{{0, 0, 0}, {10, 0, -60}, {150, 0, -100}, {300, 0, -200}}
 	if m, _ := ParseMonsterMove(w.Bytes()); len(m.Path) != 4 || m.Path[1] != want[1] || m.Path[2] != want[2] {
 		t.Fatalf("wrapped offsets: %+v", m.Path)
+	}
+}
+
+// Every create block for a unit on a spline in the captures (167, linear paths of mobs,
+// pets and bots) has the virtual first point lerp(c0, c1, -1) and the last point twice,
+// and the store's current point at receipt is the block's own position.
+func TestCapturedCreateSplines(t *testing.T) {
+	n := 0
+	for _, name := range []string{"m1-login.twcap", "m3-party.twcap", "m4-world.twcap", "m5-attack.twcap", "m6-fight.twcap"} {
+		for _, r := range testfixture.Load(t, name) {
+			if r.Dir != worldconn.ServerToClient || r.Redacted || (r.Op != opcode.SMSGUpdateObject && r.Op != opcode.SMSGCompressedUpdateObject) {
+				continue
+			}
+			body := r.Body
+			if r.Op == opcode.SMSGCompressedUpdateObject {
+				var err error
+				if body, err = Inflate(body); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bs, err := ParseUpdate(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, b := range bs {
+				if b.Move == nil || b.Move.Spline == nil || b.Move.Spline.Flags&splineDone != 0 {
+					continue
+				}
+				p := b.Move.Spline.Points
+				if len(p) < 3 {
+					t.Fatalf("%s: spline of %d points", name, len(p))
+				}
+				virt := [3]float32{2*p[1][0] - p[2][0], 2*p[1][1] - p[2][1], 2*p[1][2] - p[2][2]}
+				if dist3(p[0], virt) > 0.01 || p[len(p)-1] != p[len(p)-2] {
+					t.Fatalf("%s: not the Catmull-Rom layout: %v", name, p)
+				}
+				st, _ := newClockStore()
+				st.Apply([]Block{b})
+				if u, _ := st.Get(b.GUID, 0, 0, 0); dist3([3]float32{u.X, u.Y, u.Z}, [3]float32{b.Move.X, b.Move.Y, b.Move.Z}) > 0.1 {
+					t.Fatalf("%s: current point %v %v %v, block at %v %v %v (%+v)", name, u.X, u.Y, u.Z, b.Move.X, b.Move.Y, b.Move.Z, b.Move.Spline)
+				}
+				n++
+			}
+		}
+	}
+	if n < 100 {
+		t.Fatalf("only %d create-block splines in the captures", n)
+	}
+}
+
+// A path of more than 80 points goes out in parts; a later part of the same spline
+// repeats the first point and carries the points after those sent, with the time left
+// (Unit.cpp:11437-11442). The unit goes on from where it is, through the points of the
+// earlier part still ahead.
+func TestSplineLaterPart(t *testing.T) {
+	s, c := newClockStore()
+	s.Apply([]Block{createBlock(wolf, TypeUnit, 0, 0, nil)})
+	s.MoveSpline(MonsterMove{GUID: wolf, ID: 7, Start: [3]float32{0, 0, 0}, Dest: [3]float32{20, 0, 0}, Duration: 2000,
+		Path: [][3]float32{{0, 0, 0}, {10, 0, 0}, {20, 0, 0}}})
+	c.add(500 * time.Millisecond) // at (5,0,0)
+	s.MoveSpline(MonsterMove{GUID: wolf, ID: 7, Start: [3]float32{0, 0, 0}, Dest: [3]float32{20, 10, 0}, Duration: 2500,
+		Path: [][3]float32{{0, 0, 0}, {20, 10, 0}}})
+	for _, w := range []struct {
+		after time.Duration
+		x, y  float32
+	}{{0, 5, 0}, {1000, 15, 0}, {2000, 20, 5}, {3000, 20, 10}} {
+		at0 := c.t
+		c.t = at0.Add(w.after * time.Millisecond)
+		u, _ := s.Get(wolf, 0, 0, 0)
+		c.t = at0
+		if !at(u, w.x, w.y, 0) {
+			t.Fatalf("after %d ms: %+v", w.after, u)
+		}
+	}
+	// A new spline (another id) starts from its own first point.
+	s.MoveSpline(MonsterMove{GUID: wolf, ID: 8, Start: [3]float32{5, 0, 0}, Dest: [3]float32{5, 10, 0}, Duration: 1000})
+	c.add(500 * time.Millisecond)
+	if u, _ := s.Get(wolf, 0, 0, 0); !at(u, 5, 5, 0) {
+		t.Fatalf("new spline: %+v", u)
 	}
 }

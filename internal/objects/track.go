@@ -18,6 +18,7 @@ const (
 // its control points, which the curve passes through, so a point between two of them is
 // off by the curve's bow.
 type track struct {
+	id     uint32 // the spline's id (MoveSpline::GetId), 0 from a create block
 	pts    [][3]float32
 	cum    []float64 // route length up to each point
 	start  time.Time // when the spline's time 0 was
@@ -86,6 +87,23 @@ func (t *track) at(now time.Time) (p [3]float32, o float32, ok, moving bool) {
 		}
 	}
 	return p, 0, false, moving
+}
+
+// rest is the route still ahead at now: the current point, then the points not reached
+// yet, the last one included.
+func (t *track) rest(now time.Time) [][3]float32 {
+	p, _, _, moving := t.at(now)
+	out := [][3]float32{p}
+	if !moving {
+		return out
+	}
+	d := t.cum[len(t.cum)-1] * float64(max(now.Sub(t.start), 0)%max(t.dur, 1)) / float64(t.dur)
+	for i := range t.pts {
+		if t.cum[i] > d {
+			out = append(out, t.pts[i])
+		}
+	}
+	return out
 }
 
 // angle is the facing of a move by dx, dy in [0, 2pi).

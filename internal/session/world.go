@@ -137,7 +137,7 @@ func (s *Session) onMonsterMove(body []byte) error {
 	if err != nil {
 		return err
 	}
-	s.store.MoveSpline(m.GUID, m.Dest[0], m.Dest[1], m.Dest[2], m.Stop)
+	s.store.MoveSpline(m)
 	if m.GUID == s.selfGUID() {
 		s.serverMoved(m.Dest)
 		s.splineUntil = time.Time{}

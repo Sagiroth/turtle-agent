@@ -121,7 +121,7 @@ browser (`Origin` header) and other `Host` names are refused.
 | `raid_move` | `guid` or `name`, `subgroup` (1-8), `swap_with` (name) | Leader or assistant of a raid: puts the member in the subgroup; with `swap_with` trades places with that member of the target subgroup, which also works when it is full (five) |
 | `disband` | | Leader only: removes every other member, which ends the group. `leave_group` only takes the player out and the group lives on |
 | `party` | | `in_group`, `raid`, `leader`, `assistant` and `subgroup` (the player's own), `members[]` with health, online state, `assistant` and `subgroup`, `marks` (raid icon name to guid) |
-| `units` | `limit`, `name` | nearby units, nearest first: guid, name, level, health, dead, hostile, in_party; `hostile` means an attackable-looking creature (no NPC flags, not player-controlled), not a faction check: it counts neutral critters and never an enemy-faction player |
+| `units` | `within` (yards, 3D; `near` is its older name), `entry`, `hostile`, `name`, `limit` | nearby units, nearest first: guid, name, level, health, dead, hostile, in_party, `x`/`y`/`z`/`o`, `pos_age_ms`, `moving`, `distance` (3D) and `distance_2d` from the player (see [Unit positions](#unit-positions)); `hostile` means an attackable-looking creature (no NPC flags, not player-controlled), not a faction check: it counts neutral critters and never an enemy-faction player |
 | `target` | `guid` or `name` (prefers living units) | |
 | `attack` / `stop_attack` | | |
 | `cast` | `spell_id`, `target` | |
@@ -217,6 +217,28 @@ mounted, `dismount` asks for `spell_id`.
 
 Not yet exercised on a live server (see the pull request for the live steps): the unit tests use packets built from the core's
 source, not a capture.
+
+## Unit positions
+
+Every `units` row carries where the unit is, as far as the server has said:
+
+- `x`, `y`, `z`, `o` come from the unit's create or movement block, the movement packets the server relays for
+  players (`MSG_MOVE_*`, heartbeats every 500 ms while they move), and the splines it sends for creatures, pets and
+  bots (`SMSG_MONSTER_MOVE`, also inside `SMSG_COMPRESSED_MOVES`).
+- While a unit runs a spline, `moving` is true and the position is the spline's current point: the route (a linear
+  path's points rebuilt from their packed offsets, or a smooth path's points) taken at an even speed over the
+  spline's duration, as the core times it. `o` faces along the current leg, and at the end the spline's final
+  angle when it set one. A create block for a unit mid-spline carries on from how far along it the unit was.
+- `pos_age_ms` is how long ago the server last said where the unit is (that block, relay or spline). For a player
+  standing still it grows, as the server sends nothing more; for a unit on a spline the position is current
+  although the age grows. A unit known only from a values block has no position: `pos_age_ms`, `distance` and
+  `distance_2d` are -1, it sorts last and `within` never matches it.
+- `distance` (3D) and `distance_2d` are measured from the player's own position (`status` x/y/z), so they are
+  as good as that: a `z_unknown` player has a guessed height, and `distance_2d` is then the one to trust.
+
+In the captured runs, a spline that the server cut short started its next one within 0.75 yd of the point the
+agent had (90 % of about 100 cases). Wandering and pathing mobs in those runs reached their ends 1-1.7 s before
+the duration the server sent; until it runs out the agent still has them that far short of the end.
 
 ## Movement
 

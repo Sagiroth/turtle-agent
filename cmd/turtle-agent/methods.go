@@ -44,7 +44,8 @@ type chatLogParams struct {
 }
 
 type unitsParams struct {
-	Near    float32 `json:"near,omitempty"`
+	Within  float32 `json:"within,omitempty"` // yards, 3D
+	Near    float32 `json:"near,omitempty"`   // the older name of within
 	Entry   uint32  `json:"entry,omitempty"`
 	Hostile *bool   `json:"hostile,omitempty"`
 	Name    string  `json:"name,omitempty"`
@@ -156,7 +157,10 @@ func registerMethodsFor(srv *rpc.Server, cur func() *session.Session) {
 		return cur().Party(), nil
 	}))
 	srv.Register("units", rpc.Typed(func(ctx context.Context, p unitsParams) ([]objects.Unit, error) {
-		us := cur().Units(objects.Filter{Near: p.Near, Entry: p.Entry, Hostile: p.Hostile, Name: p.Name, Limit: p.Limit})
+		if p.Within == 0 {
+			p.Within = p.Near
+		}
+		us := cur().Units(objects.Filter{Near: p.Within, Entry: p.Entry, Hostile: p.Hostile, Name: p.Name, Limit: p.Limit})
 		if us == nil {
 			us = []objects.Unit{}
 		}

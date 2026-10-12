@@ -180,23 +180,27 @@ func TestOwnersReadsTheThreeOwnerFields(t *testing.T) {
 }
 
 // A spline sets the unit's facing from its travel direction; a stop keeps the old one.
+// These splines take no time, so the unit is at once where they end.
 func TestMoveSplineFacesTravelDirection(t *testing.T) {
 	s := NewStore()
 	s.Apply([]Block{createBlock(wolf, TypeUnit, 0, 0, nil)})
-	s.MoveSpline(wolf, 0, 10, 0, false)
+	jump := func(from, to [3]float32, stop bool) {
+		s.MoveSpline(MonsterMove{GUID: wolf, Start: from, Dest: to, Stop: stop})
+	}
+	jump([3]float32{0, 0, 0}, [3]float32{0, 10, 0}, false)
 	if u, _ := s.Get(wolf, 0, 0, 0); u.Y != 10 || math.Abs(float64(u.O)-math.Pi/2) > 1e-5 {
 		t.Fatalf("north: %+v", u)
 	}
-	s.MoveSpline(wolf, 0, -10, 0, false)
+	jump([3]float32{0, 10, 0}, [3]float32{0, -10, 0}, false)
 	if u, _ := s.Get(wolf, 0, 0, 0); math.Abs(float64(u.O)-1.5*math.Pi) > 1e-5 {
 		t.Fatalf("south must wrap into [0, 2pi): %+v", u)
 	}
-	s.MoveSpline(wolf, 5, 5, 0, true)
+	jump([3]float32{5, 5, 0}, [3]float32{5, 5, 0}, true)
 	if u, _ := s.Get(wolf, 0, 0, 0); math.Abs(float64(u.O)-1.5*math.Pi) > 1e-5 || u.X != 5 {
 		t.Fatalf("a stop keeps the facing: %+v", u)
 	}
-	s.MoveSpline(wolf, 5, 5, 3, false)
-	if u, _ := s.Get(wolf, 0, 0, 0); math.Abs(float64(u.O)-1.5*math.Pi) > 1e-5 {
+	jump([3]float32{5, 5, 0}, [3]float32{5, 5, 3}, false)
+	if u, _ := s.Get(wolf, 0, 0, 0); math.Abs(float64(u.O)-1.5*math.Pi) > 1e-5 || u.Z != 3 {
 		t.Fatalf("a vertical move keeps the facing: %+v", u)
 	}
 }

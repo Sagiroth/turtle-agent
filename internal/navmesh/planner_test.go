@@ -322,3 +322,69 @@ func TestRealTiles(t *testing.T) {
 		t.Fatalf("%+v", path)
 	}
 }
+
+// Floors lists every surface in the column at a point, highest first, with its flags: a
+// bridge over the ground, a ramp's height, nothing off the mesh or in a missing tile.
+func TestFloorsListsTheSurfacesAtAPoint(t *testing.T) {
+	dir := navfixture.WriteDir(t, fixtureMap, nil)
+	polys := []navfixture.Poly{navfixture.Square(10, 10, 30, 30, 0), navfixture.Square(14, 14, 18, 18, 10)}
+	polys = append(polys, navfixture.Ramp()[5:7]...) // x 30..38 at y 10..14, z 10 to 14
+	tile := navfixture.BuildTile(polys, []uint16{NavGround, NavWater, NavGround, NavGround}, 0, 0)
+	if err := os.WriteFile(filepath.Join(dir, tileFile(fixtureMap, 12, 12)), tile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := NewPlanner(dir)
+	defer p.Close()
+	for _, c := range []struct {
+		name   string
+		x, y   float32
+		lo, hi float32
+		want   []Floor
+	}{
+		{"bridge and ground", 16, 16, -50, 50, []Floor{{10, NavWater}, {0, NavGround}}},
+		{"under the bridge only", 16, 16, -50, 5, []Floor{{0, NavGround}}},
+		{"ground", 25, 25, -50, 50, []Floor{{0, NavGround}}},
+		{"ramp", 34, 12, -50, 50, []Floor{{12, NavGround}}},
+		{"off the mesh", 100, 100, -50, 50, nil},
+		{"missing tile", -588, 12, -50, 50, nil},
+	} {
+		got, err := p.Floors(fixtureMap, c.x, c.y, c.lo, c.hi)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if len(got) != len(c.want) {
+			t.Fatalf("%s: %v, want %v", c.name, got, c.want)
+		}
+		for i := range got {
+			if math.Abs(float64(got[i].Z-c.want[i].Z)) > 0.05 || got[i].Flags != c.want[i].Flags {
+				t.Fatalf("%s: %v, want %v", c.name, got, c.want)
+			}
+		}
+	}
+	if _, err := NewPlanner("").Floors(fixtureMap, 1, 1, 0, 1); err == nil {
+		t.Fatal("no folder, no error")
+	}
+}
+
+// A missing tile is looked up once; the next Plan forgets it, so a tile copied in later counts.
+func TestFloorsRememberMissingTilesUntilThePlan(t *testing.T) {
+	dir := navfixture.WriteDir(t, fixtureMap, navfixture.LCorridor(0))
+	p := NewPlanner(dir)
+	defer p.Close()
+	if fl, err := p.Floors(fixtureMap, -588, 12, -50, 50); err != nil || fl != nil {
+		t.Fatalf("%v %v", fl, err)
+	}
+	far := navfixture.BuildTile([]navfixture.Poly{navfixture.Square(-590, 10, -586, 14, 0)}, nil, 0, -2)
+	if err := os.WriteFile(filepath.Join(dir, tileFile(fixtureMap, -588, 12)), far, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if fl, _ := p.Floors(fixtureMap, -588, 12, -50, 50); fl != nil {
+		t.Fatalf("missing tile looked up again: %v", fl)
+	}
+	if _, err := p.Plan(fixtureMap, Vec3{12, 12, 0}, Vec3{48, 48, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if fl, err := p.Floors(fixtureMap, -588, 12, -50, 50); err != nil || len(fl) != 1 || fl[0].Z != 0 {
+		t.Fatalf("after a plan: %v %v", fl, err)
+	}
+}

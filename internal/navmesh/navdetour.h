@@ -26,6 +26,11 @@ int nd_remove_tile(void* h, unsigned long long tile);
 int nd_nearest(void* h, const float* p, const float* ext, unsigned short include, unsigned short exclude,
                float* out);
 
+// The navmesh surfaces at (p[0], p[1]) from height lo to hi, any polygon flags (a falling body
+// lands on ground, water, lava and too-steep slopes alike): up to max heights in z and their
+// polygon flags in flags. Returns the count, or -1 when Detour fails.
+int nd_floors(void* h, const float* p, float lo, float hi, float* z, unsigned short* flags, int max);
+
 // findPath + findStraightPath between the floor points under start and end, as the
 // server's PathFinder. 0 complete, 1 partial (out ends at the reachable point nearest the
 // goal), 2 partial because the goal is over 7 yd from the mesh, -1 start off the mesh,

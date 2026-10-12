@@ -31,7 +31,7 @@ var (
 	errRooted      = errors.New("rooted by the server; walk stopped")
 	errRootedNow   = errors.New("rooted; walk_to waits until the server releases the root")
 	errKnockedBack = errors.New("knocked back by the server; walk stopped")
-	errAirborne    = errors.New("in the air after a knockback")
+	errAirborne    = errors.New("in the air (a knockback or a fall)")
 	errCancelled   = errors.New("walk cancelled")
 )
 
@@ -178,10 +178,14 @@ func (s *Session) peekClock(now time.Time) uint32 {
 
 // moveInfoAt is the player's MovementInfo at now, its client time read from the same
 // instant as the position, so a step never covers more ground than its time gap allows. In
-// the air it carries the knockback's jump values and the time fallen. The caller holds s.mu.
+// the air it carries the knockback's jump values and the time fallen, and on the way down
+// MoveFallingFar too. The caller holds s.mu.
 func (s *Session) moveInfoAt(flags uint32, now time.Time) game.MoveInfo {
 	m := game.MoveInfo{Flags: flags, Time: s.clockAt(now), X: s.pos[0], Y: s.pos[1], Z: s.pos[2], O: s.pos[3]}
 	if f := s.fall; f != nil && flags&game.MoveJumping != 0 {
+		if f.descending(now) {
+			m.Flags |= game.MoveFallingFar
+		}
 		m.FallTime = uint32(max(now.Sub(f.began), 0).Milliseconds())
 		m.JumpZSpeed, m.JumpCos, m.JumpSin, m.JumpXYSpeed = f.kb.ZSpeed, f.kb.Cos, f.kb.Sin, f.kb.XYSpeed
 	}
@@ -221,7 +225,7 @@ func (s *Session) syncWalk(now time.Time) {
 // airborne refuses an action the player cannot take in the air.
 func (s *Session) airborne(what string) error {
 	if f := s.fall; f != nil {
-		return fmt.Errorf("in the air after a knockback; %s waits for the landing in %.1f s", what, time.Until(f.land).Seconds())
+		return fmt.Errorf("in the air (a knockback or a fall); %s waits for the landing in %.1f s", what, time.Until(f.land).Seconds())
 	}
 	return nil
 }
@@ -610,8 +614,9 @@ func (s *Session) onTeleportAck(body []byte) error {
 	}
 	s.stopWalk(errTeleported, false)
 	s.gossip = nil // the client closes an NPC window when the player is moved away
-	// A .go xyz puts the player at the given z, perhaps in the air; the next position from
-	// the server settles it (review M13).
+	// A .go xyz puts the player at the given z, perhaps in the air: dropToFloor below
+	// falls to the navmesh floor, else the next position from the server settles it
+	// (review M13).
 	s.serverPosition([3]float32{a.Move.X, a.Move.Y, a.Move.Z}, false)
 	s.mu.Lock()
 	s.pos[3] = a.Move.O
@@ -622,6 +627,9 @@ func (s *Session) onTeleportAck(body []byte) error {
 	}
 	s.emit(events.Event{Kind: events.KindSession, Data: map[string]any{"state": "teleported", "x": a.Move.X, "y": a.Move.Y, "z": a.Move.Z}})
 	s.teleported()
+	if err := s.dropToFloor(time.Now()); err != nil {
+		return &fatalError{err}
+	}
 	return nil
 }
 

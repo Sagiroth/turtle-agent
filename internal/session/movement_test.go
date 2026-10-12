@@ -88,7 +88,10 @@ func TestKnockBackAckFlightAndLanding(t *testing.T) {
 	for _, p := range h.srv.Skipped() {
 		if p.Op == opcode.MSGMoveHeartbeat {
 			mi := readMove(p.Body)
-			if mi.Flags != game.MoveJumping || mi.JumpXYSpeed != 8 || mi.FallTime == 0 || mi.Z <= me.Z || mi.Y <= me.Y {
+			// Up to the apex (9.5 / g = 0.49 s) MoveJumping alone, then MoveFallingFar too.
+			down := float64(mi.FallTime)/1000 > 9.5/game.Gravity
+			if mi.Flags&^game.MoveFallingFar != game.MoveJumping || (mi.Flags&game.MoveFallingFar != 0) != down ||
+				mi.JumpXYSpeed != 8 || mi.FallTime == 0 || mi.Z <= me.Z || mi.Y <= me.Y {
 				t.Fatalf("flight heartbeat %+v", mi)
 			}
 			steps = append(steps, mi)
@@ -353,7 +356,7 @@ func TestFeatherFallMidFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmi, _ := ackMove(t, ff, 41)
-	if fmi.Flags != game.MoveJumping|game.MoveSafeFall || fmi.Z <= me.Z {
+	if fmi.Flags != game.MoveJumping|game.MoveFallingFar|game.MoveSafeFall || fmi.Z <= me.Z { // past the apex (0.78 s)
 		t.Fatalf("feather-fall ack in the air %+v", fmi)
 	}
 	steps := []game.MoveInfo{ack, fmi}

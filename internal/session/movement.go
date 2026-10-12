@@ -10,8 +10,16 @@ import (
 	"github.com/pjerra/turtle-agent/internal/opcode"
 )
 
-// maxFlight bounds a knockback flight; a longer one lands early at the starting height.
+// maxFlight bounds a flight; one that meets no floor by then lands where it is.
 const maxFlight = 10 * time.Second
+
+// landGap is the least time between a flight's last heartbeat and its landing.
+const landGap = 150 * time.Millisecond
+
+// maxBeatGap (ms of client time) bounds how long a landing waits for the anticheat's bound
+// after the last heartbeat: the core records SKIPPED_HEARTBEATS past 1000 ms while moving
+// (Movement.cpp:600-604).
+const maxBeatGap = 900
 
 // lastMove is the movement the server last has for the player: our last movement packet,
 // or a position the server sent, which it holds as standing still there.
@@ -78,44 +86,96 @@ func (s *Session) serverPosition(p [3]float32, zKnown bool) {
 	s.mu.Unlock()
 }
 
-// fallState is a knockback flight: a ballistic arc from where the server threw the player.
-// A feather-fall order mid-flight restarts the arc from where it is (restart).
+// fallState is a flight through the air: a knockback's ballistic arc from where the server
+// threw the player, or a fall from rest where a GM teleport left it. It lands on the navmesh
+// floor the arc meets (trace) when the agent has the server's mmaps, else back at the height
+// it started at, a guess. A feather-fall order mid-flight restarts the arc from where it is
+// (restart).
 type fallState struct {
 	kb       game.KnockBack // direction, xy speed, and the jump values every packet echoes
-	began    time.Time      // the knockback; the MovementInfo fall time counts from here
-	groundZ  float32        // the ground assumed: the height the flight started at
+	began    time.Time      // the knockback or the fall; the MovementInfo fall time counts from here
+	startZ   float32        // the height the flight began at: the landing height without a floor
+	floor    floorFunc      // the navmesh floors (nil: none, land at startZ)
 	from     [3]float32     // where the current arc starts
 	start    time.Time      // and when
 	v0, term float64        // its downward speed then (negative: up) and the speed cap
-	land     time.Time      // back at groundZ
+	stopXY   float64        // seconds into the current arc when it hit a wall and stopped going across
+	bumpT    float64        // and when it hit a ceiling and dropped from rest from there
+	land     time.Time      // on the ground
+	landPos  [3]float32     // where
+	onFloor  bool           // landPos is on a navmesh floor
+	water    bool           // and that floor is water, where the client would swim
 	nextBeat time.Time
 }
 
-// arc starts the current arc at from and start with downward speed v0 under the cap term.
-// The speed is held to the cap both ways: with MoveSafeFall the server bounds a step up or
-// down by 7 yd/s (Movement.cpp:874-881).
-func (f *fallState) arc(from [3]float32, start time.Time, v0, term float64) {
+// arc starts the current arc at from and start with downward speed v0 under the cap term,
+// and finds its landing. frozen keeps it from going across (it already hit a wall). The
+// speed is held to the cap both ways: with MoveSafeFall the server bounds a step up or down
+// by 7 yd/s (Movement.cpp:874-881). A floor query that fails lands it at startZ.
+func (f *fallState) arc(from [3]float32, start time.Time, v0, term float64, frozen bool) {
 	f.from, f.start, f.term = from, start, term
 	f.v0 = max(min(v0, term), -term)
-	d := time.Duration(game.FallTimeTo(float64(from[2]-f.groundZ), f.v0, term) * float64(time.Second))
-	f.land = start.Add(d)
-	if limit := f.began.Add(maxFlight); f.land.After(limit) {
-		f.land = limit
+	f.stopXY, f.bumpT = math.Inf(1), math.Inf(1)
+	if frozen {
+		f.stopXY = 0
 	}
+	limit := f.began.Add(maxFlight).Sub(start).Seconds()
+	f.onFloor, f.water = false, false
+	if f.floor != nil {
+		if t, ok := f.trace(limit); ok {
+			f.land = start.Add(time.Duration(t * float64(time.Second)))
+			return
+		}
+	}
+	f.stopXY, f.bumpT = math.Inf(1), math.Inf(1) // undo what the failed trace found
+	if frozen {
+		f.stopXY = 0
+	}
+	t := min(game.FallTimeTo(float64(from[2]-f.startZ), f.v0, term), max(limit, 0))
+	f.land = start.Add(time.Duration(t * float64(time.Second)))
+	f.landPos = f.pos(t)
 }
 
 // restart continues the flight from where it is at now, at the speed it has, under a new
 // cap: the fall a feather-fall order changes mid-air.
 func (f *fallState) restart(now time.Time, term float64) {
 	t := min(max(now.Sub(f.start), 0), f.land.Sub(f.start)).Seconds()
-	f.arc(f.at(now), now, game.FallSpeed(t, f.v0, f.term), term)
+	f.arc(f.at(now), now, f.speed(t), term, f.stopXY <= t)
 }
 
-func (f *fallState) at(now time.Time) [3]float32 {
-	t := min(max(now.Sub(f.start), 0), f.land.Sub(f.start)).Seconds()
-	xy := float64(f.kb.XYSpeed) * t
+// pos is the current arc t seconds after it started, not stopped at the ground; after a
+// ceiling bump it drops from rest from where the bump was.
+func (f *fallState) pos(t float64) [3]float32 {
+	if t > f.bumpT {
+		b := f.pos(f.bumpT)
+		b[2] -= float32(game.FallDrop(t-f.bumpT, 0, f.term))
+		return b
+	}
+	xy := float64(f.kb.XYSpeed) * min(t, f.stopXY)
 	return [3]float32{f.from[0] + f.kb.Cos*float32(xy), f.from[1] + f.kb.Sin*float32(xy),
 		f.from[2] - float32(game.FallDrop(t, f.v0, f.term))}
+}
+
+// speed is the downward speed t seconds into the current arc.
+func (f *fallState) speed(t float64) float64 {
+	if t > f.bumpT {
+		return game.FallSpeed(t-f.bumpT, 0, f.term)
+	}
+	return game.FallSpeed(t, f.v0, f.term)
+}
+
+// at is where the flight is at now: on the arc, or on the ground once landed.
+func (f *fallState) at(now time.Time) [3]float32 {
+	if !now.Before(f.land) {
+		return f.landPos
+	}
+	return f.pos(max(now.Sub(f.start), 0).Seconds())
+}
+
+// descending says the flight is coming down at now, past its start: the packets then carry
+// MoveFallingFar besides MoveJumping (see moveInfoAt).
+func (f *fallState) descending(now time.Time) bool {
+	return now.After(f.start) && f.speed(now.Sub(f.start).Seconds()) > 0
 }
 
 func fallTerm(toggles uint32) float64 {
@@ -152,8 +212,12 @@ func (s *Session) onKnockBack(body []byte) error {
 	now := time.Now()
 	s.stopWalk(errKnockedBack, false)
 	from := s.last.pos
-	s.fall = &fallState{kb: k, began: now, groundZ: from[2], nextBeat: now.Add(500 * time.Millisecond)}
-	s.fall.arc(from, now, float64(k.ZSpeed), fallTerm(s.toggles))
+	// The ack only needs the start; it goes out before the flight is traced against the
+	// navmesh (which may read a tile first), as the server drops a knockback whose ack has
+	// not come within Movement.PendingAckResponseTime (2 s, World.cpp:1348, Unit.cpp:7264).
+	term := fallTerm(s.toggles)
+	s.fall = &fallState{kb: k, began: now, startZ: from[2], floor: s.floorFunc(), from: from, start: now,
+		v0: max(min(float64(k.ZSpeed), term), -term), term: term, land: now.Add(maxFlight), nextBeat: now.Add(500 * time.Millisecond)}
 	s.mu.Lock()
 	s.pos[0], s.pos[1], s.pos[2] = from[0], from[1], from[2]
 	s.falling = true
@@ -162,14 +226,18 @@ func (s *Session) onKnockBack(body []byte) error {
 	if err := s.sendMove(opcode.CMSGMoveKnockBackAck, mi, game.BuildKnockBackAck(k, mi)); err != nil {
 		return &fatalError{err}
 	}
-	s.emit(events.Event{Kind: events.KindSession, Data: map[string]any{"state": "knocked_back", "x": from[0], "y": from[1], "z": from[2],
-		"speed_xy": k.XYSpeed, "speed_z": k.ZSpeed, "flight_ms": s.fall.land.Sub(now).Milliseconds()}})
+	s.fall.arc(from, now, float64(k.ZSpeed), term, false)
+	s.emit(events.Event{Kind: events.KindSession, Data: s.fall.describe("knocked_back", from, now)})
 	return nil
 }
 
-// tickFall sends the flight's heartbeats every 500 ms and MSG_MOVE_FALL_LAND when the arc
-// is back at the starting height. With no terrain the agent cannot know the ground: the
-// landing z is the starting z until the server sends a position (Status.ZUnknown).
+// tickFall sends the flight's heartbeats every 500 ms and MSG_MOVE_FALL_LAND, with the time
+// fallen, at the landing. A heartbeat due less than landGap before the landing is left out,
+// so the landing step, which may climb onto a floor a little above the arc, has the time
+// to stay inside the anticheat's bound; should it still not, the landing waits until it
+// does, at most until maxBeatGap after the last packet. The landing settles z when it is on a navmesh floor (not water: the agent does not
+// swim); without one the landing z is the starting z, a guess, until the server sends a
+// position (Status.ZUnknown).
 func (s *Session) tickFall() error {
 	f := s.fall
 	if f == nil {
@@ -177,18 +245,30 @@ func (s *Session) tickFall() error {
 	}
 	now := time.Now()
 	if !now.Before(f.land) {
-		p := f.at(f.land)
-		s.fall = nil
+		p := f.landPos
 		s.mu.Lock()
+		old := s.pos
 		s.pos[0], s.pos[1], s.pos[2] = p[0], p[1], p[2]
-		s.falling, s.zUnknown = false, true
+		fall := s.fall
+		s.fall = nil
 		mi := s.moveInfoAt(s.currentFlags(), now)
+		if err := s.checkStep(mi); err != nil && mi.Time-s.last.ctime < maxBeatGap {
+			s.fall, s.pos = fall, old // not yet
+			s.mu.Unlock()
+			return nil
+		}
+		zUnknown := !f.onFloor || f.water
+		s.falling, s.zUnknown = false, zUnknown
 		s.mu.Unlock()
 		mi.FallTime = uint32(f.land.Sub(f.began).Milliseconds())
 		if err := s.sendMove(opcode.MSGMoveFallLand, mi, game.BuildMovement(mi)); err != nil {
 			return err
 		}
-		s.emit(events.Event{Kind: events.KindSession, Data: map[string]any{"state": "landed", "x": p[0], "y": p[1], "z": p[2], "z_unknown": true}})
+		s.emit(events.Event{Kind: events.KindSession, Data: map[string]any{"state": "landed", "x": p[0], "y": p[1], "z": p[2],
+			"z_unknown": zUnknown, "floor": f.floorKind(), "fall_ms": mi.FallTime}})
+		return nil
+	}
+	if f.land.Sub(now) < landGap {
 		return nil
 	}
 	if now.Before(f.nextBeat) {
@@ -241,15 +321,14 @@ func (s *Session) toggleHandler(o toggleOrder) handler {
 		}
 		now := time.Now()
 		s.syncWalk(now)
-		if f := s.fall; f != nil && o.flag == game.MoveSafeFall {
-			f.restart(now, fallTerm(s.toggles))
-			s.syncWalk(now)
-		}
 		s.mu.Lock()
 		mi := s.moveInfoAt(s.currentFlags(), now)
 		s.mu.Unlock()
 		if err := s.sendMove(o.ack, mi, game.BuildMovementToggleAck(self, c.Counter, mi, o.apply)); err != nil {
 			return &fatalError{err}
+		}
+		if f := s.fall; f != nil && o.flag == game.MoveSafeFall { // traced after the ack, as a knockback
+			f.restart(now, fallTerm(s.toggles))
 		}
 		return nil
 	}

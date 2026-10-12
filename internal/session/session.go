@@ -133,7 +133,7 @@ type StatusInfo struct {
 	MaxHealth   uint32         `json:"max_health"`
 	Power       uint32         `json:"power"`
 	MaxPower    uint32         `json:"max_power"`
-	Falling     bool           `json:"falling"`   // in the air after a knockback
+	Falling     bool           `json:"falling"`   // in the air: a knockback, or a fall after a teleport
 	ZUnknown    bool           `json:"z_unknown"` // z is a guess (GM teleport, climb, landing) until the server sends a position
 	LatencyMS   uint32         `json:"latency_ms"`
 	Unknown     map[string]int `json:"unknown_opcodes"`

@@ -13,6 +13,9 @@ func (*engine) close()                          {}
 func (*engine) addTile([]byte) (uint64, error)  { return 0, ErrNoEngine }
 func (*engine) removeTile(uint64) error         { return ErrNoEngine }
 func (*engine) nearest(Vec3, Vec3) (Vec3, bool) { return Vec3{}, false }
+func (*engine) floors(float32, float32, float32, float32) ([]Floor, error) {
+	return nil, ErrNoEngine
+}
 func (*engine) findPath(Vec3, Vec3) (int, []Vec3, Vec3) {
 	return -3, nil, Vec3{}
 }

@@ -263,3 +263,66 @@ func TestWalkStepsKeepToTheSpeedInForce(t *testing.T) {
 	}
 	h.logout()
 }
+
+// Review I4: a name picks the nearest living match over a nearer corpse, and the corpse
+// only when nothing of that name is alive.
+func TestTargetByNamePrefersTheLiving(t *testing.T) {
+	ctx := context.Background()
+	h := start(t, Options{})
+	h.enterWorld()
+	const live packet.GUID = 0xF13000012B000002
+	wolfName(h)
+	h.send(opcode.SMSGUpdateObject, unitCreate(wolfGUID, objects.TypeUnit, me.X+2, me.Y, me.Z, map[uint16]uint32{objects.UnitHealth: 0, objects.UnitMaxHealth: 50}))
+	h.send(opcode.SMSGUpdateObject, unitCreate(live, objects.TypeUnit, me.X+9, me.Y, me.Z, map[uint16]uint32{objects.UnitHealth: 50, objects.UnitMaxHealth: 50}))
+	waitFor(t, func() bool { return len(h.s.Units(objects.Filter{Name: "young wolf"})) == 2 })
+	if u, err := h.s.Target(ctx, 0, "young wolf"); err != nil || u.GUID != live || u.Dead {
+		t.Fatalf("%+v %v", u, err)
+	}
+	if p := h.expect(opcode.CMSGSetSelection); packet.NewReader(p.Body).GUID() != live {
+		t.Fatalf("% X", p.Body)
+	}
+	h.send(opcode.SMSGUpdateObject, valuesUpdate(live, map[uint16]uint32{objects.UnitHealth: 0}))
+	waitFor(t, func() bool { u, _ := h.s.Store().Get(live, 0, 0, 0); return u.Dead })
+	if u, err := h.s.Target(ctx, 0, "young wolf"); err != nil || u.GUID != wolfGUID || !u.Dead {
+		t.Fatalf("only corpses: %+v %v", u, err)
+	}
+	h.expect(opcode.CMSGSetSelection)
+	h.logout()
+}
+
+// Review M3: a server spline on the player (fear) ends a running walk, moves the player's
+// own position to its destination, and walk_to waits until it has run; a relayed move of
+// the player does the same without the wait.
+func TestServerMoveRefreshesOwnPosition(t *testing.T) {
+	ctx := context.Background()
+	h := start(t, Options{})
+	h.enterWorld()
+	walked := make(chan error, 1)
+	go func() { walked <- h.s.WalkTo(ctx, me.X+20, me.Y, me.Z) }()
+	h.expect(opcode.MSGMoveStartForward)
+	fear := packet.NewWriter().PackedGUID(me.GUID).F32(me.X).F32(me.Y).F32(me.Z).U32(1).U8(0).U32(0x100).U32(300).U32(1).
+		F32(me.X - 5).F32(me.Y + 6).F32(me.Z).Bytes()
+	h.send(opcode.SMSGMonsterMove, fear)
+	if err := <-walked; err == nil || !strings.Contains(err.Error(), "moved by the server") {
+		t.Fatalf("walk: %v", err)
+	}
+	if st := h.s.Status(); st.X != me.X-5 || st.Y != me.Y+6 {
+		t.Fatalf("status %+v", st)
+	}
+	if err := h.s.WalkTo(ctx, me.X, me.Y, me.Z); err == nil || !strings.Contains(err.Error(), "waits") {
+		t.Fatalf("walk during the spline: %v", err)
+	}
+	time.Sleep(350 * time.Millisecond)
+	w := packet.NewWriter().PackedGUID(me.GUID)
+	game.WriteMoveInfo(w, game.MoveInfo{X: me.X - 4, Y: me.Y + 6, Z: me.Z})
+	h.send(opcode.MSGMoveTeleport, w.Bytes())
+	waitFor(t, func() bool { return h.s.Status().X == me.X-4 })
+	if err := h.s.WalkTo(ctx, me.X-3, me.Y+6, me.Z); err != nil {
+		t.Fatalf("walk after the spline: %v", err)
+	}
+	if mi := game.ReadMoveInfo(packet.NewReader(h.expect(opcode.MSGMoveStartForward).Body)); mi.X != me.X-4 || mi.Y != me.Y+6 {
+		t.Fatalf("walk starts at %+v", mi)
+	}
+	h.expect(opcode.MSGMoveStop)
+	h.logout()
+}

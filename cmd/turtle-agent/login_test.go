@@ -24,7 +24,8 @@ func settingsFile(t *testing.T, body string) string {
 	return p
 }
 
-const unreachable = `{"realmd":"127.0.0.1:1","accounts":{"harness":"pw-secret"}}`
+// rpc port 0: the tests never collide with a live agent on the default 8765.
+const unreachable = `{"realmd":"127.0.0.1:1","rpc":"127.0.0.1:0","accounts":{"harness":"pw-secret"}}`
 
 func runCLI(args ...string) (int, string, string) {
 	var out, errOut bytes.Buffer

@@ -10,6 +10,7 @@ import (
 	"github.com/pjerra/turtle-agent/internal/packet"
 	"github.com/pjerra/turtle-agent/internal/rpc"
 	"github.com/pjerra/turtle-agent/internal/session"
+	"github.com/pjerra/turtle-agent/internal/worldconn"
 )
 
 type empty struct{}
@@ -181,8 +182,10 @@ func rpcErr(err error) error {
 		return nil
 	case errors.Is(err, session.ErrNotInWorld):
 		return &rpc.Error{Code: rpc.CodeNotInWorld, Message: err.Error()}
-	case errors.Is(err, session.ErrDisconnected), errors.Is(err, session.ErrClosed), errors.Is(err, context.Canceled):
-		// context.Canceled: the client went away or the agent is shutting down.
+	case errors.Is(err, session.ErrDisconnected), errors.Is(err, session.ErrClosed), errors.Is(err, context.Canceled),
+		errors.Is(err, worldconn.ErrWrite):
+		// context.Canceled: the client went away or the agent is shutting down. ErrWrite: the
+		// socket died under a write, before Run has noticed the close (review M1).
 		return &rpc.Error{Code: rpc.CodeDisconnected, Message: err.Error()}
 	case errors.Is(err, context.DeadlineExceeded):
 		return &rpc.Error{Code: rpc.CodeTimeout, Message: err.Error()}

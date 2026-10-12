@@ -120,17 +120,25 @@ func (s *Session) syncWalk(now time.Time) {
 	s.mu.Unlock()
 }
 
-// Target selects a unit by guid, or by name (nearest match), and returns it.
+// Target selects a unit by guid, or by name, and returns it. A name picks the nearest
+// living match; a corpse (the last run's kill) only when no living one is in view, and the
+// returned unit then says dead. A guid selects exactly that unit, dead or alive.
 func (s *Session) Target(ctx context.Context, g packet.GUID, name string) (objects.Unit, error) {
 	if g == 0 {
 		if name == "" {
 			return objects.Unit{}, errors.New("target needs a guid or a name")
 		}
-		us := s.Units(objects.Filter{Name: name, Limit: 1})
+		us := s.Units(objects.Filter{Name: name, Limit: math.MaxInt})
 		if len(us) == 0 {
 			return objects.Unit{}, fmt.Errorf("no unit named %q nearby", name)
 		}
 		g = us[0].GUID
+		for _, u := range us {
+			if !u.Dead {
+				g = u.GUID
+				break
+			}
+		}
 	}
 	_, err := s.do(ctx, func() (any, error) {
 		if err := s.inWorld(); err != nil {
@@ -231,6 +239,9 @@ func (s *Session) WalkTo(ctx context.Context, x, y, z float32) error {
 		}
 		if s.rooted {
 			return nil, errors.New("rooted; walk_to waits until the server releases the root")
+		}
+		if left := time.Until(s.splineUntil); left > 0 {
+			return nil, fmt.Errorf("moved by the server (fear, charm or a scripted move); walk_to waits %.1f s until it ends", left.Seconds())
 		}
 		s.mu.Lock()
 		from := [3]float32{s.pos[0], s.pos[1], s.pos[2]}

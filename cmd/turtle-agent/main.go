@@ -21,13 +21,29 @@ const (
 	exitWorld        = 5 // world server rejected the session or the character
 	exitDisconnected = 6 // the server closed the connection
 	exitScrub        = 7 // scrub-check found a secret in a capture
+	// exitLogoutRefused: the server still refused the logout (in combat) when the retries
+	// ran out; the agent closed the socket and the character may stay in world.
+	exitLogoutRefused = 8
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
-	stop()
+	code := run(signalContext(), os.Args[1:], os.Stdout, os.Stderr)
 	os.Exit(code)
+}
+
+// signalContext ends on the first Ctrl-C or SIGTERM and then hands both signals back to
+// the default action, so a second Ctrl-C ends the process at once, even while a logout
+// is being retried (review I1). The handler is stopped before the context ends.
+func signalContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		signal.Stop(c)
+		cancel()
+	}()
+	return ctx
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {

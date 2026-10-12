@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/game"
@@ -121,14 +122,32 @@ func (s *Session) onDestroy(body []byte) error {
 	return nil
 }
 
-// onMonsterMove puts the unit at the spline's destination.
+// onMonsterMove puts the unit at the spline's destination. A spline on the player itself
+// (fear, charm, a scripted move) moves the player's own position too, so the next walk or
+// facing starts where the server has it, and walk_to waits until the spline has run.
 func (s *Session) onMonsterMove(body []byte) error {
 	m, err := objects.ParseMonsterMove(body)
 	if err != nil {
 		return err
 	}
 	s.store.MoveTo(m.GUID, m.Dest[0], m.Dest[1], m.Dest[2], 0)
+	if m.GUID == s.selfGUID() {
+		s.serverMoved(m.Dest)
+		s.splineUntil = time.Time{}
+		if !m.Stop {
+			s.splineUntil = time.Now().Add(time.Duration(m.Duration) * time.Millisecond)
+		}
+	}
 	return nil
+}
+
+// serverMoved puts the player where the server moved it, ending a running walk without a
+// stop packet: the server owns the movement now.
+func (s *Session) serverMoved(p [3]float32) {
+	s.stopWalk(errors.New("moved by the server"), false)
+	s.mu.Lock()
+	s.pos[0], s.pos[1], s.pos[2] = p[0], p[1], p[2]
+	s.mu.Unlock()
 }
 
 // onCompressedMoves runs each bundled packet through the handler table.
@@ -161,5 +180,8 @@ func (s *Session) onMoveRelay(body []byte) error {
 		return err
 	}
 	s.store.MoveTo(g, mi.X, mi.Y, mi.Z, mi.O)
+	if g == s.selfGUID() {
+		s.serverMoved([3]float32{mi.X, mi.Y, mi.Z})
+	}
 	return nil
 }

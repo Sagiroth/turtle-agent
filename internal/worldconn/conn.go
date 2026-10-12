@@ -31,6 +31,14 @@ const WorldBuild uint32 = 5875
 // maxClientPacket is the server's limit on a client packet, opcode included (MangosSocketImpl.h:316).
 const maxClientPacket = 10240
 
+// writeTimeout bounds one packet write once the session is up, so a peer that stops
+// reading cannot block the session's owner loop (and with it the pong timeout) forever.
+var writeTimeout = 10 * time.Second
+
+// ErrWrite wraps a failed socket write. The connection is closed after one: a partial
+// frame leaves the stream and the header cipher out of step with the server.
+var ErrWrite = errors.New("world: write failed")
+
 // SMSG_AUTH_RESPONSE codes: ResponseCodes ordinals (SharedDefines.h:1629-1666).
 const (
 	AuthOK              uint8 = 0x0C
@@ -289,8 +297,14 @@ func (c *Conn) write(op uint16, body, tapBody []byte) error {
 	if c.tap != nil {
 		c.tap.Packet(ClientToServer, op, tapBody)
 	}
-	_, err := c.nc.Write(buf)
-	return err
+	if c.crypt != nil { // the handshake runs under Dial's own deadline
+		_ = c.nc.SetWriteDeadline(time.Now().Add(writeTimeout))
+	}
+	if _, err := c.nc.Write(buf); err != nil {
+		c.Close()
+		return fmt.Errorf("%w: %s: %w", ErrWrite, opcode.Name(op), err)
+	}
+	return nil
 }
 
 func (c *Conn) Close() error {

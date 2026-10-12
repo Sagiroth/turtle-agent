@@ -72,6 +72,10 @@ type Options struct {
 	// logged with the names known so far; 0: 2 s.
 	NamesWait time.Duration
 	Store     *objects.Store // nil: a new store
+	// Redact lists secrets (the account name, the password) the server may echo back, as
+	// in a .pinfo reply. They are replaced with "<redacted>" in event text, names and
+	// string data (ASCII case-insensitive), and a packet holding one is never hex-dumped.
+	Redact []string
 }
 
 // maxLoginRetries bounds the retries after SMSG_CHARACTER_LOGIN_FAILED code 1. With the
@@ -130,6 +134,7 @@ type Session struct {
 	log      *events.Log
 	store    *objects.Store
 	logger   io.Writer
+	redact   redactor
 	handlers map[uint16]handler
 	reqs     chan request
 	done     chan struct{}
@@ -162,6 +167,7 @@ type Session struct {
 	walk            *walkState
 	runSpeed        float32
 	rooted          bool
+	splineUntil     time.Time // a server spline moves the player until then
 	teleportWaiters []chan struct{}
 }
 
@@ -194,7 +200,7 @@ func New(conn *worldconn.Conn, opts Options) *Session {
 		conn: conn, opts: opts, log: opts.Log, logger: opts.Logger,
 		handlers: map[uint16]handler{}, reqs: make(chan request), done: make(chan struct{}),
 		ready: make(chan struct{}), start: time.Now(), state: StatusConnecting, unknown: map[uint16]int{},
-		names: newNameCache(), store: opts.Store, runSpeed: defaultRunSpeed,
+		names: newNameCache(), store: opts.Store, runSpeed: defaultRunSpeed, redact: newRedactor(opts.Redact),
 	}
 	s.register()
 	return s
@@ -367,8 +373,10 @@ func (s *Session) emit(e events.Event) {
 }
 
 // appendEvent stores a ready event, flagging it when the player, a party member or one of
-// their pets is involved.
+// their pets is involved. Secrets are scrubbed here, once the names are final, so nothing
+// the server echoes reaches the log, RPC replies or MCP output (ruling P10).
 func (s *Session) appendEvent(e events.Event) {
+	s.redact.scrubEvent(&e)
 	e.Party = s.partyInvolved(e.SourceGUID) || s.partyInvolved(e.TargetGUID)
 	s.log.Append(e)
 }
@@ -395,11 +403,17 @@ func (s *Session) dispatch(p worldconn.Packet) error {
 	s.mu.Lock()
 	s.parseErrs++
 	s.mu.Unlock()
-	dump := p.Body
-	if len(dump) > 256 {
-		dump = dump[:256]
+	msg := s.redact.scrub(err.Error())
+	if s.redact.contains(p.Body) {
+		// The stderr log is kept as captures/m*.log: no dump of a body holding a secret.
+		fmt.Fprintf(s.logger, "parse error in %s (0x%03X, %d bytes): %s (body holds a redacted secret; no dump)\n", opcode.Name(p.Op), p.Op, len(p.Body), msg)
+	} else {
+		dump := p.Body
+		if len(dump) > 256 {
+			dump = dump[:256]
+		}
+		fmt.Fprintf(s.logger, "parse error in %s (0x%03X, %d bytes): %s\n%s", opcode.Name(p.Op), p.Op, len(p.Body), msg, hex.Dump(dump))
 	}
-	fmt.Fprintf(s.logger, "parse error in %s (0x%03X, %d bytes): %v\n%s", opcode.Name(p.Op), p.Op, len(p.Body), err, hex.Dump(dump))
 	s.emit(events.Event{Kind: events.KindParseError, Text: err.Error(),
 		Data: map[string]any{"opcode": opcode.Name(p.Op), "length": len(p.Body)}})
 	return nil
@@ -449,7 +463,7 @@ func (s *Session) onTick(now time.Time) error {
 func (s *Session) end(err error) error {
 	s.mu.Lock()
 	s.state = StatusDisconnected
-	s.lastErr = err.Error()
+	s.lastErr = s.redact.scrub(err.Error())
 	s.mu.Unlock()
 	s.flushPending()
 	s.emit(events.Event{Kind: events.KindSession, Text: err.Error(), Data: map[string]any{"state": string(StatusDisconnected)}})

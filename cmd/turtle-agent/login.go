@@ -27,6 +27,19 @@ var (
 	authLogin = auth.Login
 )
 
+// Timings, variables so the end-to-end tests can shorten them.
+var (
+	// logoutRetryFor bounds how long a refused logout (in combat) is retried, once every
+	// logoutRetryEvery, before the agent gives up with exitLogoutRefused.
+	logoutRetryFor   = 35 * time.Second
+	logoutRetryEvery = 2 * time.Second
+	// logoutWait bounds one logout attempt (the server's 20 s logout timer plus margin).
+	logoutWait = 35 * time.Second
+	// disconnectGrace keeps the RPC up after the server drops the session, so status
+	// shows the disconnect and its reason (spec: error handling, review I2).
+	disconnectGrace = 30 * time.Second
+)
+
 // withPrefix labels err with where it came from, unless it already says so (the auth
 // and worldconn errors carry their own "realmd:" / "world:" prefix).
 func withPrefix(prefix string, err error) string {
@@ -153,7 +166,10 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintf(stderr, "world: authenticated on %s (%s)\n", realm.Name, addr)
 
 	log := events.New(100000)
-	s := session.New(conn, session.Options{Character: character, Log: log, Logger: stderr})
+	// The server can echo the account name back (a .pinfo reply): events and the stderr
+	// log never carry it, nor the password (ruling P10, review I3).
+	s := session.New(conn, session.Options{Character: character, Log: log, Logger: stderr,
+		Redact: []string{ticket.Account, account, password}})
 	runErr := make(chan error, 1)
 	go func() { runErr <- s.Run(context.Background()) }()
 	select {
@@ -189,11 +205,26 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	for {
 		select {
 		case <-stayC:
-			return logoutAndWait(s, runErr, stderr)
+			return logoutAndWait(s, conn, runErr, stderr)
 		case <-ctx.Done():
-			return logoutAndWait(s, runErr, stderr)
+			return logoutAndWait(s, conn, runErr, stderr)
 		case err := <-runErr:
-			return sessionExit(err, stderr)
+			code := sessionExit(err, stderr)
+			if err == nil || served == nil {
+				return code // a logout through the RPC: done at once
+			}
+			// Unplanned: keep the RPC up, read-only in effect (actions answer -32002), so
+			// status and events show the disconnect and why. A Ctrl-C ends the wait.
+			fmt.Fprintf(stderr, "rpc: serving status for %s after the disconnect (Ctrl-C to quit now)\n", disconnectGrace)
+			grace := time.NewTimer(disconnectGrace)
+			defer grace.Stop()
+			select {
+			case <-grace.C:
+			case <-ctx.Done():
+			case <-served:
+				served = nil
+			}
+			return code
 		case err := <-served:
 			// The character stays in world (--stay and Ctrl-C still log out); only the
 			// RPC is gone. The error names the listener address, never a secret.
@@ -203,19 +234,55 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 }
 
-func logoutAndWait(s *session.Session, runErr <-chan error, stderr io.Writer) int {
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
-	defer cancel()
-	if err := s.Logout(ctx); err != nil {
-		fmt.Fprintln(stderr, "logout:", err)
+// logoutAndWait logs out for --stay or the first Ctrl-C. A refused logout (in combat) is
+// said once and retried every logoutRetryEvery for logoutRetryFor; still refused, the agent
+// closes the socket and exits with exitLogoutRefused (review I1). A second Ctrl-C ends the
+// process at once: main hands the signal back after the first.
+func logoutAndWait(s *session.Session, conn *worldconn.Conn, runErr <-chan error, stderr io.Writer) int {
+	until := time.Now().Add(logoutRetryFor)
+	var refused *session.LogoutError
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), logoutWait)
+		err := s.Logout(ctx)
+		cancel()
+		var le *session.LogoutError
+		if !errors.As(err, &le) {
+			if err != nil {
+				fmt.Fprintln(stderr, "logout:", err)
+			}
+			break
+		}
+		if refused == nil || refused.Reason != le.Reason {
+			fmt.Fprintf(stderr, "logout: %v; retrying every %s for up to %s (a second Ctrl-C quits at once)\n", le, logoutRetryEvery, logoutRetryFor)
+		}
+		refused = le
+		if !time.Now().Add(logoutRetryEvery).Before(until) {
+			fmt.Fprintf(stderr, "logout: still refused after %s; closing the connection, the character may stay in world\n", logoutRetryFor)
+			return closeAndExit(conn, runErr, exitLogoutRefused)
+		}
+		select {
+		case err := <-runErr:
+			return sessionExit(err, stderr)
+		case <-time.After(logoutRetryEvery):
+		}
 	}
+	// Logout returned nil after SMSG_LOGOUT_COMPLETE, and Run then ends at once; after an
+	// error (a lost connection, no SMSG_LOGOUT_COMPLETE in time) it may not.
 	select {
 	case err := <-runErr:
 		return sessionExit(err, stderr)
-	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
 		fmt.Fprintln(stderr, "logout: timed out")
-		return exitDisconnected
+		return closeAndExit(conn, runErr, exitDisconnected)
 	}
+}
+
+// closeAndExit closes a session that is still in world, so no packet is handled or sent
+// after the agent has given up, and returns code.
+func closeAndExit(conn *worldconn.Conn, runErr <-chan error, code int) int {
+	conn.Close()
+	<-runErr
+	return code
 }
 
 func sessionExit(err error, stderr io.Writer) int {

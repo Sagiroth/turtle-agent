@@ -150,7 +150,7 @@ func TestLoginBadCaptureNeverSpendsARealmdAttempt(t *testing.T) {
 	if code, _, errOut := runCLI("login", "--config", cfg, "--capture", existing, "harness", "Harnessb"); code != exitUsage || !strings.Contains(errOut, "already exists") {
 		t.Fatalf("existing: %d %q", code, errOut)
 	}
-	short := settingsFile(t, `{"realmd":"127.0.0.1:1","accounts":{"harness":"pw"}}`)
+	short := settingsFile(t, `{"realmd":"127.0.0.1:1","rpc":"127.0.0.1:0","accounts":{"harness":"pw"}}`)
 	if code, _, errOut := runCLI("login", "--config", short, "--capture", filepath.Join(t.TempDir(), "n.twcap"), "harness", "Harnessb"); code != exitUsage || strings.Contains(errOut, "pw\n") {
 		t.Fatalf("short: %d %q", code, errOut)
 	}

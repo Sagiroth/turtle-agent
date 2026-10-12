@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -283,6 +284,8 @@ func TestRPCErrMapping(t *testing.T) {
 		{context.DeadlineExceeded, rpc.CodeTimeout},
 		{context.Canceled, rpc.CodeDisconnected},
 		{&session.LogoutError{Reason: 1}, rpc.CodeGame},
+		{fmt.Errorf("%w: CMSG_PING: %w", worldconn.ErrWrite, net.ErrClosed), rpc.CodeDisconnected},
+		{errors.New("world: CMSG_MESSAGECHAT body is 10300 bytes"), rpc.CodeGame},
 	} {
 		var re *rpc.Error
 		if !errors.As(rpcErr(c.err), &re) || re.Code != c.code {

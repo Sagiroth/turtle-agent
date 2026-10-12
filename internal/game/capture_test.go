@@ -73,6 +73,9 @@ func TestM3PartyFromCapture(t *testing.T) {
 		if len(g.Members) > most {
 			most = len(g.Members)
 		}
+		if len(g.Members) > 0 && g.Leader == 0 {
+			t.Fatalf("a populated group list without a leader: %+v", g)
+		}
 	}
 	if most < 2 {
 		t.Fatalf("largest group list had %d members, want 2", most)
@@ -81,10 +84,18 @@ func TestM3PartyFromCapture(t *testing.T) {
 	if len(stats) == 0 {
 		t.Fatal("no member stats captured")
 	}
+	full := false
 	for _, body := range stats {
-		if _, err := ParsePartyMemberStats(body); err != nil {
+		m, err := ParsePartyMemberStats(body)
+		if err != nil {
 			t.Fatalf("% X: %v", body, err)
 		}
+		if m.MaxHP > 0 && m.Level > 0 {
+			full = true
+		}
+	}
+	if !full {
+		t.Fatal("no member stats carried both MaxHP and Level")
 	}
 }
 

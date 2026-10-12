@@ -135,3 +135,22 @@ func TestPartyMemberStatsPetAndTruncation(t *testing.T) {
 		t.Fatal("truncated stats accepted")
 	}
 }
+
+// The pet's positive and negative aura masks are consumed with one U16 per set bit, so a
+// body that ends inside either list is an error (GroupHandler.cpp:780-791).
+func TestPartyMemberStatsPetAuraMasks(t *testing.T) {
+	mask := game.GroupUpdatePetAuras | game.GroupUpdatePetAurasNegative | game.GroupUpdateLevel
+	body := packet.NewWriter().PackedGUID(0x30).U32(mask).U16(60).
+		U32(0b11).U16(1243).U16(1459). // pet slots 0 and 1
+		U16(0b101).U16(589).U16(702).  // pet slots 32 and 34
+		Bytes()
+	m, err := game.ParsePartyMemberStats(body)
+	if err != nil || m.Level != 60 || len(m.Auras) != 0 {
+		t.Fatalf("pet auras leaked into the member's: %+v %v", m, err)
+	}
+	for _, cut := range []int{1, 2, 3} { // inside the negative list, then the mask
+		if _, err := game.ParsePartyMemberStats(body[:len(body)-cut]); err == nil {
+			t.Fatalf("body cut by %d accepted", cut)
+		}
+	}
+}

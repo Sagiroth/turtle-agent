@@ -90,7 +90,7 @@ browser (`Origin` header) and other `Host` names are refused.
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `status` | | state, character, map, x/y/z, health, power, target, last event seq |
+| `status` | | state, character, map, x/y/z, `falling`, `z_unknown`, health, power, target, last event seq |
 | `chat` | `type` (say, party, yell, emote, guild, raid, whisper, channel), `text`, `to` (whisper target or channel name) | |
 | `gm` | `text` (a `.`-command; the dot is added if missing) | |
 | `events` | `since`, `kinds`, `limit`, `wait_ms` | page: `events`, `next`, `more`, `dropped` |
@@ -103,7 +103,7 @@ browser (`Origin` header) and other `Host` names are refused.
 | `cast` | `spell_id`, `target` | |
 | `cancel_cast` | `spell_id` (optional; none cancels whatever is being cast) | |
 | `face` | `guid` | |
-| `walk_to` | `x`, `y`, `z` (short, straight-line walks: Z is interpolated and terrain is ignored, so keep walks short and on flat ground; after a `teleport` to a Z above the ground the character does not fall) | |
+| `walk_to` | `x`, `y`, `z` (short, straight-line walks that ignore terrain; see Movement) | |
 | `teleport` | `x`, `y`, `z`, `map` (a GM `.go xyz`; needs a GM account) | |
 | `mark` | `guid` or `name`, `icon` (skull, cross, square, moon, triangle, diamond, circle, star, clear) | `icon`, `guid` once the server echoes the mark. Errors at once outside a group or when the player is neither leader nor assistant; errors after 2 s without an echo |
 | `roll` | `roll_id` or `item_slot` (plus `looted` when two corpses share a slot), `choice` (need, greed, pass) | `roll_id`, `looted`, `item_slot`, `item_entry`, `choice` |
@@ -142,6 +142,28 @@ Addons, channels and NPCs:
 
 Text the server echoes back (for example the account name in a GM reply) is redacted before it reaches events, logs
 or replies.
+
+## Movement
+
+There is no terrain or navmesh: `walk_to` walks a straight line of at most 40 yards and 30 s, and the z you give is
+taken as it is. The agent answers the server's movement orders the way the 1.12 client does:
+
+- speed changes, root and unroot, teleports and far teleports are acked with the server's counter;
+- a knockback is acked with the jump values the server sent, then flown as a ballistic arc (500 ms heartbeats) that
+  lands with `MSG_MOVE_FALL_LAND` back at the starting height. `status.falling` is true in the air, and `walk_to` and
+  `face` are refused (with the time left) until the landing. Session events `knocked_back` and `landed` bracket the
+  flight. `walk_to` is refused the same way while rooted or moved by the server (fear, charm);
+- water walking, hover and feather fall are acked with their apply flag and kept in later movement; feather fall slows
+  a knockback's descent.
+
+Every walk and facing packet is checked against the server anticheat's distance bound for the time since the last one
+(run speed across and up or down, so no step can trip `OVERSPEED_Z`); a walk that would break it stops where the server
+has the player. The client time never runs backwards and is never 0.
+
+`status.z_unknown` is true when the z is a guess: after a GM teleport (which may leave the player in the air), after a
+walk that changed height, and after a knockback landing (the agent assumes the ground is at the starting height). The
+next position the server sends for the player (a server-driven move, a relayed move or its own movement block) settles
+x, y and z, and the next walk starts from there. Keep walks short and on flat ground.
 
 ## Fleet: several players at once
 

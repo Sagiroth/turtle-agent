@@ -13,9 +13,6 @@ import (
 	"github.com/pjerra/turtle-agent/internal/packet"
 )
 
-// defaultUnitsLimit is the units limit when the caller sets none (objects.Filter.Limit).
-const defaultUnitsLimit = 100
-
 // moveRelays are the movement packets the server relays for other units: packed guid +
 // MovementInfo (MovementHandler.cpp:414-418, MovementPacketSender.cpp:166-172).
 var moveRelays = []uint16{
@@ -49,14 +46,13 @@ func (s *Session) selfPos() (x, y, z, o float32) {
 // with names and party membership filled in. Ruling P7: the store is asked without a
 // limit, so the name filter sees past the nearest 100; the caller's limit (0: 100) comes last.
 func (s *Session) Units(f objects.Filter) []objects.Unit {
-	x, y, z, _ := s.selfPos()
 	s.mu.Lock()
-	self := s.self.GUID
+	x, y, z, self := s.pos[0], s.pos[1], s.pos[2], s.self.GUID
 	s.mu.Unlock()
 	name := strings.ToLower(f.Name)
 	limit := f.Limit
 	if limit <= 0 {
-		limit = defaultUnitsLimit
+		limit = objects.DefaultLimit
 	}
 	f.Name, f.Limit = "", math.MaxInt
 	var out []objects.Unit
@@ -130,7 +126,7 @@ func (s *Session) onMonsterMove(body []byte) error {
 	if err != nil {
 		return err
 	}
-	s.store.MoveTo(m.GUID, m.Dest[0], m.Dest[1], m.Dest[2], 0)
+	s.store.MoveSpline(m.GUID, m.Dest[0], m.Dest[1], m.Dest[2], m.Stop)
 	if m.GUID == s.selfGUID() {
 		s.serverMoved(m.Dest)
 		s.splineUntil = time.Time{}

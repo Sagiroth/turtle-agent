@@ -191,3 +191,21 @@ func TestLoginBadRPCAddressNeverSpendsARealmdAttempt(t *testing.T) {
 		t.Fatalf("realmd login ran %d times", calls)
 	}
 }
+
+// login <character> takes the account from a settings file that holds exactly one, so the
+// account name need not appear on the command line; with several it is a usage error.
+func TestLoginAccountFromSettings(t *testing.T) {
+	var calls int
+	stubLogin(t, &auth.Ticket{}, &calls)
+	if code, _, errOut := runCLI("login", "--config", settingsFile(t, unreachable), "Harnessb"); strings.Contains(errOut, "usage:") {
+		t.Fatalf("one account, one argument: %d %q", code, errOut)
+	}
+	two := settingsFile(t, `{"realmd":"127.0.0.1:1","rpc":"127.0.0.1:0","accounts":{"harness":"pw-secret","other":"pw-two"}}`)
+	code, _, errOut := runCLI("login", "--config", two, "Harnessb")
+	if code != exitUsage || strings.Contains(errOut, "harness") || strings.Contains(errOut, "other") {
+		t.Fatalf("two accounts: %d %q", code, errOut)
+	}
+	if calls != 1 { // only the one-account call reached realmd
+		t.Fatalf("realmd login ran %d times", calls)
+	}
+}

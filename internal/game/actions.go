@@ -95,7 +95,10 @@ func ParseNewWorld(body []byte) (NewWorld, error) {
 func ParseTransferPending(body []byte) (uint32, error) {
 	r := packet.NewReader(body)
 	m := r.U32()
-	return m, r.Err()
+	if err := r.Err(); err != nil {
+		return 0, fmt.Errorf("SMSG_TRANSFER_PENDING: %w", err)
+	}
+	return m, nil
 }
 
 type MovementChange struct {
@@ -138,17 +141,23 @@ type AttackPair struct {
 	Attacker, Victim packet.GUID
 }
 
-// ParseAttackStart decodes SMSG_ATTACKSTART (Unit.cpp:2704-2709).
+// ParseAttackStart decodes SMSG_ATTACKSTART (Unit.cpp:2704-2712).
 func ParseAttackStart(body []byte) (AttackPair, error) {
 	r := packet.NewReader(body)
 	a := AttackPair{Attacker: r.GUID(), Victim: r.GUID()}
-	return a, r.Err()
+	if err := r.Err(); err != nil {
+		return AttackPair{}, fmt.Errorf("SMSG_ATTACKSTART: %w", err)
+	}
+	return a, nil
 }
 
-// ParseAttackStop decodes SMSG_ATTACKSTOP (Unit.cpp:2715-2723).
+// ParseAttackStop decodes SMSG_ATTACKSTOP (Unit.cpp:2714-2725).
 func ParseAttackStop(body []byte) (AttackPair, error) {
 	r := packet.NewReader(body)
 	a := AttackPair{Attacker: r.PackedGUID(), Victim: r.PackedGUID()}
 	r.U32()
-	return a, r.Err()
+	if err := r.Err(); err != nil {
+		return AttackPair{}, fmt.Errorf("SMSG_ATTACKSTOP: %w", err)
+	}
+	return a, nil
 }

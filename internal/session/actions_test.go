@@ -191,7 +191,7 @@ func selfCreate(run float32) []byte {
 	w.U8(0x20)
 	game.WriteMoveInfo(w, game.MoveInfo{X: me.X, Y: me.Y, Z: me.Z})
 	w.F32(2.5).F32(run).F32(4.5).F32(4.72).F32(2.5).F32(3.14)
-	objtest.Values(w, 192, map[uint16]uint32{objects.UnitHealth: 100, objects.UnitMaxHealth: 100})
+	objtest.Values(w, 192, map[uint16]uint32{objects.UnitHealth: 100, objects.UnitMaxHealth: 100, objects.UnitLevel: 61})
 	return w.Bytes()
 }
 
@@ -324,5 +324,33 @@ func TestServerMoveRefreshesOwnPosition(t *testing.T) {
 		t.Fatalf("walk starts at %+v", mi)
 	}
 	h.expect(opcode.MSGMoveStop)
+	h.logout()
+}
+
+// Status shows the live level from the store, not the one from the character list.
+func TestStatusLevelFollowsTheStore(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	if got := h.s.Status().Level; got != me.Level {
+		t.Fatalf("before the create block: level %d", got)
+	}
+	h.send(opcode.SMSGUpdateObject, selfCreate(7))
+	waitFor(t, func() bool { return h.s.Status().Level == 61 })
+	h.logout()
+}
+
+// A Teleport that gives up leaves no waiter behind.
+func TestTimedOutTeleportDropsItsWaiter(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := h.s.Teleport(ctx, 1, 2, 3, -1); err == nil {
+		t.Fatal("teleport without a server answer succeeded")
+	}
+	n, err := h.s.do(context.Background(), func() (any, error) { return len(h.s.teleportWaiters), nil })
+	if err != nil || n.(int) != 0 {
+		t.Fatalf("waiters left: %v %v", n, err)
+	}
 	h.logout()
 }

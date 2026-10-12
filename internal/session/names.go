@@ -34,6 +34,7 @@ type nameCache struct {
 type pendingEvent struct {
 	e     events.Event
 	until time.Time
+	party bool // fixed when the event was emitted, not when its names arrive
 }
 
 func newNameCache() *nameCache {
@@ -190,7 +191,7 @@ func (s *Session) flushNames(now time.Time) {
 			s.giveUp(p.e.SourceGUID)
 			s.giveUp(p.e.TargetGUID)
 		}
-		s.appendEvent(p.e)
+		s.appendEvent(p.e, p.party)
 	}
 	if i == len(s.names.waiting) {
 		s.names.waiting = nil

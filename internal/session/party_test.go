@@ -200,3 +200,29 @@ func TestPartyOverlaysVisibleMembers(t *testing.T) {
 	}
 	h.logout()
 }
+
+// The Party flag is decided when the event is emitted, not when its name wait ends: a
+// member who leaves inside the wait still flags the event.
+func TestPartyFlagIsFixedAtEmit(t *testing.T) {
+	h := start(t, Options{NamesWait: 300 * time.Millisecond})
+	h.enterWorld()
+	h.send(opcode.SMSGGroupList, gametest.GroupList(me.GUID, gorm))
+	waitFor(t, func() bool { return h.s.Party().InGroup })
+	h.s.names.mu.Lock()
+	h.s.names.players[0x30] = "Gorm"
+	h.s.names.mu.Unlock()
+	_, err := h.s.do(context.Background(), func() (any, error) {
+		h.s.emit(events.Event{Kind: events.KindDeath, SourceGUID: 0x30, TargetGUID: 0x99})
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.send(opcode.SMSGGroupDestroyed, nil)
+	waitFor(t, func() bool { return !h.s.Party().InGroup })
+	waitFor(t, func() bool { return len(ofKind(h.s.Log(), events.KindDeath)) == 1 })
+	if d := ofKind(h.s.Log(), events.KindDeath)[0]; !d.Party {
+		t.Fatalf("the member left inside the wait and the flag flipped: %+v", d)
+	}
+	h.logout()
+}

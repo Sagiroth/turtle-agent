@@ -80,15 +80,26 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
-	if fs.NArg() != 2 {
-		fmt.Fprintln(stderr, "usage: turtle-agent login [flags] <account> <character>")
+	if fs.NArg() != 1 && fs.NArg() != 2 {
+		fmt.Fprintln(stderr, "usage: turtle-agent login [flags] [<account>] <character>")
 		return exitUsage
 	}
-	account, character := fs.Arg(0), fs.Arg(1)
 	st, err := config.Load(*cfgPath)
 	if err != nil {
 		fmt.Fprintln(stderr, "config:", err)
 		return exitUsage
+	}
+	// With one argument the account is the settings file's only one, which keeps the name
+	// out of ps and shell history (ruling P10).
+	var account, character string
+	if fs.NArg() == 2 {
+		account, character = fs.Arg(0), fs.Arg(1)
+	} else {
+		character = fs.Arg(0)
+		if account, err = st.OnlyAccount(); err != nil {
+			fmt.Fprintln(stderr, "config:", err)
+			return exitUsage
+		}
 	}
 	password, err := st.Password(account)
 	if err != nil {

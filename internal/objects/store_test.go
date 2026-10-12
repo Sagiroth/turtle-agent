@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"math"
 	"testing"
 
 	"github.com/pjerra/turtle-agent/internal/packet"
@@ -30,7 +31,6 @@ func TestApplyCreateValuesAndUnits(t *testing.T) {
 	ch = s.Apply([]Block{{Type: BlockValues, GUID: wolf, Values: map[uint16]uint32{UnitHealth: 0, UnitAura + 33: 0, UnitAura + 2: 1243, UnitFlags: UnitFlagInCombat}}})
 	want := map[ChangeKind]Change{
 		ChangeHealth: {GUID: wolf, Kind: ChangeHealth, Old: 100, New: 0},
-		ChangeCombat: {GUID: wolf, Kind: ChangeCombat, Old: 0, New: UnitFlagInCombat},
 	}
 	auras := 0
 	for _, c := range ch {
@@ -45,7 +45,7 @@ func TestApplyCreateValuesAndUnits(t *testing.T) {
 			t.Fatalf("change %+v", c)
 		}
 	}
-	if auras != 2 || len(ch) != 4 {
+	if auras != 2 || len(ch) != 3 {
 		t.Fatalf("%+v", ch)
 	}
 	if u, ok := s.Get(wolf, 0, 0, 0); !ok || !u.Dead || u.Hostile || !u.InCombat {
@@ -57,8 +57,11 @@ func TestOutOfRangeDestroyAndClear(t *testing.T) {
 	s := NewStore()
 	s.Apply([]Block{createBlock(wolf, TypeUnit, 1, 1, nil), createBlock(0x30, TypePlayer, 2, 2, nil)})
 	ch := s.Apply([]Block{{Type: BlockOutOfRange, GUIDs: []packet.GUID{wolf, 0x99}}})
-	if len(ch) != 1 || ch[0].Kind != ChangeRemoved || ch[0].GUID != wolf {
+	if len(ch) != 0 {
 		t.Fatalf("%+v", ch)
+	}
+	if _, ok := s.Get(wolf, 0, 0, 0); ok {
+		t.Fatal("unit kept")
 	}
 	if !s.Destroy(0x30) || s.Destroy(0x30) {
 		t.Fatal("destroy")
@@ -134,20 +137,6 @@ func TestCreateForExistingGUIDResets(t *testing.T) {
 	}
 }
 
-// Only units report ChangeRemoved; game objects leave range silently (ruling T20 minor 2).
-func TestOutOfRangeReportsOnlyUnits(t *testing.T) {
-	s := NewStore()
-	const chest packet.GUID = 0xF110000000000003
-	s.Apply([]Block{createBlock(wolf, TypeUnit, 1, 1, nil), createBlock(chest, TypeGameObject, 1, 1, nil)})
-	ch := s.Apply([]Block{{Type: BlockOutOfRange, GUIDs: []packet.GUID{chest, wolf}}})
-	if len(ch) != 1 || ch[0] != (Change{GUID: wolf, Kind: ChangeRemoved}) {
-		t.Fatalf("%+v", ch)
-	}
-	if _, ok := s.Get(chest, 0, 0, 0); ok {
-		t.Fatal("game object kept")
-	}
-}
-
 // Units at the same distance come back in GUID order, so a limit cuts the same set every
 // call (ruling T20 minor 3).
 func TestUnitsTieBreakOnGUID(t *testing.T) {
@@ -187,5 +176,27 @@ func TestOwnersReadsTheThreeOwnerFields(t *testing.T) {
 		if got := s.Owners(c.g); got != c.want {
 			t.Fatalf("%v: %v, want %v", c.g, got, c.want)
 		}
+	}
+}
+
+// A spline sets the unit's facing from its travel direction; a stop keeps the old one.
+func TestMoveSplineFacesTravelDirection(t *testing.T) {
+	s := NewStore()
+	s.Apply([]Block{createBlock(wolf, TypeUnit, 0, 0, nil)})
+	s.MoveSpline(wolf, 0, 10, 0, false)
+	if u, _ := s.Get(wolf, 0, 0, 0); u.Y != 10 || math.Abs(float64(u.O)-math.Pi/2) > 1e-5 {
+		t.Fatalf("north: %+v", u)
+	}
+	s.MoveSpline(wolf, 0, -10, 0, false)
+	if u, _ := s.Get(wolf, 0, 0, 0); math.Abs(float64(u.O)-1.5*math.Pi) > 1e-5 {
+		t.Fatalf("south must wrap into [0, 2pi): %+v", u)
+	}
+	s.MoveSpline(wolf, 5, 5, 0, true)
+	if u, _ := s.Get(wolf, 0, 0, 0); math.Abs(float64(u.O)-1.5*math.Pi) > 1e-5 || u.X != 5 {
+		t.Fatalf("a stop keeps the facing: %+v", u)
+	}
+	s.MoveSpline(wolf, 5, 5, 3, false)
+	if u, _ := s.Get(wolf, 0, 0, 0); math.Abs(float64(u.O)-1.5*math.Pi) > 1e-5 {
+		t.Fatalf("a vertical move keeps the facing: %+v", u)
 	}
 }

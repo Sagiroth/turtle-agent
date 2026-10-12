@@ -271,6 +271,9 @@ func (s *Session) Status() StatusInfo {
 	// The player's own values from the store (zero until its create block arrives).
 	if u, ok := s.store.Get(s.self.GUID, s.pos[0], s.pos[1], s.pos[2]); ok {
 		info.Health, info.MaxHealth, info.Power, info.MaxPower = u.Health, u.MaxHealth, u.Power, u.MaxPower
+		if u.Level > 0 { // the live level, not the one from the character list
+			info.Level = uint8(min(u.Level, 255))
+		}
 	}
 	return info
 }
@@ -374,16 +377,17 @@ func (s *Session) emit(e events.Event) {
 		e.Time = time.Now()
 	}
 	s.fillNames(&e)
-	s.names.waiting = append(s.names.waiting, pendingEvent{e: e, until: time.Now().Add(s.opts.NamesWait)})
+	party := s.partyInvolved(e.SourceGUID) || s.partyInvolved(e.TargetGUID)
+	s.names.waiting = append(s.names.waiting, pendingEvent{e: e, until: time.Now().Add(s.opts.NamesWait), party: party})
 	s.flushNames(time.Now())
 }
 
-// appendEvent stores a ready event, flagging it when the player, a party member or one of
+// appendEvent stores a ready event, flagging it (party, decided at emit) when the player, a party member or one of
 // their pets is involved. Secrets are scrubbed here, once the names are final, so nothing
 // the server echoes reaches the log, RPC replies or MCP output (ruling P10).
-func (s *Session) appendEvent(e events.Event) {
+func (s *Session) appendEvent(e events.Event, party bool) {
 	s.redact.scrubEvent(&e)
-	e.Party = s.partyInvolved(e.SourceGUID) || s.partyInvolved(e.TargetGUID)
+	e.Party = party
 	s.log.Append(e)
 }
 

@@ -36,6 +36,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	switch args[0] {
+	case "login":
+		return loginCmd(ctx, args[1:], stdout, stderr)
+	case "scrub-check":
+		return scrubCmd(args[1:], stdout, stderr)
+	case "capture-stats":
+		return statsCmd(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintln(stdout, "turtle-agent", version)
 		return exitOK

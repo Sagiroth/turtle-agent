@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/pjerra/turtle-agent/internal/rpc"
 )
 
 // Spot is a place near hostile mobs used by the live checks (map id and world coordinates).
@@ -86,10 +88,7 @@ func (s Settings) validate() error {
 	if err != nil {
 		return errors.New(`"rpc" must be host:port`)
 	}
-	if h == "localhost" {
-		h = "127.0.0.1"
-	}
-	if ip := net.ParseIP(h); ip == nil || !ip.IsLoopback() {
+	if !rpc.IsLoopback(h) {
 		return errors.New(`"rpc" must be a loopback address (127.0.0.1 or ::1)`)
 	}
 	if len(s.Accounts) == 0 {

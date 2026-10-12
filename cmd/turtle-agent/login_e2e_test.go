@@ -98,10 +98,11 @@ func TestLoginCaptureEndToEndLeaksNoSecret(t *testing.T) {
 	}()
 
 	dir := t.TempDir()
-	cfg := settingsFile(t, `{"realmd":"127.0.0.1:1","world_addr":"`+ln.Addr().String()+`","accounts":{"harness":"`+password+`"}}`)
+	cfg := settingsFile(t, `{"realmd":"127.0.0.1:1","world_addr":"`+ln.Addr().String()+`","rpc":"127.0.0.1:0","accounts":{"harness":"`+password+`"}}`)
 	capPath := filepath.Join(dir, "e2e.twcap")
 	code, _, errOut := runCLI("login", "--config", cfg, "--capture", capPath, "--stay", "200ms", "harness", "Harnessb")
-	if code != exitOK || !strings.Contains(errOut, "in world: Harnessb") || !strings.Contains(errOut, "logout: complete") {
+	if code != exitOK || !strings.Contains(errOut, "in world: Harnessb") || !strings.Contains(errOut, "logout: complete") ||
+		!strings.Contains(errOut, "rpc: listening on http://127.0.0.1:") {
 		t.Fatalf("code %d stderr %q", code, errOut)
 	}
 	if err := <-served; err != nil {
@@ -165,9 +166,23 @@ func TestLoginErrorsHaveOnePrefix(t *testing.T) {
 	}
 }
 
-func TestLoginUsageDoesNotAdvertiseRPC(t *testing.T) {
+func TestLoginUsageAdvertisesRPC(t *testing.T) {
 	_, _, errOut := runCLI()
-	if strings.Contains(errOut, "--rpc") {
-		t.Fatalf("usage mentions --rpc: %q", errOut)
+	if !strings.Contains(errOut, "[--rpc ADDR]") {
+		t.Fatalf("usage lacks --rpc: %q", errOut)
+	}
+}
+
+func TestLoginNonLoopbackRPCNeverSpendsARealmdAttempt(t *testing.T) {
+	var calls int
+	stubLogin(t, &auth.Ticket{}, &calls)
+	cfg := settingsFile(t, unreachable)
+	for _, addr := range []string{"0.0.0.0:8765", "192.168.1.10:8765", "example.com:8765", "8765"} {
+		if code, _, errOut := runCLI("login", "--config", cfg, "--rpc", addr, "harness", "Harnessb"); code != exitUsage || !strings.Contains(errOut, "rpc: ") {
+			t.Errorf("%s: %d %q", addr, code, errOut)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("realmd login ran %d times", calls)
 	}
 }

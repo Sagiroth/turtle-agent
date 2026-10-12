@@ -24,6 +24,12 @@ type Character struct {
 	FirstLogin bool        `json:"first_login"`
 }
 
+// CharEnumTailLen is the size of the per-character block after the name: race, class,
+// gender, five appearance bytes, level, zone, map, x, y, z, guild, flags, first login,
+// pet (12) and 20 equipment slots of 5 bytes. Test rigs outside this package build
+// SMSG_CHAR_ENUM with it, so a layout change reaches them too.
+const CharEnumTailLen = 150
+
 // ParseCharEnum reads a u8 count (CharacterHandler.cpp:164-169) and per character the
 // guid, the name and a 150-byte tail (Player.cpp:2198-2285). Bytes left over mean the
 // layout drifted, which is an error rather than a silent misparse.

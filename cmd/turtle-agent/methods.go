@@ -1,0 +1,107 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/pjerra/turtle-agent/internal/events"
+	"github.com/pjerra/turtle-agent/internal/rpc"
+	"github.com/pjerra/turtle-agent/internal/session"
+)
+
+type empty struct{}
+
+type chatParams struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+	To   string `json:"to,omitempty"`
+}
+
+type gmParams struct {
+	Text string `json:"text"`
+}
+
+type eventsParams struct {
+	Since     uint64   `json:"since"`
+	Kinds     []string `json:"kinds,omitempty"`
+	PartyOnly bool     `json:"party_only,omitempty"`
+	Limit     int      `json:"limit,omitempty"`
+	WaitMS    int      `json:"wait_ms,omitempty"`
+}
+
+type chatLogParams struct {
+	Since  uint64 `json:"since"`
+	Limit  int    `json:"limit,omitempty"`
+	WaitMS int    `json:"wait_ms,omitempty"`
+}
+
+// registerMethods wires the spec's JSON-RPC methods (v1) to the session; later
+// milestones add their methods at the end of this function.
+func registerMethods(srv *rpc.Server, s *session.Session) {
+	log := s.Log()
+	srv.Register("status", rpc.Typed(func(ctx context.Context, _ empty) (session.StatusInfo, error) {
+		return s.Status(), nil
+	}))
+	srv.Register("chat", rpc.Typed(func(ctx context.Context, p chatParams) (empty, error) {
+		return empty{}, rpcErr(s.Chat(ctx, p.Type, p.Text, p.To))
+	}))
+	srv.Register("gm", rpc.Typed(func(ctx context.Context, p gmParams) (empty, error) {
+		return empty{}, rpcErr(s.GM(ctx, p.Text))
+	}))
+	srv.Register("events", rpc.Typed(func(ctx context.Context, p eventsParams) (events.Page, error) {
+		q := events.Query{Since: p.Since, Kinds: p.Kinds, PartyOnly: p.PartyOnly, Limit: p.Limit}
+		return readEvents(ctx, log, q, p.WaitMS), nil
+	}))
+	srv.Register("chat_log", rpc.Typed(func(ctx context.Context, p chatLogParams) (events.Page, error) {
+		return readEvents(ctx, log, events.Query{Since: p.Since, Kinds: events.ChatKinds, Limit: p.Limit}, p.WaitMS), nil
+	}))
+	srv.Register("logout", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) {
+		return empty{}, rpcErr(s.Logout(ctx))
+	}))
+}
+
+// readEvents long-polls up to waitMS (at most 25 s) until a matching event exists. A
+// cursor past the end of the log (a client that outlived an agent restart) is clamped to
+// Last(), so the wait ends on the next append rather than when the log catches up.
+func readEvents(ctx context.Context, log *events.Log, q events.Query, waitMS int) events.Page {
+	if last := log.Last(); q.Since > last {
+		q.Since = last
+	}
+	p := log.Read(q)
+	if waitMS <= 0 || len(p.Events) > 0 {
+		return p
+	}
+	if waitMS > 25000 {
+		waitMS = 25000
+	}
+	wctx, cancel := context.WithTimeout(ctx, time.Duration(waitMS)*time.Millisecond)
+	defer cancel()
+	for len(p.Events) == 0 {
+		if err := log.Wait(wctx, p.Next); err != nil {
+			return p
+		}
+		q.Since = p.Next
+		p = log.Read(q)
+	}
+	return p
+}
+
+// rpcErr maps session errors onto the JSON-RPC codes the Python wrapper branches on.
+func rpcErr(err error) error {
+	var le *session.LogoutError
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, session.ErrNotInWorld):
+		return &rpc.Error{Code: rpc.CodeNotInWorld, Message: err.Error()}
+	case errors.Is(err, session.ErrDisconnected), errors.Is(err, session.ErrClosed):
+		return &rpc.Error{Code: rpc.CodeDisconnected, Message: err.Error()}
+	case errors.Is(err, context.DeadlineExceeded):
+		return &rpc.Error{Code: rpc.CodeTimeout, Message: err.Error()}
+	case errors.As(err, &le):
+		return &rpc.Error{Code: rpc.CodeGame, Message: err.Error(), Data: map[string]any{"reason": le.Reason}}
+	default:
+		return &rpc.Error{Code: rpc.CodeGame, Message: err.Error()}
+	}
+}

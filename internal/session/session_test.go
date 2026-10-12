@@ -156,7 +156,7 @@ func sessionStates(l *events.Log) []string {
 
 func TestCharEnumTailIs150Bytes(t *testing.T) {
 	body := charEnumBody(me)
-	if len(body) != 1+8+len(me.Name)+1+150 {
+	if len(body) != 1+8+len(me.Name)+1+CharEnumTailLen {
 		t.Fatalf("builder wrote %d bytes", len(body))
 	}
 	chars, err := ParseCharEnum(body)

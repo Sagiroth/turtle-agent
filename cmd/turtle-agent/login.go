@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/pjerra/turtle-agent/internal/capture"
 	"github.com/pjerra/turtle-agent/internal/config"
 	"github.com/pjerra/turtle-agent/internal/events"
+	"github.com/pjerra/turtle-agent/internal/rpc"
 	"github.com/pjerra/turtle-agent/internal/session"
 	"github.com/pjerra/turtle-agent/internal/worldconn"
 )
@@ -62,6 +64,7 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	cfgPath := fs.String("config", config.DefaultPath(), "settings file (realmd address, accounts)")
 	capPath := fs.String("capture", "", "record decrypted world packets to this new file")
 	stay := fs.Duration("stay", 0, "log out after this long in world (0: until interrupted or the logout RPC)")
+	rpcAddr := fs.String("rpc", "", "JSON-RPC listen address (default: the settings file's rpc)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -78,6 +81,16 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	password, err := st.Password(account)
 	if err != nil {
 		fmt.Fprintf(stderr, "config: account %q: %v\n", account, err)
+		return exitUsage
+	}
+
+	// Loopback only, checked before realmd so a bad --rpc never costs a login attempt.
+	addrRPC := st.RPC
+	if *rpcAddr != "" {
+		addrRPC = *rpcAddr
+	}
+	if host, _, err := net.SplitHostPort(addrRPC); err != nil || !rpc.IsLoopback(host) {
+		fmt.Fprintln(stderr, "rpc: --rpc must be a loopback host:port (127.0.0.1, ::1 or localhost)")
 		return exitUsage
 	}
 
@@ -153,6 +166,19 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		<-runErr
 		return exitWorld
 	}
+
+	ln, err := rpc.Listen(ctx, addrRPC)
+	if err != nil {
+		fmt.Fprintln(stderr, "rpc:", err)
+		return logoutAndWait(s, runErr, stderr)
+	}
+	srv := rpc.NewServer()
+	registerMethods(srv, s)
+	rctx, stopRPC := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- rpc.Serve(rctx, ln, srv.Handler()) }()
+	defer func() { stopRPC(); <-served }()
+	fmt.Fprintf(stderr, "rpc: listening on http://%s/rpc\n", ln.Addr())
 
 	var stayC <-chan time.Time
 	if *stay > 0 {

@@ -41,7 +41,8 @@ users can read):
 
 Only `realmd` and `accounts` are required. `rpc` must be a loopback address. `realm` and `world_addr` override what the
 realm list returns; `bots`, `spot` and `test_spell` are optional hints for scripts. `mmaps_dir` is a folder holding
-copies of the server's navmesh files, for `path_to` and `walk_path` (see [Navmesh walking](#navmesh-walking)).
+copies of the server's navmesh files, for `path_to` and `walk_path` (see [Navmesh walking](#navmesh-walking)), and to
+land falls and knockbacks on the ground (see [Falling](#falling-and-knockbacks)).
 
 Log a character in and keep it online with the RPC server running:
 
@@ -270,9 +271,10 @@ movement packets. The agent answers the server's movement orders the way the 1.1
 
 - speed changes, root and unroot, teleports and far teleports are acked with the server's counter;
 - a knockback is acked with the jump values the server sent, then flown as a ballistic arc (500 ms heartbeats) that
-  lands with `MSG_MOVE_FALL_LAND` back at the starting height. `status.falling` is true in the air, and `walk_to` and
-  `face` are refused (with the time left) until the landing. Session events `knocked_back` and `landed` bracket the
-  flight. `walk_to` is refused the same way while rooted or moved by the server (fear, charm);
+  lands with `MSG_MOVE_FALL_LAND` on the ground (see [Falling and knockbacks](#falling-and-knockbacks)).
+  `status.falling` is true in the air, and `walk_to` and `face` are refused (with the time left) until the landing.
+  Session events `knocked_back` and `landed` bracket the flight. `walk_to` is refused the same way while rooted or
+  moved by the server (fear, charm);
 - water walking, hover and feather fall are acked with their apply flag and kept in later movement. Feather fall holds
   a knockback's arc to 7 yd/s up and down, the server's bound under it; applied or removed mid-flight, it restarts the
   arc from where it is, at the speed it has, from the ack on.
@@ -281,12 +283,42 @@ Every walk and facing packet is checked against the server anticheat's distance 
 (run speed across and up or down, so no step can trip `OVERSPEED_Z`); a walk that would break it stops where the server
 has the player. The client time never runs backwards and is never 0.
 
-`status.z_unknown` is true when the z is a guess: after a GM teleport (which may leave the player in the air), after a
-`walk_to` that changed height, and after a knockback landing (the agent assumes the ground is at the starting height).
+`status.z_unknown` is true when the z is a guess: after a GM teleport the agent found no floor under (no navmesh, or
+none within reach), after a `walk_to` that changed height, and after a knockback that landed without a navmesh floor.
 It sticks until the server moves the player itself: a server spline (fear or charge) or a teleport settles x, y and z
-(a teleport's z is again a guess), and a reconnect starts from the server's saved position. The core sends the player
-no other position of its own. A `walk_path` leg that ends on the navmesh floor settles it too, as the mesh knows the
-ground. Keep `walk_to` walks short and on flat ground, or use `walk_path`.
+(a teleport's z is again checked against the navmesh), and a reconnect starts from the server's saved position. The
+core sends the player no other position of its own. A `walk_path` leg that ends on the navmesh floor, and a fall or
+knockback that lands on one, settle it too, as the mesh knows the ground. Keep `walk_to` walks short and on flat
+ground, or use `walk_path`.
+
+### Falling and knockbacks
+
+With `mmaps_dir` set (and a cgo build, see [Navmesh walking](#navmesh-walking)), the agent flies a knockback's arc,
+and a fall, against the server's navmesh, the floor the server's own pathing uses, as a client flies it against the
+terrain:
+
+- the physics are the core's (gravity 19.29 yd/s², terminal speed 60.148 yd/s, 7 yd/s under feather fall,
+  `Movement/spline/util.cpp`, `Movement.cpp:874-881`); the arc is sampled every 50 ms against every navmesh surface
+  under it (ground, water, steep slopes), and lands where it meets one: sooner and higher up a slope, later and lower
+  down one. A surface above the arc with none under it is a wall: the flight stops going across there and drops;
+- a GM teleport (`.go xyz`, `.summon`) that leaves the player above the floor falls to it from rest. The fall opens
+  with a heartbeat at the teleport's position, as the server keeps the player's movement flags across a teleport and
+  checks the next packet against them. A floor up to 0.5 yd above or 0.05 yd below the teleport's z counts as standing
+  on it. Session event `falling` (with the landing it expects) opens the fall, `landed` ends it;
+- in the air the packets carry `MoveJumping` with the jump values, and `MoveFallingFar` too once on the way down; the
+  landing carries the time fallen, so the server can deal fall damage as for a client (`Player::HandleFall`: 14.57 yd
+  or more below the highest point, at least 1229 ms in the air, no feather fall);
+- the heartbeat due within 150 ms of the landing is left out, and a landing step that would still break the
+  anticheat's bound (a floor met a little above the arc) waits until it does not, at most 1 s;
+- `landed` says what it landed on: `navmesh` settles z (`z_unknown` false); `water` does not (the agent does not
+  swim: it stands on the water's surface, where the mesh has it); `guess` is the old behaviour.
+
+Without a navmesh (no `mmaps_dir`, a build without cgo, no tile under the point) a knockback lands back at the height
+it started at and a teleport stays where the server put it, both with `z_unknown` true. Limits: the mesh has no game
+objects and no walls of its own, so the wall rule is a stand-in for collision; a floor is where the mesh has it, within
+its detail error (a few tenths of a yard); a `walk_to` that ends above the ground does not fall (it sets `z_unknown`);
+a far teleport (`SMSG_NEW_WORLD`) does not fall either. The floor search runs in the session loop: a flight's first
+query on an unloaded tile reads that tile (0.5-3 MB) before the ack is sent.
 
 ## Navmesh walking
 

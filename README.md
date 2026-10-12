@@ -44,12 +44,14 @@ Log a character in and keep it online with the RPC server running:
 bin/turtle-agent login --rpc 127.0.0.1:8765 MYACCOUNT MyCharacter
 ```
 
+When the settings file holds exactly one account, leave the account name off (`login MyCharacter`): it then stays out of `ps` and shell history.
+
 Ctrl-C logs out cleanly. If the server refuses the logout (in combat), the agent retries for 35 s; a second Ctrl-C quits.
 
 ## CLI
 
 ```
-turtle-agent login [--config FILE] [--capture FILE] [--stay DURATION] [--rpc ADDR] <account> <character>
+turtle-agent login [--config FILE] [--capture FILE] [--stay DURATION] [--rpc ADDR] [<account>] <character>
 turtle-agent fleet --config FILE [--settings FILE] [--stagger DURATION] [--wait DURATION]
 turtle-agent scrub-check [--config FILE] <capture>...
 turtle-agent capture-stats <capture>
@@ -86,12 +88,12 @@ browser (`Origin` header) and other `Host` names are refused.
 | `chat_log` | `since`, `limit` | chat and system events only |
 | `invite` / `accept_invite` / `leave_group` | `name` / – / – | |
 | `party` | | `in_group`, `leader`, `members[]` with health and online state |
-| `units` | `limit`, `name` | nearby units, nearest first: guid, name, level, health, dead, hostile, in_party |
+| `units` | `limit`, `name` | nearby units, nearest first: guid, name, level, health, dead, hostile, in_party; `hostile` means an attackable-looking creature (no NPC flags, not player-controlled), not a faction check: it counts neutral critters and never an enemy-faction player |
 | `target` | `guid` or `name` (prefers living units) | |
 | `attack` / `stop_attack` | | |
 | `cast` | `spell_id`, `target` | |
 | `face` | `guid` | |
-| `walk_to` | `x`, `y`, `z` (short, straight-line walks) | |
+| `walk_to` | `x`, `y`, `z` (short, straight-line walks: Z is interpolated and terrain is ignored, so keep walks short and on flat ground; after a `teleport` to a Z above the ground the character does not fall) | |
 | `teleport` | `x`, `y`, `z`, `map` (a GM `.go xyz`; needs a GM account) | |
 | `logout` | | |
 

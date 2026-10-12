@@ -78,3 +78,14 @@ func TestParseErrorDoesNotEchoContent(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestOnlyAccount(t *testing.T) {
+	one := Settings{Accounts: map[string]string{"solo": "pw"}}
+	if name, err := one.OnlyAccount(); err != nil || name != "solo" {
+		t.Fatalf("one account: %q %v", name, err)
+	}
+	two := Settings{Accounts: map[string]string{"a": "pw", "b": "pw"}}
+	if _, err := two.OnlyAccount(); err == nil || strings.Contains(err.Error(), "a") && strings.Contains(err.Error(), "b\"") {
+		t.Fatalf("two accounts: %v", err)
+	}
+}

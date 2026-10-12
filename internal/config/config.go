@@ -109,6 +109,18 @@ func (s Settings) Password(account string) (string, error) {
 	return "", errors.New("the requested account is not in the settings file")
 }
 
+// OnlyAccount is the account name when the file holds exactly one, so `login <character>`
+// keeps the name off the command line (ps, shell history). The error lists no names.
+func (s Settings) OnlyAccount() (string, error) {
+	if len(s.Accounts) != 1 {
+		return "", fmt.Errorf("the settings file holds %d accounts; name one: login <account> <character>", len(s.Accounts))
+	}
+	for name := range s.Accounts {
+		return name, nil
+	}
+	return "", nil
+}
+
 // String keeps passwords and account names out of %v, %+v and %s formatting.
 func (s Settings) String() string {
 	return fmt.Sprintf("Settings{realmd=%s realm=%q rpc=%s accounts=%d passwords=redacted}", s.Realmd, s.Realm, s.RPC, len(s.Accounts))

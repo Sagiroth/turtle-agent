@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/pjerra/turtle-agent/internal/events"
+	"github.com/pjerra/turtle-agent/internal/game"
+	"github.com/pjerra/turtle-agent/internal/game/gametest"
 	"github.com/pjerra/turtle-agent/internal/opcode"
 	"github.com/pjerra/turtle-agent/internal/packet"
 	"github.com/pjerra/turtle-agent/internal/rpc"
@@ -161,6 +163,28 @@ func TestStaleCursorWaitReturnsOnNextAppend(t *testing.T) {
 	}
 }
 
+// Ruling T14 minor 6: a cursor ahead of Last() means the agent restarted under the
+// client, so the clamped page reports Dropped, with or without a wait.
+func TestStaleCursorReportsDropped(t *testing.T) {
+	log := events.New(100)
+	for i := 0; i < 3; i++ {
+		log.Append(events.Event{Kind: events.KindSystem, Text: "old"})
+	}
+	if p := readEvents(context.Background(), log, events.Query{Since: 3}, 0); p.Dropped || p.Next != 3 {
+		t.Fatalf("cursor at Last(): %+v", p)
+	}
+	if p := readEvents(context.Background(), log, events.Query{Since: 1000}, 0); !p.Dropped || len(p.Events) != 0 || p.Next != 3 {
+		t.Fatalf("no wait: %+v", p)
+	}
+	got := make(chan events.Page, 1)
+	go func() { got <- readEvents(context.Background(), log, events.Query{Since: 1000}, 3000) }()
+	time.Sleep(50 * time.Millisecond)
+	log.Append(events.Event{Kind: events.KindSystem, Text: "new"})
+	if p := <-got; len(p.Events) != 1 || p.Events[0].Text != "new" || !p.Dropped {
+		t.Fatalf("after wait: %+v", p)
+	}
+}
+
 func TestReadEventsWaitBoundsAndFilters(t *testing.T) {
 	log := events.New(100)
 	start := time.Now()
@@ -195,6 +219,49 @@ func TestReadEventsKeepsDroppedAcrossWait(t *testing.T) {
 	if p := <-got; len(p.Events) != 1 || !p.Dropped {
 		t.Fatalf("%+v", p)
 	}
+}
+
+// The HeadlessClient reads party.members[].{name,health,max_health}; members is [] outside a group.
+func TestPartyMethods(t *testing.T) {
+	r := newRig(t)
+	if p := r.call("party", "{}")["result"].(map[string]any); p["in_group"] != false || p["members"] == nil || len(p["members"].([]any)) != 0 {
+		t.Fatalf("no group: %v", p)
+	}
+	if out := r.call("accept_invite", "{}"); errCode(out) != rpc.CodeGame {
+		t.Fatalf("accept without invite: %v", out)
+	}
+	if out := r.call("leave_group", "{}"); errCode(out) != rpc.CodeGame {
+		t.Fatalf("leave without group: %v", out)
+	}
+	if out := r.call("invite", `{"name":""}`); errCode(out) != rpc.CodeGame {
+		t.Fatalf("blank invite: %v", out)
+	}
+	if out := r.call("invite", `{"name":"Gorm"}`); out["error"] != nil {
+		t.Fatalf("%v", out)
+	}
+	r.expect(opcode.CMSGGroupInvite)
+	r.srv.Send(opcode.SMSGGroupList, gametest.GroupList(0x2A, game.GroupMember{Name: "Gorm", GUID: 0x30, Status: game.MemberOnline}))
+	r.expect(opcode.CMSGRequestPartyMemberStats)
+	stats := packet.NewWriter().PackedGUID(0x30).U32(game.GroupUpdateCurHP | game.GroupUpdateMaxHP).U16(500).U16(600).Bytes()
+	r.srv.Send(opcode.SMSGPartyMemberStatsFull, stats)
+	var m map[string]any
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		members := r.call("party", "{}")["result"].(map[string]any)["members"].([]any)
+		if len(members) == 1 && members[0].(map[string]any)["health"] == float64(500) {
+			m = members[0].(map[string]any)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("members %v", members)
+		}
+	}
+	if m["name"] != "Gorm" || m["max_health"] != float64(600) || m["online"] != true {
+		t.Fatalf("%v", m)
+	}
+	if out := r.call("leave_group", "{}"); out["error"] != nil {
+		t.Fatalf("%v", out)
+	}
+	r.expect(opcode.CMSGGroupDisband)
 }
 
 func TestRPCErrMapping(t *testing.T) {

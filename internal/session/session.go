@@ -137,6 +137,7 @@ type Session struct {
 	unknown   map[uint16]int
 	parseErrs int
 	lastErr   string
+	party     PartyInfo
 
 	// owner-loop only
 	finished       bool
@@ -187,6 +188,7 @@ func New(conn *worldconn.Conn, opts Options) *Session {
 func (s *Session) register() {
 	s.registerCore()
 	s.registerChat()
+	s.registerParty()
 }
 
 func (s *Session) registerCore() {

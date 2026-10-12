@@ -30,6 +30,10 @@ type eventsParams struct {
 	WaitMS    int      `json:"wait_ms,omitempty"`
 }
 
+type nameParams struct {
+	Name string `json:"name"`
+}
+
 type chatLogParams struct {
 	Since  uint64 `json:"since"`
 	Limit  int    `json:"limit,omitempty"`
@@ -59,16 +63,31 @@ func registerMethods(srv *rpc.Server, s *session.Session) {
 	srv.Register("logout", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) {
 		return empty{}, rpcErr(s.Logout(ctx))
 	}))
+	srv.Register("invite", rpc.Typed(func(ctx context.Context, p nameParams) (empty, error) {
+		return empty{}, rpcErr(s.Invite(ctx, p.Name))
+	}))
+	srv.Register("accept_invite", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) {
+		return empty{}, rpcErr(s.AcceptInvite(ctx))
+	}))
+	srv.Register("leave_group", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) {
+		return empty{}, rpcErr(s.LeaveGroup(ctx))
+	}))
+	srv.Register("party", rpc.Typed(func(ctx context.Context, _ empty) (session.PartyInfo, error) {
+		return s.Party(), nil
+	}))
 }
 
 // readEvents long-polls up to waitMS (at most 25 s) until a matching event exists. A
 // cursor past the end of the log (a client that outlived an agent restart) is clamped to
-// Last(), so the wait ends on the next append rather than when the log catches up.
+// Last(), so the wait ends on the next append rather than when the log catches up, and the
+// page reports Dropped, since the cursor belongs to an earlier log (ruling T14 minor 6).
 func readEvents(ctx context.Context, log *events.Log, q events.Query, waitMS int) events.Page {
+	ahead := false
 	if last := log.Last(); q.Since > last {
-		q.Since = last
+		q.Since, ahead = last, true
 	}
 	p := log.Read(q)
+	p.Dropped = p.Dropped || ahead
 	if waitMS <= 0 || len(p.Events) > 0 {
 		return p
 	}

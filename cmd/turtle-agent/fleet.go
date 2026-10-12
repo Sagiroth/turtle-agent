@@ -222,16 +222,23 @@ func runFleet(ctx context.Context, members []fleetMember, deps fleetDeps, o flee
 		children[i] = c
 	}
 
-	// anyExit reports the first child that has exited and whether it failed.
+	// anyExit reports an exited child and whether it failed. A failed child wins over
+	// an earlier clean exit, so a clean logout never hides a later failure.
 	anyExit := func() (int, bool) {
+		first := -1
 		for i, c := range children {
 			select {
 			case <-c.Done():
-				return i, c.Code() != exitOK
+				if c.Code() != exitOK {
+					return i, true
+				}
+				if first < 0 {
+					first = i
+				}
 			default:
 			}
 		}
-		return -1, false
+		return first, false
 	}
 
 	deadline := time.NewTimer(o.wait)
@@ -349,6 +356,8 @@ func startProcess(exe, settings string, m fleetMember, stderr io.Writer) (fleetC
 	pr, pw := io.Pipe()
 	cmd.Stderr = pw
 	if err := cmd.Start(); err != nil {
+		pr.Close()
+		pw.Close()
 		return nil, err
 	}
 	c := &procChild{cmd: cmd, done: make(chan struct{})}
@@ -359,6 +368,9 @@ func startProcess(exe, settings string, m fleetMember, stderr io.Writer) (fleetC
 		for sc.Scan() {
 			fmt.Fprintln(stderr, sc.Text())
 		}
+		// Scan stops at a line over the buffer limit; keep draining so the child never
+		// blocks writing to a pipe nobody reads.
+		_, _ = io.Copy(io.Discard, pr)
 		close(copied)
 	}()
 	go func() {

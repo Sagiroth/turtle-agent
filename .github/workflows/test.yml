@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # The Go version comes from go.mod. The repo has no dependencies and so no go.sum,
       # so the module and build cache is keyed on go.mod instead.

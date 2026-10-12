@@ -323,3 +323,31 @@ func TestPrefixWriterSplitsLines(t *testing.T) {
 		t.Fatalf("%q", b.String())
 	}
 }
+
+func TestFleetLaterFailureNotHiddenByEarlierCleanExit(t *testing.T) {
+	ff := newFakeFleet()
+	for _, m := range party {
+		ff.setState(m.RPC, "in_world")
+	}
+	var out, errOut syncBuf
+	code := make(chan int, 1)
+	go func() { code <- runFleet(context.Background(), party, ff.deps(), fastOpts, &out, &errOut) }()
+	waitFor(t, "table", func() bool { return strings.Contains(out.String(), "Dpsthree") })
+	ff.child("127.0.0.1:9001").exit(0)
+	time.Sleep(30 * time.Millisecond)
+	ff.child("127.0.0.1:9002").exit(exitDisconnected)
+	select {
+	case c := <-code:
+		if c != exitFleet {
+			t.Fatalf("exit %d, want %d", c, exitFleet)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fleet kept running after a failure")
+	}
+	if !ff.child("127.0.0.1:9003").stopped {
+		t.Error("remaining child not stopped")
+	}
+	if !strings.Contains(errOut.String(), "Healtwo failed") {
+		t.Errorf("stderr:\n%s", errOut.String())
+	}
+}

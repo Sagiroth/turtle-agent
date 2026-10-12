@@ -75,6 +75,12 @@ func (r *agentRig) expect(op uint16) {
 	}
 }
 
+// wolfName answers the creature query for entry 299 (QueryHandler.cpp:187-200).
+func (r *agentRig) wolfName() {
+	r.srv.Send(opcode.SMSGCreatureQueryResponse, packet.NewWriter().U32(299).CString("Young Wolf").U8(0).U8(0).U8(0).CString("").
+		U32(0).U32(1).U32(1).U32(0).U32(0).U32(0).U32(161).U8(0).U8(0).Bytes())
+}
+
 func (r *agentRig) call(method, params string) map[string]any {
 	r.t.Helper()
 	body := `{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":` + params + `}`
@@ -361,8 +367,7 @@ func TestUnitsAndStatusHealth(t *testing.T) {
 	}
 	r.srv.Send(opcode.SMSGUpdateObject, w.Bytes())
 	r.expect(opcode.CMSGCreatureQuery)
-	r.srv.Send(opcode.SMSGCreatureQueryResponse, packet.NewWriter().U32(299).CString("Young Wolf").U8(0).U8(0).U8(0).CString("").
-		U32(0).U32(1).U32(1).U32(0).U32(0).U32(0).U32(161).U8(0).U8(0).Bytes())
+	r.wolfName()
 	var us []any
 	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		us = r.call("units", `{"name":"wolf","limit":200}`)["result"].([]any)
@@ -386,5 +391,60 @@ func TestUnitsAndStatusHealth(t *testing.T) {
 	st := r.call("status", "{}")["result"].(map[string]any)
 	if st["health"] != float64(700) || st["max_health"] != float64(800) || st["power"] != float64(10) || st["max_power"] != float64(20) {
 		t.Fatalf("status %v", st)
+	}
+}
+
+// TestActionMethodShapes sends the params the Task 29 MCP tools and the MVP script send.
+func TestActionMethodShapes(t *testing.T) {
+	r := newRig(t)
+	const wolf packet.GUID = 0xF13000012B000001
+	w := objtest.Header(1).U8(uint8(objects.BlockCreate2)).PackedGUID(wolf).U8(objects.TypeUnit)
+	objtest.Living(w, 0x20, game.MoveInfo{X: 11, Y: 2, Z: 3}, nil)
+	objtest.Values(w, 192, map[uint16]uint32{objects.UnitHealth: 50, objects.UnitMaxHealth: 50})
+	r.srv.Send(opcode.SMSGUpdateObject, w.Bytes())
+	r.wolfName()
+	var u map[string]any
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		out := r.call("target", `{"name":"Young Wolf"}`)
+		if res, ok := out["result"].(map[string]any); ok {
+			u = res
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("target %v", out)
+		}
+	}
+	if u["guid"] != "0xF13000012B000001" || u["name"] != "Young Wolf" || u["max_health"] != float64(50) {
+		t.Fatalf("%v", u)
+	}
+	if st := r.call("status", "{}")["result"].(map[string]any); st["target"] != u["guid"] {
+		t.Fatalf("status target %v", st["target"])
+	}
+	r.expect(opcode.CMSGSetSelection)
+	for _, c := range []struct{ method, params string }{
+		{"target", `{"guid":"0xF13000012B000001"}`},
+		{"attack", `{}`},
+		{"stop_attack", `{}`},
+		{"cast", `{"spell_id":133}`},
+		{"cast", `{"spell_id":133,"target":"0xF13000012B000001"}`},
+		{"face", `{"guid":"0xF13000012B000001"}`},
+		{"walk_to", `{"x":1,"y":2,"z":3}`},
+	} {
+		if out := r.call(c.method, c.params); out["error"] != nil {
+			t.Fatalf("%s %s: %v", c.method, c.params, out["error"])
+		}
+	}
+	if out := r.call("target", `{}`); out["error"] == nil {
+		t.Fatal("target without guid or name")
+	}
+	tp := make(chan map[string]any, 1)
+	go func() { tp <- r.call("teleport", `{"x":1,"y":2,"z":3,"map":0}`) }()
+	p, err := r.srv.Expect(opcode.CMSGMessagechat, 2*time.Second)
+	if err != nil || !strings.Contains(string(p.Body), ".go xyz 1.00 2.00 3.00 0") {
+		t.Fatalf("% X %v", p.Body, err)
+	}
+	r.srv.Send(opcode.SMSGNewWorld, packet.NewWriter().U32(0).F32(1).F32(2).F32(3).F32(0).Bytes())
+	if out := <-tp; out["error"] != nil {
+		t.Fatalf("teleport %v", out["error"])
 	}
 }

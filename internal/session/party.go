@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/pjerra/turtle-agent/internal/events"
@@ -78,8 +77,8 @@ func (s *Session) Invite(ctx context.Context, name string) error {
 
 func (s *Session) AcceptInvite(ctx context.Context) error {
 	_, err := s.do(ctx, func() (any, error) {
-		if st := s.State(); st != StatusInWorld {
-			return nil, fmt.Errorf("%w (state %s)", ErrNotInWorld, st)
+		if err := s.inWorld(); err != nil {
+			return nil, err
 		}
 		s.mu.Lock()
 		pending := s.party.PendingInvite
@@ -101,8 +100,8 @@ func (s *Session) AcceptInvite(ctx context.Context) error {
 // LeaveGroup sends CMSG_GROUP_DISBAND, which removes the player from the group (GroupHandler.cpp:354-370).
 func (s *Session) LeaveGroup(ctx context.Context) error {
 	_, err := s.do(ctx, func() (any, error) {
-		if st := s.State(); st != StatusInWorld {
-			return nil, fmt.Errorf("%w (state %s)", ErrNotInWorld, st)
+		if err := s.inWorld(); err != nil {
+			return nil, err
 		}
 		if !s.Party().InGroup {
 			return nil, errors.New("not in a group")

@@ -88,6 +88,7 @@ type StatusInfo struct {
 	Y           float32        `json:"y"`
 	Z           float32        `json:"z"`
 	O           float32        `json:"o"`
+	Target      packet.GUID    `json:"target,omitempty"`
 	Health      uint32         `json:"health"`
 	MaxHealth   uint32         `json:"max_health"`
 	Power       uint32         `json:"power"`
@@ -145,18 +146,23 @@ type Session struct {
 	parseErrs int
 	lastErr   string
 	party     PartyInfo
+	target    packet.GUID
 
 	// owner-loop only
-	finished       bool
-	nextPing       time.Time
-	pingSent       time.Time
-	pingSeq        uint32
-	pongWait       bool
-	logout         *logoutOp
-	logoutDeadline time.Time
-	loginRetries   int
-	loginRetryAt   time.Time
-	names          *nameCache
+	finished        bool
+	nextPing        time.Time
+	pingSent        time.Time
+	pingSeq         uint32
+	pongWait        bool
+	logout          *logoutOp
+	logoutDeadline  time.Time
+	loginRetries    int
+	loginRetryAt    time.Time
+	names           *nameCache
+	walk            *walkState
+	runSpeed        float32
+	rooted          bool
+	teleportWaiters []chan struct{}
 }
 
 func New(conn *worldconn.Conn, opts Options) *Session {
@@ -188,7 +194,7 @@ func New(conn *worldconn.Conn, opts Options) *Session {
 		conn: conn, opts: opts, log: opts.Log, logger: opts.Logger,
 		handlers: map[uint16]handler{}, reqs: make(chan request), done: make(chan struct{}),
 		ready: make(chan struct{}), start: time.Now(), state: StatusConnecting, unknown: map[uint16]int{},
-		names: newNameCache(), store: opts.Store,
+		names: newNameCache(), store: opts.Store, runSpeed: defaultRunSpeed,
 	}
 	s.register()
 	return s
@@ -200,6 +206,7 @@ func (s *Session) register() {
 	s.registerChat()
 	s.registerParty()
 	s.registerWorld()
+	s.registerActions()
 }
 
 func (s *Session) registerCore() {
@@ -245,7 +252,7 @@ func (s *Session) Status() StatusInfo {
 	}
 	info := StatusInfo{
 		State: s.state, Character: s.self.Name, GUID: s.self.GUID, Level: s.self.Level, Map: s.mapID,
-		X: s.pos[0], Y: s.pos[1], Z: s.pos[2], O: s.pos[3], LatencyMS: s.latency,
+		X: s.pos[0], Y: s.pos[1], Z: s.pos[2], O: s.pos[3], Target: s.target, LatencyMS: s.latency,
 		Unknown: unknown, ParseErrors: s.parseErrs, LastSeq: s.log.Last(), Error: s.lastErr,
 	}
 	// The player's own values from the store (zero until its create block arrives).
@@ -339,8 +346,8 @@ func (s *Session) do(ctx context.Context, fn func() (any, error)) (any, error) {
 // send writes one packet from the owner goroutine once the character is in world.
 func (s *Session) send(ctx context.Context, op uint16, body []byte) error {
 	_, err := s.do(ctx, func() (any, error) {
-		if st := s.State(); st != StatusInWorld {
-			return nil, fmt.Errorf("%w (state %s)", ErrNotInWorld, st)
+		if err := s.inWorld(); err != nil {
+			return nil, err
 		}
 		return nil, s.conn.WritePacket(op, body)
 	})
@@ -395,6 +402,9 @@ func (s *Session) dispatch(p worldconn.Packet) error {
 
 func (s *Session) onTick(now time.Time) error {
 	s.flushNames(now)
+	if err := s.tickWalk(now); err != nil {
+		return err
+	}
 	if !s.loginRetryAt.IsZero() && !now.Before(s.loginRetryAt) {
 		s.loginRetryAt = time.Time{}
 		if err := s.sendPlayerLogin(); err != nil {
@@ -542,8 +552,8 @@ func (s *Session) Logout(ctx context.Context) error {
 		if s.logout != nil {
 			return s.logout, nil
 		}
-		if st := s.State(); st != StatusInWorld {
-			return nil, fmt.Errorf("%w (state %s)", ErrNotInWorld, st)
+		if err := s.inWorld(); err != nil {
+			return nil, err
 		}
 		if err := s.conn.WritePacket(opcode.CMSGLogoutRequest, nil); err != nil {
 			return nil, err

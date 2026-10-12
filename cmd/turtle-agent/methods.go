@@ -7,6 +7,7 @@ import (
 
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/objects"
+	"github.com/pjerra/turtle-agent/internal/packet"
 	"github.com/pjerra/turtle-agent/internal/rpc"
 	"github.com/pjerra/turtle-agent/internal/session"
 )
@@ -47,6 +48,27 @@ type unitsParams struct {
 	Hostile *bool   `json:"hostile,omitempty"`
 	Name    string  `json:"name,omitempty"`
 	Limit   int     `json:"limit,omitempty"`
+}
+
+type targetParams struct {
+	GUID packet.GUID `json:"guid,omitempty"`
+	Name string      `json:"name,omitempty"`
+}
+
+type castParams struct {
+	SpellID uint32      `json:"spell_id"`
+	Target  packet.GUID `json:"target,omitempty"`
+}
+
+type guidParams struct {
+	GUID packet.GUID `json:"guid"`
+}
+
+type pointParams struct {
+	X   float32 `json:"x"`
+	Y   float32 `json:"y"`
+	Z   float32 `json:"z"`
+	Map *int    `json:"map,omitempty"`
 }
 
 // registerMethods wires the spec's JSON-RPC methods (v1) to the session; later
@@ -90,6 +112,26 @@ func registerMethods(srv *rpc.Server, s *session.Session) {
 			us = []objects.Unit{}
 		}
 		return us, nil
+	}))
+	srv.Register("target", rpc.Typed(func(ctx context.Context, p targetParams) (objects.Unit, error) {
+		u, err := s.Target(ctx, p.GUID, p.Name)
+		return u, rpcErr(err)
+	}))
+	srv.Register("attack", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) { return empty{}, rpcErr(s.Attack(ctx)) }))
+	srv.Register("stop_attack", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) { return empty{}, rpcErr(s.StopAttack(ctx)) }))
+	srv.Register("cast", rpc.Typed(func(ctx context.Context, p castParams) (empty, error) {
+		return empty{}, rpcErr(s.Cast(ctx, p.SpellID, p.Target))
+	}))
+	srv.Register("face", rpc.Typed(func(ctx context.Context, p guidParams) (empty, error) { return empty{}, rpcErr(s.Face(ctx, p.GUID)) }))
+	srv.Register("walk_to", rpc.Typed(func(ctx context.Context, p pointParams) (empty, error) {
+		return empty{}, rpcErr(s.WalkTo(ctx, p.X, p.Y, p.Z))
+	}))
+	srv.Register("teleport", rpc.Typed(func(ctx context.Context, p pointParams) (empty, error) {
+		m := -1
+		if p.Map != nil {
+			m = *p.Map
+		}
+		return empty{}, rpcErr(s.Teleport(ctx, p.X, p.Y, p.Z, m))
 	}))
 }
 

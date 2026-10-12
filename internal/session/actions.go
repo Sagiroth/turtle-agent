@@ -124,23 +124,11 @@ func (s *Session) syncWalk(now time.Time) {
 // living match; a corpse (the last run's kill) only when no living one is in view, and the
 // returned unit then says dead. A guid selects exactly that unit, dead or alive.
 func (s *Session) Target(ctx context.Context, g packet.GUID, name string) (objects.Unit, error) {
-	if g == 0 {
-		if name == "" {
-			return objects.Unit{}, errors.New("target needs a guid or a name")
-		}
-		us := s.Units(objects.Filter{Name: name, Limit: math.MaxInt})
-		if len(us) == 0 {
-			return objects.Unit{}, fmt.Errorf("no unit named %q nearby", name)
-		}
-		g = us[0].GUID
-		for _, u := range us {
-			if !u.Dead {
-				g = u.GUID
-				break
-			}
-		}
+	g, err := s.pickUnit("target", g, name)
+	if err != nil {
+		return objects.Unit{}, err
 	}
-	_, err := s.do(ctx, func() (any, error) {
+	_, err = s.do(ctx, func() (any, error) {
 		if err := s.inWorld(); err != nil {
 			return nil, err
 		}
@@ -161,6 +149,27 @@ func (s *Session) Target(ctx context.Context, g packet.GUID, name string) (objec
 	u.Name, _ = s.cachedName(g)
 	u.InParty = s.inParty(g)
 	return u, nil
+}
+
+// pickUnit returns g, or for a name the nearest living unit whose name contains it, or
+// the nearest such corpse when none lives. verb names the caller in errors.
+func (s *Session) pickUnit(verb string, g packet.GUID, name string) (packet.GUID, error) {
+	if g != 0 {
+		return g, nil
+	}
+	if name == "" {
+		return 0, fmt.Errorf("%s needs a guid or a name", verb)
+	}
+	us := s.Units(objects.Filter{Name: name, Limit: math.MaxInt})
+	if len(us) == 0 {
+		return 0, fmt.Errorf("no unit named %q nearby", name)
+	}
+	for _, u := range us {
+		if !u.Dead {
+			return u.GUID, nil
+		}
+	}
+	return us[0].GUID, nil
 }
 
 func (s *Session) Attack(ctx context.Context) error {

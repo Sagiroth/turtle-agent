@@ -454,3 +454,124 @@ func TestActionMethodShapes(t *testing.T) {
 		t.Fatalf("teleport %v", out["error"])
 	}
 }
+
+// eventually polls call until ok accepts its result.
+func (r *agentRig) eventually(method, params string, ok func(map[string]any) bool) map[string]any {
+	r.t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		out := r.call(method, params)
+		if ok(out) {
+			return out
+		}
+		if time.Now().After(deadline) {
+			r.t.Fatalf("%s %s: %v", method, params, out)
+		}
+	}
+}
+
+func TestMarkMethod(t *testing.T) {
+	r := newRig(t)
+	const wolf packet.GUID = 0xF13000012B000001
+	if out := r.call("mark", `{"guid":"0xF13000012B000001","icon":"skull"}`); errCode(out) != rpc.CodeGame {
+		t.Fatalf("mark outside a group: %v", out)
+	}
+	r.srv.Send(opcode.SMSGGroupList, gametest.GroupList(0x2A, game.GroupMember{Name: "Gorm", GUID: 0x30, Status: game.MemberOnline}))
+	r.expect(opcode.CMSGRequestPartyMemberStats)
+	if out := r.call("mark", `{"guid":"0xF13000012B000001","icon":"bone"}`); errCode(out) != rpc.CodeGame {
+		t.Fatalf("bad icon: %v", out)
+	}
+	res := make(chan map[string]any, 1)
+	go func() { res <- r.call("mark", `{"guid":"0xF13000012B000001","icon":"skull"}`) }()
+	p, err := r.srv.Expect(opcode.MSGRaidTargetUpdate, 2*time.Second)
+	if err != nil || !bytes.Equal(p.Body, game.BuildRaidTargetUpdate(7, wolf)) {
+		t.Fatalf("% X %v", p.Body, err)
+	}
+	r.srv.Send(opcode.MSGRaidTargetUpdate, gametest.RaidTargetDelta(7, wolf))
+	r.expect(opcode.CMSGCreatureQuery) // the event waits for the wolf's name
+	r.wolfName()
+	if out := <-res; out["error"] != nil || out["result"].(map[string]any)["icon"] != "skull" || out["result"].(map[string]any)["guid"] != "0xF13000012B000001" {
+		t.Fatalf("%v", out)
+	}
+	if m := r.call("party", "{}")["result"].(map[string]any)["marks"].(map[string]any); m["skull"] != "0xF13000012B000001" {
+		t.Fatalf("party marks %v", m)
+	}
+	out := r.eventually("events", `{"since":0,"kinds":["raid_mark"]}`, func(m map[string]any) bool {
+		return len(m["result"].(map[string]any)["events"].([]any)) == 1
+	})
+	e := out["result"].(map[string]any)["events"].([]any)[0].(map[string]any)
+	if d := e["data"].(map[string]any); d["action"] != "set" || d["icon"] != "skull" || e["target"] != "Young Wolf" || e["target_guid"] != "0xF13000012B000001" {
+		t.Fatalf("%v", e)
+	}
+}
+
+func TestRollMethod(t *testing.T) {
+	r := newRig(t)
+	const wolf packet.GUID = 0xF13000012B000001
+	r.srv.Send(opcode.SMSGGroupList, gametest.GroupList(0x2A, game.GroupMember{Name: "Gorm", GUID: 0x30, Status: game.MemberOnline}))
+	r.expect(opcode.CMSGRequestPartyMemberStats)
+	r.srv.Send(opcode.SMSGLootStartRoll, gametest.LootStartRoll(wolf, 2, 2589, 0, 60000))
+	r.expect(opcode.CMSGCreatureQuery)
+	r.wolfName()
+	out := r.eventually("events", `{"since":0,"kinds":["loot_roll_start"]}`, func(m map[string]any) bool {
+		return len(m["result"].(map[string]any)["events"].([]any)) == 1
+	})
+	d := out["result"].(map[string]any)["events"].([]any)[0].(map[string]any)["data"].(map[string]any)
+	if d["roll_id"] != float64(1) || d["item_slot"] != float64(2) || d["item_entry"] != float64(2589) || d["looted"] != "0xF13000012B000001" {
+		t.Fatalf("start %v", d)
+	}
+	if out := r.call("roll", `{"item_slot":2,"choice":"disenchant"}`); errCode(out) != rpc.CodeGame {
+		t.Fatalf("bad choice %v", out)
+	}
+	res := r.call("roll", `{"item_slot":2,"choice":"greed"}`)
+	if out := res["result"].(map[string]any); out["roll_id"] != float64(1) || out["choice"] != "greed" || out["item_entry"] != float64(2589) {
+		t.Fatalf("%v", res)
+	}
+	if p, err := r.srv.Expect(opcode.CMSGLootRoll, 2*time.Second); err != nil || !bytes.Equal(p.Body, game.BuildLootRoll(wolf, 2, game.RollGreed)) {
+		t.Fatalf("% X %v", p.Body, err)
+	}
+	if out := r.call("roll", `{"roll_id":1,"looted":"0xF13000012B000001","choice":"pass"}`); out["error"] != nil {
+		t.Fatalf("%v", out)
+	}
+	r.expect(opcode.CMSGLootRoll)
+	r.srv.Send(opcode.SMSGLootRoll, gametest.LootRoll(wolf, 2, 0x30, 2589, 0, 0, 0))
+	out = r.eventually("events", `{"since":0,"kinds":["loot_roll"]}`, func(m map[string]any) bool {
+		return len(m["result"].(map[string]any)["events"].([]any)) == 1
+	})
+	e := out["result"].(map[string]any)["events"].([]any)[0].(map[string]any)
+	if e["source"] != "Gorm" || e["party"] != true || e["data"].(map[string]any)["choice"] != "need" {
+		t.Fatalf("%v", e)
+	}
+}
+
+func TestInventoryAndEquipMethods(t *testing.T) {
+	r := newRig(t)
+	if out := r.call("inventory", "{}"); out["error"] != nil || len(out["result"].([]any)) != 0 {
+		t.Fatalf("empty: %v", out)
+	}
+	const sword packet.GUID = 0x4000000000000003
+	w := objtest.Header(2).U8(uint8(objects.BlockCreate2)).PackedGUID(sword).U8(objects.TypeItem).U8(0x10).U32(1)
+	objtest.Values(w, 0x30, map[uint16]uint32{objects.FieldEntry: 2589, objects.ItemStackCount: 1})
+	w.U8(uint8(objects.BlockCreate2)).PackedGUID(0x2A).U8(objects.TypePlayer)
+	objtest.Living(w, 0x21, game.MoveInfo{X: 1, Y: 2, Z: 3}, nil)
+	objtest.Values(w, 0x502, map[uint16]uint32{objects.PlayerInvSlotHead + 46: uint32(sword & 0xFFFFFFFF), objects.PlayerInvSlotHead + 47: uint32(sword >> 32)})
+	r.srv.Send(opcode.SMSGUpdateObject, w.Bytes())
+	out := r.eventually("inventory", "{}", func(m map[string]any) bool { return len(m["result"].([]any)) == 1 })
+	it := out["result"].([]any)[0].(map[string]any)
+	if it["bag"] != float64(255) || it["slot"] != float64(23) || it["guid"] != "0x4000000000000003" || it["item_entry"] != float64(2589) || it["count"] != float64(1) {
+		t.Fatalf("%v", it)
+	}
+	for _, params := range []string{`{"item_entry":2589}`, `{"bag":255,"slot":23}`, `{"slot":23}`} {
+		out := r.call("equip", params)
+		if res, ok := out["result"].(map[string]any); !ok || res["item_entry"] != float64(2589) {
+			t.Fatalf("equip %s: %v", params, out)
+		}
+		if p, err := r.srv.Expect(opcode.CMSGAutoequipItem, 2*time.Second); err != nil || !bytes.Equal(p.Body, []byte{255, 23}) {
+			t.Fatalf("equip %s: % X %v", params, p.Body, err)
+		}
+	}
+	for _, params := range []string{`{}`, `{"item_entry":1}`, `{"bag":255}`, `{"slot":24}`, `{"bag":19,"slot":0}`} {
+		if out := r.call("equip", params); errCode(out) != rpc.CodeGame {
+			t.Fatalf("equip %s: %v", params, out)
+		}
+	}
+}

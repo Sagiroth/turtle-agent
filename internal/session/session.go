@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/pjerra/turtle-agent/internal/events"
+	"github.com/pjerra/turtle-agent/internal/game"
 	"github.com/pjerra/turtle-agent/internal/objects"
 	"github.com/pjerra/turtle-agent/internal/opcode"
 	"github.com/pjerra/turtle-agent/internal/packet"
@@ -71,7 +72,9 @@ type Options struct {
 	// NamesWait bounds how long an event waits for a source or target name before it is
 	// logged with the names known so far; 0: 2 s.
 	NamesWait time.Duration
-	Store     *objects.Store // nil: a new store
+	// MarkWait bounds how long mark waits for the server's MSG_RAID_TARGET_UPDATE echo; 0: 2 s.
+	MarkWait time.Duration
+	Store    *objects.Store // nil: a new store
 	// Redact lists account names the server may echo back, as in a .pinfo reply, and
 	// RedactAnywhere passwords. They are replaced with "<redacted>" in event text, names
 	// and string data (ASCII case-insensitive; account names on whole words only, so a
@@ -154,6 +157,7 @@ type Session struct {
 	parseErrs int
 	lastErr   string
 	party     PartyInfo
+	marks     [game.RaidIconCount]packet.GUID // the group's raid icons
 	target    packet.GUID
 
 	// owner-loop only
@@ -172,6 +176,9 @@ type Session struct {
 	rooted          bool
 	splineUntil     time.Time // a server spline moves the player until then
 	teleportWaiters []chan struct{}
+	markWaiters     []markWaiter
+	rolls           map[rollKey]*openRoll
+	lastRollID      uint64
 }
 
 func New(conn *worldconn.Conn, opts Options) *Session {
@@ -196,6 +203,9 @@ func New(conn *worldconn.Conn, opts Options) *Session {
 	if opts.NamesWait == 0 {
 		opts.NamesWait = 2 * time.Second
 	}
+	if opts.MarkWait == 0 {
+		opts.MarkWait = 2 * time.Second
+	}
 	if opts.Store == nil {
 		opts.Store = objects.NewStore()
 	}
@@ -203,7 +213,7 @@ func New(conn *worldconn.Conn, opts Options) *Session {
 		conn: conn, opts: opts, log: opts.Log, logger: opts.Logger,
 		handlers: map[uint16]handler{}, reqs: make(chan request), done: make(chan struct{}),
 		ready: make(chan struct{}), start: time.Now(), state: StatusConnecting, unknown: map[uint16]int{},
-		names: newNameCache(), store: opts.Store, runSpeed: defaultRunSpeed, redact: newRedactor(opts.Redact, opts.RedactAnywhere),
+		names: newNameCache(), store: opts.Store, rolls: map[rollKey]*openRoll{}, runSpeed: defaultRunSpeed, redact: newRedactor(opts.Redact, opts.RedactAnywhere),
 	}
 	s.register()
 	return s
@@ -217,6 +227,9 @@ func (s *Session) register() {
 	s.registerWorld()
 	s.registerActions()
 	s.registerCombat()
+	s.registerRaid()
+	s.registerLoot()
+	s.registerItems()
 }
 
 func (s *Session) registerCore() {

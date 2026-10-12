@@ -78,6 +78,25 @@ type pointParams struct {
 	Map *int    `json:"map,omitempty"`
 }
 
+type markParams struct {
+	GUID packet.GUID `json:"guid,omitempty"`
+	Name string      `json:"name,omitempty"`
+	Icon string      `json:"icon"` // skull, cross, square, moon, triangle, diamond, circle, star or clear
+}
+
+type rollParams struct {
+	RollID   uint64      `json:"roll_id,omitempty"`
+	ItemSlot *uint32     `json:"item_slot,omitempty"`
+	Looted   packet.GUID `json:"looted,omitempty"`
+	Choice   string      `json:"choice"` // need, greed or pass
+}
+
+type equipParams struct {
+	ItemEntry uint32 `json:"item_entry,omitempty"`
+	Bag       *uint8 `json:"bag,omitempty"`
+	Slot      *uint8 `json:"slot,omitempty"`
+}
+
 // registerMethods wires the spec's JSON-RPC methods (v1) to the session; later
 // milestones add their methods at the end of this function.
 func registerMethods(srv *rpc.Server, s *session.Session) {
@@ -139,6 +158,25 @@ func registerMethods(srv *rpc.Server, s *session.Session) {
 			m = *p.Map
 		}
 		return empty{}, rpcErr(s.Teleport(ctx, p.X, p.Y, p.Z, m))
+	}))
+	srv.Register("mark", rpc.Typed(func(ctx context.Context, p markParams) (session.MarkResult, error) {
+		res, err := s.Mark(ctx, p.GUID, p.Name, p.Icon)
+		return res, rpcErr(err)
+	}))
+	srv.Register("roll", rpc.Typed(func(ctx context.Context, p rollParams) (session.RollInfo, error) {
+		res, err := s.Roll(ctx, session.RollRef{ID: p.RollID, Slot: p.ItemSlot, Looted: p.Looted}, p.Choice)
+		return res, rpcErr(err)
+	}))
+	srv.Register("inventory", rpc.Typed(func(ctx context.Context, _ empty) ([]objects.Item, error) {
+		inv := s.Inventory()
+		if inv == nil {
+			inv = []objects.Item{}
+		}
+		return inv, nil
+	}))
+	srv.Register("equip", rpc.Typed(func(ctx context.Context, p equipParams) (objects.Item, error) {
+		it, err := s.Equip(ctx, session.EquipRef{Entry: p.ItemEntry, Bag: p.Bag, Slot: p.Slot})
+		return it, rpcErr(err)
 	}))
 }
 

@@ -185,16 +185,24 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	go func() { runErr <- s.Run(context.Background()) }()
 	select {
 	case <-s.Ready():
-		info := s.Status()
-		fmt.Fprintf(stderr, "in world: %s guid=%s map=%d x=%.1f y=%.1f z=%.1f\n", info.Character, info.GUID, info.Map, info.X, info.Y, info.Z)
 	case err := <-runErr:
-		// Ready never closes when login fails; Run's result says why.
-		return sessionExit(s, err, stderr)
+		select {
+		case <-s.Ready():
+			// In world, then dropped before this select ran (it picks at random between
+			// ready cases). Run sends once and runErr is buffered, so the result goes back
+			// for the loop below, which gives the disconnect its grace window.
+			runErr <- err
+		default:
+			// Ready never closes when login fails; Run's result says why.
+			return sessionExit(s, err, stderr)
+		}
 	case <-ctx.Done():
 		conn.Close()
 		<-runErr
 		return exitWorld
 	}
+	info := s.Status()
+	fmt.Fprintf(stderr, "in world: %s guid=%s map=%d x=%.1f y=%.1f z=%.1f\n", info.Character, info.GUID, info.Map, info.X, info.Y, info.Z)
 
 	srv := rpc.NewServer()
 	registerMethods(srv, s)

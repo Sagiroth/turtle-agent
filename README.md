@@ -5,13 +5,14 @@
 A headless World of Warcraft client for **vanilla 1.12 / Turtle WoW 1.18.1** servers (login build 7272, world build 5875).
 One process logs one character in, with no game window, and exposes it over a local JSON-RPC API. Use it to drive a
 test character from scripts or AI agents: chat and GM commands, party, units around you, target, attack, cast, short
-walks and GM teleports, and an ordered event log of chat and combat.
+walks and GM teleports, raid icons, group loot rolls, equipping from the backpack, and an ordered event log of chat,
+combat, marks and rolls.
 
 It was built to test server-side bots ([TortoiseBots](https://github.com/Sagiroth/TortoiseBots)) on a private test
 server: log in, hire or invite bots, start a fight, then read back the combat log and what each bot did.
 
 > Use it only on servers you run or are allowed to test on. It has no Warden emulation and does no rendering,
-> pathfinding or inventory management.
+> pathfinding or inventory management beyond listing the backpack and equipping from it.
 
 ## Quick start
 
@@ -87,7 +88,7 @@ browser (`Origin` header) and other `Host` names are refused.
 | `events` | `since`, `kinds`, `limit`, `wait_ms` | page: `events`, `next`, `more`, `dropped` |
 | `chat_log` | `since`, `limit` | chat and system events only |
 | `invite` / `accept_invite` / `leave_group` | `name` / – / – | |
-| `party` | | `in_group`, `leader`, `members[]` with health and online state |
+| `party` | | `in_group`, `leader`, `members[]` with health and online state, `marks` (raid icon name to guid) |
 | `units` | `limit`, `name` | nearby units, nearest first: guid, name, level, health, dead, hostile, in_party; `hostile` means an attackable-looking creature (no NPC flags, not player-controlled), not a faction check: it counts neutral critters and never an enemy-faction player |
 | `target` | `guid` or `name` (prefers living units) | |
 | `attack` / `stop_attack` | | |
@@ -95,11 +96,16 @@ browser (`Origin` header) and other `Host` names are refused.
 | `face` | `guid` | |
 | `walk_to` | `x`, `y`, `z` (short, straight-line walks: Z is interpolated and terrain is ignored, so keep walks short and on flat ground; after a `teleport` to a Z above the ground the character does not fall) | |
 | `teleport` | `x`, `y`, `z`, `map` (a GM `.go xyz`; needs a GM account) | |
+| `mark` | `guid` or `name`, `icon` (skull, cross, square, moon, triangle, diamond, circle, star, clear) | `icon`, `guid` once the server echoes the mark. Errors at once outside a group or when the player is neither leader nor assistant; errors after 2 s without an echo |
+| `roll` | `roll_id` or `item_slot` (plus `looted` when two corpses share a slot), `choice` (need, greed, pass) | `roll_id`, `looted`, `item_slot`, `item_entry`, `choice` |
+| `inventory` | | backpack items (bag 255, slots 23-38): `bag`, `slot`, `guid`, `item_entry`, `count`; `item_entry` and `count` are 0 until the item's create block arrives |
+| `equip` | `item_entry`, or `slot` (and `bag`: 255 for the backpack, the default, or 19-22 for a bag) | the item sent; an empty slot is an error; a refusal arrives as an `inventory_error` event |
 | `logout` | | |
 
 Events have `seq`, `time`, `kind`, `source`, `target`, `spell_id`, `amount`, `crit`, `text`, `party` and `data`.
 Kinds cover chat, system, whispers, melee, spell damage, periodic ticks, heals, energize, spell start/go/miss/fail,
-auras, deaths, kills, party changes and session state. Cursors are exclusive; `dropped` says older events were evicted.
+auras, deaths, kills, party changes, raid icons (`raid_mark`), group loot rolls (`loot_roll_start`, `loot_roll`, `loot_roll_won`,
+`loot_all_passed`, tied together by `data.roll_id`), refused equips (`inventory_error`) and session state. Cursors are exclusive; `dropped` says older events were evicted.
 
 Text the server echoes back (for example the account name in a GM reply) is redacted before it reaches events, logs
 or replies.
@@ -146,9 +152,9 @@ with the same calls as its real-client backend (`chat`, `gm`, `state`, `tail_cha
 | --- | --- |
 | `internal/auth` | SRP6 and realmd: logon challenge/proof, realm list |
 | `internal/worldconn` | TCP framing, the 1.12 header cipher, auth session with the addon block |
-| `internal/session` | single-owner session loop: login, ping, chat, names, party, world, actions, combat, logout |
-| `internal/game` | packet codecs for chat, queries, groups, actions and the combat log |
-| `internal/objects` | update-object parser and the object store |
+| `internal/session` | single-owner session loop: login, ping, chat, names, party, world, actions, combat, raid icons, loot rolls, inventory and equip, logout |
+| `internal/game` | packet codecs for chat, queries, groups, actions, the combat log, raid icons, loot rolls and items |
+| `internal/objects` | update-object parser and the object store: units, and the items in the backpack and bags |
 | `internal/events` | ordered event log with cursors |
 | `internal/capture` | packet capture files and the secret scan |
 | `internal/rpc`, `internal/netutil` | loopback JSON-RPC server |

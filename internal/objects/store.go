@@ -301,3 +301,66 @@ func toUnit(o *object, ox, oy, oz float32) Unit {
 	u.Distance = float32(math.Sqrt(dx*dx + dy*dy + dz*dz))
 	return u
 }
+
+// Item is an item the player carries, at bag/slot as CMSG_AUTOEQUIP_ITEM addresses it.
+type Item struct {
+	Bag   uint8       `json:"bag"`
+	Slot  uint8       `json:"slot"`
+	GUID  packet.GUID `json:"guid"`
+	Entry uint32      `json:"item_entry"` // 0, like Count, until the item's create block arrives
+	Count uint32      `json:"count"`
+}
+
+// Backpack lists the items in player's backpack, in slot order, from the player's own
+// inventory fields and each item's create block (Player::BuildCreateUpdateBlockForPlayer
+// sends the items to their owner, Player.cpp:5224-5254).
+func (s *Store) Backpack(player packet.GUID) []Item {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.objs[player]
+	if !ok {
+		return nil
+	}
+	var out []Item
+	for slot := BackpackFirst; slot < BackpackEnd; slot++ {
+		if it, ok := s.item(BackpackBag, slot, guidAt(p.values, PlayerInvSlotHead+2*uint16(slot))); ok {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// ItemAt is the item at bag/slot as CMSG_AUTOEQUIP_ITEM addresses it: bag 255 with an
+// inventory slot up to the backpack's last (38), or a bag slot 19-22 with a slot inside
+// that bag (its CONTAINER_FIELD_SLOT_1 fields). ok is false for an empty or unknown slot.
+func (s *Store) ItemAt(player packet.GUID, bag, slot uint8) (Item, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.objs[player]
+	if !ok {
+		return Item{}, false
+	}
+	switch {
+	case bag == BackpackBag && slot < BackpackEnd:
+		return s.item(bag, slot, guidAt(p.values, PlayerInvSlotHead+2*uint16(slot)))
+	case bag >= BagFirst && bag < BagEnd:
+		c, ok := s.objs[guidAt(p.values, PlayerInvSlotHead+2*uint16(bag))]
+		if !ok || uint32(slot) >= c.values[ContainerNumSlots] {
+			return Item{}, false
+		}
+		return s.item(bag, slot, guidAt(c.values, ContainerSlot1+2*uint16(slot)))
+	}
+	return Item{}, false
+}
+
+// item describes the item g at bag/slot; the caller holds s.mu.
+func (s *Store) item(bag, slot uint8, g packet.GUID) (Item, bool) {
+	if g == 0 {
+		return Item{}, false
+	}
+	it := Item{Bag: bag, Slot: slot, GUID: g}
+	if o, ok := s.objs[g]; ok {
+		it.Entry, it.Count = o.values[FieldEntry], o.values[ItemStackCount]
+	}
+	return it, true
+}

@@ -6,6 +6,7 @@ import (
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/game"
 	"github.com/pjerra/turtle-agent/internal/opcode"
+	"github.com/pjerra/turtle-agent/internal/packet"
 )
 
 func (s *Session) registerCombat() {
@@ -21,6 +22,8 @@ func (s *Session) registerCombat() {
 	s.handlers[opcode.SMSGSpelllogmiss] = s.onSpellLogMiss
 	s.handlers[opcode.SMSGProcresist] = s.onProcResist
 	s.handlers[opcode.SMSGPartykilllog] = s.onKill
+	s.handlers[opcode.SMSGSpellDelayed] = s.onSpellDelayed
+	s.handlers[opcode.SMSGUpdateAuraDuration] = s.onAuraDuration
 }
 
 func (s *Session) onMelee(body []byte) error {
@@ -91,6 +94,7 @@ func (s *Session) onSpellStart(body []byte) error {
 	if err != nil {
 		return err
 	}
+	s.store.StartCast(st.Caster, st.SpellID, st.CastTime)
 	s.emit(events.Event{Kind: events.KindSpellStart, SourceGUID: st.Caster, TargetGUID: st.Targets.Unit, SpellID: st.SpellID,
 		Data: map[string]any{"cast_ms": st.CastTime}})
 	return nil
@@ -101,6 +105,7 @@ func (s *Session) onSpellGo(body []byte) error {
 	if err != nil {
 		return err
 	}
+	s.store.EndCast(g.Caster, g.SpellID)
 	target := g.Targets.Unit
 	if target == 0 && len(g.Hits) > 0 {
 		target = g.Hits[0]
@@ -115,6 +120,7 @@ func (s *Session) onCastResult(body []byte) error {
 	if err != nil || !c.Failed {
 		return err
 	}
+	s.store.EndCast(s.selfGUID(), c.SpellID)
 	s.emit(events.Event{Kind: events.KindSpellFail, SourceGUID: s.selfGUID(), SpellID: c.SpellID, Data: map[string]any{"reason": c.Reason}})
 	s.noteCastFailed(fmt.Sprintf("SpellCastResult %d", c.Reason))
 	return nil
@@ -125,10 +131,34 @@ func (s *Session) onSpellFailedOther(body []byte) error {
 	if err != nil {
 		return err
 	}
+	s.store.EndCast(c.Caster, c.SpellID)
 	s.emit(events.Event{Kind: events.KindSpellFail, SourceGUID: c.Caster, SpellID: c.SpellID, Data: map[string]any{"reason": "interrupted"}})
 	if c.Caster == s.selfGUID() {
 		s.noteCastFailed("interrupted")
 	}
+	return nil
+}
+
+// onSpellDelayed is pushback on the player's own cast: guid, u32 ms (Spell.cpp:7673-7678).
+func (s *Session) onSpellDelayed(body []byte) error {
+	r := packet.NewReader(body)
+	g, ms := r.GUID(), r.U32()
+	if err := r.Err(); err != nil {
+		return fmt.Errorf("SMSG_SPELL_DELAYED: %w", err)
+	}
+	s.store.DelayCast(g, ms)
+	return nil
+}
+
+// onAuraDuration is the time left on one of the player's own auras: u8 slot, u32 ms, -1
+// for none (SpellAuraHolder::UpdateAuraDuration, SpellAuras.cpp:7576-7588).
+func (s *Session) onAuraDuration(body []byte) error {
+	r := packet.NewReader(body)
+	slot, ms := r.U8(), r.I32()
+	if err := r.Err(); err != nil {
+		return fmt.Errorf("SMSG_UPDATE_AURA_DURATION: %w", err)
+	}
+	s.store.AuraDuration(s.selfGUID(), int(slot), ms)
 	return nil
 }
 

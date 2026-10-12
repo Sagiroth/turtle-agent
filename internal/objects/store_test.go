@@ -25,7 +25,7 @@ func TestApplyCreateValuesAndUnits(t *testing.T) {
 		t.Fatalf("%+v", us)
 	}
 	w := us[1]
-	if w.Entry != 299 || w.Type != "creature" || !w.Hostile || w.Dead || len(w.Auras) != 1 || w.Auras[0] != 589 {
+	if w.Entry != 299 || w.Type != "creature" || !w.Hostile || w.Dead || len(w.Auras) != 1 || w.Auras[0].SpellID != 589 || w.Auras[0].Slot != 33 || !w.Auras[0].Harmful || w.Auras[0].Stacks != 1 {
 		t.Fatalf("%+v", w)
 	}
 	ch = s.Apply([]Block{{Type: BlockValues, GUID: wolf, Values: map[uint16]uint32{UnitHealth: 0, UnitAura + 33: 0, UnitAura + 2: 1243, UnitFlags: UnitFlagInCombat}}})

@@ -166,6 +166,10 @@ func registerMethodsFor(srv *rpc.Server, cur func() *session.Session) {
 		}
 		return us, nil
 	}))
+	srv.Register("unit", rpc.Typed(func(ctx context.Context, p targetParams) (objects.Unit, error) {
+		u, err := cur().Unit(p.GUID, p.Name)
+		return u, rpcErr(err)
+	}))
 	srv.Register("target", rpc.Typed(func(ctx context.Context, p targetParams) (objects.Unit, error) {
 		u, err := cur().Target(ctx, p.GUID, p.Name)
 		return u, rpcErr(err)

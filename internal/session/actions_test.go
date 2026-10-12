@@ -10,6 +10,7 @@ import (
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/game"
 	"github.com/pjerra/turtle-agent/internal/objects"
+	"github.com/pjerra/turtle-agent/internal/objects/objtest"
 	"github.com/pjerra/turtle-agent/internal/opcode"
 	"github.com/pjerra/turtle-agent/internal/packet"
 )
@@ -180,6 +181,85 @@ func TestRootStopsWalkAndBlocksIt(t *testing.T) {
 	}
 	if err := h.s.WalkTo(ctx, stop.X, me.Y, me.Z); err != nil {
 		t.Fatalf("walk after unroot: %v", err)
+	}
+	h.logout()
+}
+
+// selfCreate is the player's own create block carrying run speed run (Object.cpp:436-441).
+func selfCreate(run float32) []byte {
+	w := objtest.Header(1).U8(uint8(objects.BlockCreate2)).PackedGUID(me.GUID).U8(objects.TypePlayer)
+	w.U8(0x20)
+	game.WriteMoveInfo(w, game.MoveInfo{X: me.X, Y: me.Y, Z: me.Z})
+	w.F32(2.5).F32(run).F32(4.5).F32(4.72).F32(2.5).F32(3.14)
+	objtest.Values(w, 192, map[uint16]uint32{objects.UnitHealth: 100, objects.UnitMaxHealth: 100})
+	return w.Bytes()
+}
+
+// TestWalkStepsKeepToTheSpeedInForce collects every movement packet of a 10-yard walk at
+// the seeded run speed of 10 that the server slows to 3.5 halfway: no step may cover
+// more than the speed in force allows for its client-time gap, and the arrival must fall
+// when the rest of the walk at 3.5 yd/s ends.
+func TestWalkStepsKeepToTheSpeedInForce(t *testing.T) {
+	ctx := context.Background()
+	h := start(t, Options{})
+	h.enterWorld()
+	h.send(opcode.SMSGUpdateObject, selfCreate(10))
+	waitFor(t, func() bool { return h.s.Status().MaxHealth == 100 })
+	walked := make(chan error, 1)
+	go func() { walked <- h.s.WalkTo(ctx, me.X+10, me.Y, me.Z) }()
+	read := func(p []byte) game.MoveInfo { return game.ReadMoveInfo(packet.NewReader(p)) }
+	start := read(h.expect(opcode.MSGMoveStartForward).Body)
+	beat := read(h.expect(opcode.MSGMoveHeartbeat).Body)
+	if v := (beat.X - start.X) / float32(beat.Time-start.Time) * 1000; v < 9 {
+		t.Fatalf("first step at %.2f yd/s, not the seeded 10", v)
+	}
+	h.send(opcode.SMSGForceRunSpeedChange, packet.NewWriter().PackedGUID(me.GUID).U32(4).F32(3.5).Bytes())
+	mark := len(h.srv.Skipped())
+	stopPkt, err := h.srv.Expect(opcode.MSGMoveStop, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-walked; err != nil {
+		t.Fatal(err)
+	}
+	type step struct {
+		mi  game.MoveInfo
+		ack bool
+	}
+	steps := []step{{mi: start}, {mi: beat}}
+	ackAt := -1
+	for _, p := range h.srv.Skipped()[mark:] {
+		switch p.Op {
+		case opcode.MSGMoveHeartbeat:
+			steps = append(steps, step{mi: read(p.Body)})
+		case opcode.CMSGForceRunSpeedChangeAck:
+			r := packet.NewReader(p.Body)
+			r.GUID()
+			r.U32()
+			ackAt = len(steps)
+			steps = append(steps, step{mi: game.ReadMoveInfo(r), ack: true})
+		}
+	}
+	stop := read(stopPkt.Body)
+	steps = append(steps, step{mi: stop})
+	if ackAt < 0 {
+		t.Fatal("no speed ack")
+	}
+	for i := 1; i < len(steps); i++ {
+		a, b := steps[i-1].mi, steps[i].mi
+		speed := float32(10)
+		if i > ackAt {
+			speed = 3.5
+		}
+		dt := float32(b.Time-a.Time) / 1000
+		if d := float32(math.Hypot(float64(b.X-a.X), float64(b.Y-a.Y))); b.Time < a.Time || d > speed*dt+0.5 {
+			t.Fatalf("step %d: %.2f yd in %.3f s at %.1f yd/s (%+v -> %+v)", i, d, dt, speed, a, b)
+		}
+	}
+	ack := steps[ackAt].mi
+	want := ack.Time + uint32((me.X+10-ack.X)/3.5*1000)
+	if stop.X != me.X+10 || stop.Time+20 < want || stop.Time > want+300 {
+		t.Fatalf("arrived at x=%v ctime %d, want x=%v ctime ~%d", stop.X, stop.Time, me.X+10, want)
 	}
 	h.logout()
 }

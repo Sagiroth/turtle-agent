@@ -437,6 +437,9 @@ func TestActionMethodShapes(t *testing.T) {
 	if out := r.call("target", `{}`); out["error"] == nil {
 		t.Fatal("target without guid or name")
 	}
+	if out := r.call("walk_to", `{"x":1,"y":2,"z":3,"map":0}`); out["error"] == nil {
+		t.Fatal("walk_to accepted a map")
+	}
 	tp := make(chan map[string]any, 1)
 	go func() { tp <- r.call("teleport", `{"x":1,"y":2,"z":3,"map":0}`) }()
 	p, err := r.srv.Expect(opcode.CMSGMessagechat, 2*time.Second)

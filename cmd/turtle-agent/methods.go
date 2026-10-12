@@ -64,6 +64,12 @@ type guidParams struct {
 	GUID packet.GUID `json:"guid"`
 }
 
+type walkParams struct {
+	X float32 `json:"x"`
+	Y float32 `json:"y"`
+	Z float32 `json:"z"`
+}
+
 type pointParams struct {
 	X   float32 `json:"x"`
 	Y   float32 `json:"y"`
@@ -123,7 +129,7 @@ func registerMethods(srv *rpc.Server, s *session.Session) {
 		return empty{}, rpcErr(s.Cast(ctx, p.SpellID, p.Target))
 	}))
 	srv.Register("face", rpc.Typed(func(ctx context.Context, p guidParams) (empty, error) { return empty{}, rpcErr(s.Face(ctx, p.GUID)) }))
-	srv.Register("walk_to", rpc.Typed(func(ctx context.Context, p pointParams) (empty, error) {
+	srv.Register("walk_to", rpc.Typed(func(ctx context.Context, p walkParams) (empty, error) {
 		return empty{}, rpcErr(s.WalkTo(ctx, p.X, p.Y, p.Z))
 	}))
 	srv.Register("teleport", rpc.Typed(func(ctx context.Context, p pointParams) (empty, error) {

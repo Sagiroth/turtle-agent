@@ -278,12 +278,15 @@ func (s *Session) WalkTo(ctx context.Context, x, y, z float32) error {
 	}
 }
 
-// tickWalk advances a walk: heartbeat every 500 ms, stop at the destination.
-func (s *Session) tickWalk(now time.Time) error {
+// tickWalk advances a walk: heartbeat every 500 ms, stop at the destination. It reads the
+// clock once, not the tick's send time: a tick read late from a busy loop would place the
+// heartbeat behind the time it carries, and the next step would exceed the run speed.
+func (s *Session) tickWalk() error {
 	w := s.walk
 	if w == nil {
 		return nil
 	}
+	now := time.Now()
 	if !now.Before(w.start.Add(w.dur)) {
 		s.walk = nil
 		s.mu.Lock()
@@ -442,19 +445,40 @@ func (s *Session) speedHandler(op, ack uint16) handler {
 		}
 		now := time.Now()
 		s.syncWalk(now)
-		if op == opcode.SMSGForceRunSpeedChange && c.Speed > 0 {
-			s.runSpeed = c.Speed
-			if w := s.walk; w != nil {
-				w.from = w.at(now)
-				dx, dy, dz := float64(w.to[0]-w.from[0]), float64(w.to[1]-w.from[1]), float64(w.to[2]-w.from[2])
-				w.start, w.dur = now, time.Duration(math.Sqrt(dx*dx+dy*dy+dz*dz)/float64(s.runSpeed)*float64(time.Second))
-			}
+		if op == opcode.SMSGForceRunSpeedChange {
+			s.setRunSpeed(c.Speed, now)
 		}
 		s.mu.Lock()
 		mi := s.moveInfo(s.currentFlags())
 		s.mu.Unlock()
 		speed := c.Speed
 		return s.conn.WritePacket(ack, game.BuildMovementChangeAck(self, c.Counter, mi, &speed))
+	}
+}
+
+// setRunSpeed sets the run speed; a running walk keeps its course from where it has got
+// to and takes the rest at the new speed.
+func (s *Session) setRunSpeed(speed float32, now time.Time) {
+	if speed <= 0 {
+		return
+	}
+	s.runSpeed = speed
+	if w := s.walk; w != nil {
+		w.from = w.at(now)
+		dx, dy, dz := float64(w.to[0]-w.from[0]), float64(w.to[1]-w.from[1]), float64(w.to[2]-w.from[2])
+		w.start, w.dur = now, time.Duration(math.Sqrt(dx*dx+dy*dy+dz*dz)/float64(speed)*float64(time.Second))
+	}
+}
+
+// seedRunSpeed takes the run speed from the player's own create block (Speeds[1],
+// Object.cpp:436-441), so a walk right after login or a far teleport uses the speed the
+// server already has, mounts and auras included.
+func (s *Session) seedRunSpeed(blocks []objects.Block) {
+	self := s.selfGUID()
+	for _, b := range blocks {
+		if (b.Type == objects.BlockCreate || b.Type == objects.BlockCreate2) && b.GUID == self && b.Move != nil && b.Move.Living {
+			s.setRunSpeed(b.Move.Speeds[1], time.Now())
+		}
 	}
 }
 

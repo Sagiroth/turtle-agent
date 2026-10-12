@@ -402,7 +402,7 @@ func (s *Session) dispatch(p worldconn.Packet) error {
 
 func (s *Session) onTick(now time.Time) error {
 	s.flushNames(now)
-	if err := s.tickWalk(now); err != nil {
+	if err := s.tickWalk(); err != nil {
 		return err
 	}
 	if !s.loginRetryAt.IsZero() && !now.Before(s.loginRetryAt) {

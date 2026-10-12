@@ -85,6 +85,7 @@ func (s *Session) onUpdate(blocks []objects.Block, err error) error {
 // applyBlocks updates the store and turns its changes into events: health reaching 0 is
 // a death, an aura slot losing or gaining a spell an aura_removed or aura_applied.
 func (s *Session) applyBlocks(blocks []objects.Block) {
+	s.seedRunSpeed(blocks)
 	for _, c := range s.store.Apply(blocks) {
 		switch c.Kind {
 		case objects.ChangeCreated:

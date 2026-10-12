@@ -1,5 +1,7 @@
 # turtle-agent
 
+[![test](https://github.com/pjerra/turtle-agent/actions/workflows/test.yml/badge.svg)](https://github.com/pjerra/turtle-agent/actions/workflows/test.yml)
+
 A headless World of Warcraft client for **vanilla 1.12 / Turtle WoW 1.18.1** servers (login build 7272, world build 5875).
 One process logs one character in, with no game window, and exposes it over a local JSON-RPC API. Use it to drive a
 test character from scripts or AI agents: chat and GM commands, party, units around you, target, attack, cast, short

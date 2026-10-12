@@ -1,0 +1,28 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Go version comes from go.mod. The repo has no dependencies and so no go.sum,
+      # so the module and build cache is keyed on go.mod instead.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.mod
+
+      # The Makefile defaults to a Go under $HOME/.local/go; point it at the runner's Go.
+      # fmt-check, vet and `go test -race` need no secrets: the tests use fakes and the
+      # committed, scrubbed fixtures.
+      - name: fmt-check, vet, test
+        run: make GOROOT_LOCAL="$(go env GOROOT)" fmt-check vet test

@@ -12,15 +12,16 @@ type ChangeKind uint8
 
 const (
 	ChangeCreated ChangeKind = iota + 1
-	ChangeRemoved
 	ChangeHealth
 	ChangeAura
-	ChangeCombat
 )
 
+// DefaultLimit is the Units limit when the filter sets none.
+const DefaultLimit = 100
+
 // Change is a state change the session turns into events. A create block reports only
-// ChangeCreated, so a login burst does not flood the log with auras. ChangeRemoved is
-// reported for units only.
+// ChangeCreated, so a login burst does not flood the log with auras. Units leaving range
+// and combat flag flips are not reported: no event consumes them.
 type Change struct {
 	GUID     packet.GUID
 	Kind     ChangeKind
@@ -114,12 +115,7 @@ func (s *Store) Apply(blocks []Block) []Change {
 			}
 		case BlockOutOfRange:
 			for _, g := range b.GUIDs {
-				if o, ok := s.objs[g]; ok {
-					delete(s.objs, g)
-					if isUnit(o) {
-						ch = append(ch, Change{GUID: g, Kind: ChangeRemoved})
-					}
-				}
+				delete(s.objs, g)
 			}
 		}
 	}
@@ -150,8 +146,6 @@ func setValues(o *object, vals map[uint16]uint32, ch []Change, report bool) []Ch
 			ch = append(ch, Change{GUID: o.guid, Kind: ChangeHealth, Old: old, New: v})
 		case k >= UnitAura && k < UnitAura+AuraSlots:
 			ch = append(ch, Change{GUID: o.guid, Kind: ChangeAura, Slot: int(k - UnitAura), Old: old, New: v})
-		case k == UnitFlags && (old^v)&UnitFlagInCombat != 0:
-			ch = append(ch, Change{GUID: o.guid, Kind: ChangeCombat, Old: old & UnitFlagInCombat, New: v & UnitFlagInCombat})
 		}
 	}
 	return ch
@@ -171,6 +165,25 @@ func (s *Store) MoveTo(g packet.GUID, x, y, z, o float32) {
 	if ob, ok := s.objs[g]; ok {
 		ob.x, ob.y, ob.z, ob.o = x, y, z, o
 	}
+}
+
+// MoveSpline puts g at a spline's destination and turns it along the way it travelled.
+// A stop, or a move with no horizontal travel, keeps the facing it had.
+func (s *Store) MoveSpline(g packet.GUID, x, y, z float32, stop bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ob, ok := s.objs[g]
+	if !ok {
+		return
+	}
+	if dx, dy := float64(x-ob.x), float64(y-ob.y); !stop && (dx != 0 || dy != 0) {
+		o := math.Atan2(dy, dx)
+		if o < 0 {
+			o += 2 * math.Pi
+		}
+		ob.o = float32(o)
+	}
+	ob.x, ob.y, ob.z = x, y, z
 }
 
 // Clear forgets every object (SMSG_NEW_WORLD).
@@ -240,7 +253,7 @@ func (s *Store) Units(f Filter, ox, oy, oz float32) []Unit {
 	})
 	limit := f.Limit
 	if limit <= 0 {
-		limit = 100
+		limit = DefaultLimit
 	}
 	if len(out) > limit {
 		out = out[:limit]

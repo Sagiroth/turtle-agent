@@ -91,6 +91,12 @@ type rollParams struct {
 	Choice   string      `json:"choice"` // need, greed or pass
 }
 
+type equipParams struct {
+	ItemEntry uint32 `json:"item_entry,omitempty"`
+	Bag       *uint8 `json:"bag,omitempty"`
+	Slot      *uint8 `json:"slot,omitempty"`
+}
+
 // registerMethods wires the spec's JSON-RPC methods (v1) to the session; later
 // milestones add their methods at the end of this function.
 func registerMethods(srv *rpc.Server, s *session.Session) {
@@ -160,6 +166,17 @@ func registerMethods(srv *rpc.Server, s *session.Session) {
 	srv.Register("roll", rpc.Typed(func(ctx context.Context, p rollParams) (session.RollInfo, error) {
 		res, err := s.Roll(ctx, session.RollRef{ID: p.RollID, Slot: p.ItemSlot, Looted: p.Looted}, p.Choice)
 		return res, rpcErr(err)
+	}))
+	srv.Register("inventory", rpc.Typed(func(ctx context.Context, _ empty) ([]objects.Item, error) {
+		inv := s.Inventory()
+		if inv == nil {
+			inv = []objects.Item{}
+		}
+		return inv, nil
+	}))
+	srv.Register("equip", rpc.Typed(func(ctx context.Context, p equipParams) (objects.Item, error) {
+		it, err := s.Equip(ctx, session.EquipRef{Entry: p.ItemEntry, Bag: p.Bag, Slot: p.Slot})
+		return it, rpcErr(err)
 	}))
 }
 

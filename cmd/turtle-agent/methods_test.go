@@ -542,3 +542,36 @@ func TestRollMethod(t *testing.T) {
 		t.Fatalf("%v", e)
 	}
 }
+
+func TestInventoryAndEquipMethods(t *testing.T) {
+	r := newRig(t)
+	if out := r.call("inventory", "{}"); out["error"] != nil || len(out["result"].([]any)) != 0 {
+		t.Fatalf("empty: %v", out)
+	}
+	const sword packet.GUID = 0x4000000000000003
+	w := objtest.Header(2).U8(uint8(objects.BlockCreate2)).PackedGUID(sword).U8(objects.TypeItem).U8(0x10).U32(1)
+	objtest.Values(w, 0x30, map[uint16]uint32{objects.FieldEntry: 2589, objects.ItemStackCount: 1})
+	w.U8(uint8(objects.BlockCreate2)).PackedGUID(0x2A).U8(objects.TypePlayer)
+	objtest.Living(w, 0x21, game.MoveInfo{X: 1, Y: 2, Z: 3}, nil)
+	objtest.Values(w, 0x502, map[uint16]uint32{objects.PlayerInvSlotHead + 46: uint32(sword & 0xFFFFFFFF), objects.PlayerInvSlotHead + 47: uint32(sword >> 32)})
+	r.srv.Send(opcode.SMSGUpdateObject, w.Bytes())
+	out := r.eventually("inventory", "{}", func(m map[string]any) bool { return len(m["result"].([]any)) == 1 })
+	it := out["result"].([]any)[0].(map[string]any)
+	if it["bag"] != float64(255) || it["slot"] != float64(23) || it["guid"] != "0x4000000000000003" || it["item_entry"] != float64(2589) || it["count"] != float64(1) {
+		t.Fatalf("%v", it)
+	}
+	for _, params := range []string{`{"item_entry":2589}`, `{"bag":255,"slot":23}`, `{"slot":23}`} {
+		out := r.call("equip", params)
+		if res, ok := out["result"].(map[string]any); !ok || res["item_entry"] != float64(2589) {
+			t.Fatalf("equip %s: %v", params, out)
+		}
+		if p, err := r.srv.Expect(opcode.CMSGAutoequipItem, 2*time.Second); err != nil || !bytes.Equal(p.Body, []byte{255, 23}) {
+			t.Fatalf("equip %s: % X %v", params, p.Body, err)
+		}
+	}
+	for _, params := range []string{`{}`, `{"item_entry":1}`, `{"bag":255}`} {
+		if out := r.call("equip", params); errCode(out) != rpc.CodeGame {
+			t.Fatalf("equip %s: %v", params, out)
+		}
+	}
+}

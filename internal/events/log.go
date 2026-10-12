@@ -40,6 +40,8 @@ const (
 	KindLootRoll      = "loot_roll"       // SMSG_LOOT_ROLL: a member's need/greed/pass, or their dice
 	KindLootWon       = "loot_roll_won"   // SMSG_LOOT_ROLL_WON
 	KindLootAllPassed = "loot_all_passed" // SMSG_LOOT_ALL_PASSED
+	// KindInventoryError is SMSG_INVENTORY_CHANGE_FAILURE: an equip or move the server refused.
+	KindInventoryError = "inventory_error"
 )
 
 // ChatKinds is what the chat_log method returns.

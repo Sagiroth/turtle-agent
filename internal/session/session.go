@@ -229,6 +229,7 @@ func (s *Session) register() {
 	s.registerCombat()
 	s.registerRaid()
 	s.registerLoot()
+	s.registerItems()
 }
 
 func (s *Session) registerCore() {

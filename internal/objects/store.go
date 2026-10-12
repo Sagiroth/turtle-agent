@@ -301,3 +301,37 @@ func toUnit(o *object, ox, oy, oz float32) Unit {
 	u.Distance = float32(math.Sqrt(dx*dx + dy*dy + dz*dz))
 	return u
 }
+
+// Item is an item the player carries, at bag/slot as CMSG_AUTOEQUIP_ITEM addresses it.
+type Item struct {
+	Bag   uint8       `json:"bag"`
+	Slot  uint8       `json:"slot"`
+	GUID  packet.GUID `json:"guid"`
+	Entry uint32      `json:"item_entry"` // 0 until the item's create block arrives
+	Count uint32      `json:"count"`
+}
+
+// Backpack lists the items in player's backpack, in slot order, from the player's own
+// inventory fields and each item's create block (Player::BuildCreateUpdateBlockForPlayer
+// sends the items to their owner, Player.cpp:5195-5225).
+func (s *Store) Backpack(player packet.GUID) []Item {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.objs[player]
+	if !ok {
+		return nil
+	}
+	var out []Item
+	for slot := BackpackFirst; slot < BackpackEnd; slot++ {
+		g := guidAt(p.values, PlayerInvSlotHead+2*uint16(slot))
+		if g == 0 {
+			continue
+		}
+		it := Item{Bag: BackpackBag, Slot: slot, GUID: g}
+		if o, ok := s.objs[g]; ok {
+			it.Entry, it.Count = o.values[FieldEntry], o.values[ItemStackCount]
+		}
+		out = append(out, it)
+	}
+	return out
+}

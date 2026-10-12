@@ -5,13 +5,14 @@
 A headless World of Warcraft client for **vanilla 1.12 / Turtle WoW 1.18.1** servers (login build 7272, world build 5875).
 One process logs one character in, with no game window, and exposes it over a local JSON-RPC API. Use it to drive a
 test character from scripts or AI agents: chat and GM commands, party, units around you, target, attack, cast, short
-walks and GM teleports, and an ordered event log of chat and combat.
+walks and GM teleports, raid icons, group loot rolls, equipping from the backpack, and an ordered event log of chat,
+combat, marks and rolls.
 
 It was built to test server-side bots ([TortoiseBots](https://github.com/Sagiroth/TortoiseBots)) on a private test
 server: log in, hire or invite bots, start a fight, then read back the combat log and what each bot did.
 
 > Use it only on servers you run or are allowed to test on. It has no Warden emulation and does no rendering,
-> pathfinding or inventory management.
+> pathfinding or inventory management beyond listing the backpack and equipping from it.
 
 ## Quick start
 
@@ -97,12 +98,14 @@ browser (`Origin` header) and other `Host` names are refused.
 | `teleport` | `x`, `y`, `z`, `map` (a GM `.go xyz`; needs a GM account) | |
 | `mark` | `guid` or `name`, `icon` (skull, cross, square, moon, triangle, diamond, circle, star, clear) | `icon`, `guid`; waits for the server's echo (group leader or assistant only) |
 | `roll` | `roll_id` or `item_slot` (plus `looted` when two corpses share a slot), `choice` (need, greed, pass) | `roll_id`, `looted`, `item_slot`, `item_entry`, `choice` |
+| `inventory` | | backpack items (bag 255, slots 23-38): `bag`, `slot`, `guid`, `item_entry`, `count` |
+| `equip` | `item_entry`, or `slot` (and `bag`, default 255) | the item sent; a refusal arrives as an `inventory_error` event |
 | `logout` | | |
 
 Events have `seq`, `time`, `kind`, `source`, `target`, `spell_id`, `amount`, `crit`, `text`, `party` and `data`.
 Kinds cover chat, system, whispers, melee, spell damage, periodic ticks, heals, energize, spell start/go/miss/fail,
 auras, deaths, kills, party changes, raid icons (`raid_mark`), group loot rolls (`loot_roll_start`, `loot_roll`, `loot_roll_won`,
-`loot_all_passed`, tied together by `data.roll_id`) and session state. Cursors are exclusive; `dropped` says older events were evicted.
+`loot_all_passed`, tied together by `data.roll_id`), refused equips (`inventory_error`) and session state. Cursors are exclusive; `dropped` says older events were evicted.
 
 Text the server echoes back (for example the account name in a GM reply) is redacted before it reaches events, logs
 or replies.

@@ -39,7 +39,25 @@ const (
 
 // Type ids (ObjectGuid.h:35-42).
 const (
+	TypeItem       uint8 = 1
+	TypeContainer  uint8 = 2
 	TypeUnit       uint8 = 3
 	TypePlayer     uint8 = 4
 	TypeGameObject uint8 = 5
+)
+
+// Item and player inventory fields (Objects/UpdateFields.h).
+const (
+	ItemStackCount uint16 = 0x0E // ITEM_FIELD_STACK_COUNT, OBJECT_END + 0x08 (:43)
+	// PlayerInvSlotHead is PLAYER_FIELD_INV_SLOT_HEAD (:202): the guid of inventory slot i,
+	// two words each. The 23 equipment and bag slots run on into the 16 backpack slots,
+	// PLAYER_FIELD_PACK_SLOT_1 (:204) = head + 46. The owner alone gets these fields.
+	PlayerInvSlotHead uint16 = 0x1E6
+)
+
+// The backpack is bag INVENTORY_SLOT_BAG_0, slots 23-38 (Objects/Player.h:583, :618-619).
+const (
+	BackpackBag   uint8 = 255
+	BackpackFirst uint8 = 23
+	BackpackEnd   uint8 = 39
 )

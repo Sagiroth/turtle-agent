@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,6 +35,8 @@ type fleetMember struct {
 	Account   string `json:"account"`
 	Character string `json:"character"`
 	RPC       string `json:"rpc"`
+	// Reconnect overrides the fleet's --reconnect for this member (0 turns it off).
+	Reconnect *int `json:"reconnect,omitempty"`
 }
 
 type fleetFile struct {
@@ -84,6 +87,9 @@ func loadFleet(path string, settings *config.Settings) ([]fleetMember, error) {
 		}
 		ports[port] = true
 		m.RPC = net.JoinHostPort(host, strconv.Itoa(port))
+		if m.Reconnect != nil && *m.Reconnect < 0 {
+			return nil, fmt.Errorf("fleet: member %d reconnect must be 0 (off) or more", n)
+		}
 		key := strings.ToLower(m.Character)
 		if chars[key] {
 			return nil, fmt.Errorf("fleet: character %q is listed twice", m.Character)
@@ -117,6 +123,11 @@ type fleetDeps struct {
 
 type fleetOpts struct {
 	stagger, poll, wait, stopGrace time.Duration
+	// stopOnFailure restores the old all-or-nothing fleet: the first child that fails
+	// stops the rest. By default a failed child is reported and the others keep running.
+	stopOnFailure bool
+	// budget paces the children's logins under realmd's per-IP limit; nil: a new one.
+	budget *loginBudget
 }
 
 func fleetCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -126,11 +137,17 @@ func fleetCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	settingsPath := fs.String("settings", config.DefaultPath(), "settings file (realmd address, accounts)")
 	stagger := fs.Duration("stagger", 2*time.Second, "pause between starting children (realmd throttles logins)")
 	wait := fs.Duration("wait", 2*time.Minute, "give up if not every character is in world after this long")
+	reconnects := fs.Int("reconnect", 0, "each child logs in again up to N times after an unplanned disconnect (0: off; a member's \"reconnect\" overrides)")
+	stopOnFailure := fs.Bool("stop-on-failure", false, "stop every child when one fails (default: report it and keep the others running)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
 	if *fleetPath == "" || fs.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: turtle-agent fleet --config FILE [--settings FILE] [--stagger D] [--wait D]")
+		fmt.Fprintln(stderr, "usage: turtle-agent fleet --config FILE [--settings FILE] [--stagger D] [--wait D] [--reconnect N] [--stop-on-failure]")
+		return exitUsage
+	}
+	if *reconnects < 0 {
+		fmt.Fprintln(stderr, "fleet: --reconnect must be 0 (off) or more")
 		return exitUsage
 	}
 	st, err := config.Load(*settingsPath)
@@ -148,26 +165,88 @@ func fleetCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintln(stderr, "fleet:", err)
 		return exitUsage
 	}
+	// Every child shares the supervisor's login budget (starts, reconnects and busy answers),
+	// so the fleet as a whole stays under realmd's limit. Its port needs a token, which the
+	// children get in their environment.
+	budget := newLoginBudget(realmdThrottleLogins-1, realmdThrottleWindow)
+	budgetToken, err := newBudgetToken()
+	if err != nil {
+		fmt.Fprintln(stderr, "fleet: login budget:", err)
+		return exitUsage
+	}
+	budgetAddr, stopBudget, err := serveLoginBudget(ctx, budget, budgetToken)
+	if err != nil {
+		fmt.Fprintln(stderr, "fleet: login budget:", err)
+		return exitUsage
+	}
+	defer stopBudget()
+	// Pdeathsig (see detachProcessGroup) fires when the thread that started a child exits,
+	// so the supervisor stays on one OS thread.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	deps := fleetDeps{
 		start: func(m fleetMember, w io.Writer) (fleetChild, error) {
-			return startProcess(exe, *settingsPath, m, w)
+			return startProcess(exe, childArgs(*settingsPath, m, *reconnects, budgetAddr), []string{budgetTokenEnv + "=" + budgetToken}, w)
 		},
 		status: func(ctx context.Context, addr string) (string, error) {
 			return rpcStatus(ctx, addr, fleetToken(st, *settingsPath, addr))
 		},
 	}
-	return runFleet(ctx, members, deps, fleetOpts{stagger: *stagger, poll: 500 * time.Millisecond, wait: *wait, stopGrace: 60 * time.Second}, stdout, stderr)
+	return runFleet(ctx, members, deps, fleetOpts{stagger: *stagger, poll: 500 * time.Millisecond, wait: *wait, stopGrace: 60 * time.Second,
+		stopOnFailure: *stopOnFailure, budget: budget}, stdout, stderr)
 }
 
+// exitReason says in words what a child's exit code means (the README's exit-code table).
+func exitReason(code int) string {
+	switch code {
+	case exitOK:
+		return "logged out"
+	case exitUsage:
+		return "bad flags, arguments or settings"
+	case exitAuth:
+		return "realmd rejected the login"
+	case exitRealm:
+		return "realm missing or offline"
+	case exitWorld:
+		return "world server rejected the session or the character"
+	case exitDisconnected:
+		return "the server closed the connection"
+	case exitLogoutRefused:
+		return "the server kept refusing the logout"
+	case exitLogoutIncomplete:
+		return "the logout did not complete"
+	}
+	return ""
+}
+
+// goneChild stands in for a child that could not be started: already exited, failed.
+type goneChild struct{ done chan struct{} }
+
+func newGoneChild() goneChild {
+	c := goneChild{done: make(chan struct{})}
+	close(c.done)
+	return c
+}
+func (goneChild) Stop()                   {}
+func (goneChild) Kill()                   {}
+func (c goneChild) Done() <-chan struct{} { return c.done }
+func (goneChild) Code() int               { return 1 }
+
 // runFleet starts every member, waits until all are in world, prints the table, then
-// supervises until ctx ends (Ctrl-C: every child is stopped and logs out) or a child
-// fails (the rest are stopped too). It returns 0 only if every child exited 0.
+// supervises until ctx ends (Ctrl-C: every child is stopped and logs out) or every child
+// has exited. A child that fails is reported and the others keep running; with
+// o.stopOnFailure the rest are stopped too. It returns 0 only if every child exited 0.
+// Starts are paced by o.budget so the fleet stays under realmd's per-IP login limit.
 func runFleet(ctx context.Context, members []fleetMember, deps fleetDeps, o fleetOpts, stdout, stderr io.Writer) int {
 	var mu sync.Mutex // serialises writes to stderr from the children's prefixers
 	children := make([]fleetChild, len(members))
 	states := make([]string, len(members))
+	reported := make([]bool, len(members))
 	for i := range states {
 		states[i] = "starting"
+	}
+	if o.budget == nil {
+		o.budget = newLoginBudget(realmdThrottleLogins-1, realmdThrottleWindow)
 	}
 
 	stopAll := func() {
@@ -175,6 +254,29 @@ func runFleet(ctx context.Context, members []fleetMember, deps fleetDeps, o flee
 			if c != nil {
 				c.Stop()
 			}
+		}
+	}
+	// report says once how a finished child exited; a clean exit is said only if loud.
+	report := func(i int, loud bool) {
+		c := children[i]
+		if reported[i] || (c.Code() == exitOK && !loud) {
+			return
+		}
+		reported[i] = true
+		if c.Code() == exitOK {
+			fmt.Fprintf(stderr, "fleet: %s logged out (exit 0)\n", members[i].Character)
+		} else if why := exitReason(c.Code()); why != "" {
+			fmt.Fprintf(stderr, "fleet: %s exited with code %d (%s)\n", members[i].Character, c.Code(), why)
+		} else {
+			fmt.Fprintf(stderr, "fleet: %s exited with code %d\n", members[i].Character, c.Code())
+		}
+	}
+	isDone := func(i int) bool {
+		select {
+		case <-children[i].Done():
+			return true
+		default:
+			return false
 		}
 	}
 	// finish stops every child, waits for them (killing after stopGrace) and returns the exit code.
@@ -195,11 +297,16 @@ func runFleet(ctx context.Context, members []fleetMember, deps fleetDeps, o flee
 				failed = true
 			}
 		}
+		bad := 0
 		for i, c := range children {
 			if c != nil && c.Code() != exitOK {
-				fmt.Fprintf(stderr, "fleet: %s exited with code %d\n", members[i].Character, c.Code())
+				report(i, false)
 				failed = true
+				bad++
 			}
+		}
+		if bad > 0 {
+			fmt.Fprintf(stderr, "fleet: %d of %d character(s) exited with a failure\n", bad, len(members))
 		}
 		if failed {
 			return exitFleet
@@ -207,11 +314,62 @@ func runFleet(ctx context.Context, members []fleetMember, deps fleetDeps, o flee
 		return exitOK
 	}
 
+	// startedFailure is a started child that failed, for --stop-on-failure while the start
+	// loop is asleep (exit 10, an incomplete logout, never stops the rest).
+	startedFailure := func() int {
+		for i, c := range children {
+			if c == nil {
+				continue
+			}
+			select {
+			case <-c.Done():
+				if c.Code() != exitOK && c.Code() != exitLogoutIncomplete {
+					return i
+				}
+			default:
+			}
+		}
+		return -1
+	}
+	// pause sleeps for d, but wakes for Ctrl-C and, with --stop-on-failure, for a child that
+	// failed meanwhile (its index, else -1).
+	pause := func(d time.Duration) int {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		tk := time.NewTicker(max(o.poll, time.Millisecond))
+		defer tk.Stop()
+		for {
+			select {
+			case <-timer.C:
+				return -1
+			case <-ctx.Done():
+				return -1
+			case <-tk.C:
+				if o.stopOnFailure {
+					if i := startedFailure(); i >= 0 {
+						return i
+					}
+				}
+			}
+		}
+	}
 	for i, m := range members {
 		if i > 0 && o.stagger > 0 {
-			select {
-			case <-time.After(o.stagger):
-			case <-ctx.Done():
+			if f := pause(o.stagger); f >= 0 {
+				report(f, true)
+				fmt.Fprintf(stderr, "fleet: %s failed; stopping the rest\n", members[f].Character)
+				return finish(true)
+			}
+		}
+		// One shared budget: realmd refuses the 15th account from an IP within 300 s, so
+		// a login that would be the 15th waits until the oldest has left the window.
+		if wait := time.Until(o.budget.reserve(time.Now())); wait > 0 && ctx.Err() == nil {
+			fmt.Fprintf(stderr, "fleet: waiting %s to log in %s: realmd allows %d logins per %s from one address and the fleet has used them\n",
+				wait.Round(time.Second), m.Character, o.budget.limit, o.budget.window.Round(time.Second))
+			if f := pause(wait); f >= 0 {
+				report(f, true)
+				fmt.Fprintf(stderr, "fleet: %s failed; stopping the rest\n", members[f].Character)
+				return finish(true)
 			}
 		}
 		if ctx.Err() != nil {
@@ -220,7 +378,11 @@ func runFleet(ctx context.Context, members []fleetMember, deps fleetDeps, o flee
 		c, err := deps.start(m, &prefixWriter{w: stderr, mu: &mu, prefix: "[" + m.Character + "] "})
 		if err != nil {
 			fmt.Fprintf(stderr, "fleet: starting %s: %v\n", m.Character, err)
-			return finish(true)
+			if o.stopOnFailure {
+				return finish(true)
+			}
+			children[i], reported[i] = newGoneChild(), true
+			continue
 		}
 		children[i] = c
 	}
@@ -252,28 +414,42 @@ func runFleet(ctx context.Context, members []fleetMember, deps fleetDeps, o flee
 	defer tick.Stop()
 	for ready := false; !ready; {
 		ready = true
+		live := 0
 		for i, m := range members {
-			select {
-			case <-children[i].Done():
-				states[i] = "exited"
-			default:
-				s, err := deps.status(ctx, m.RPC)
-				if err != nil {
-					s = "starting"
-				}
-				states[i] = s
+			if isDone(i) {
+				states[i] = fmt.Sprintf("exited (%d)", children[i].Code())
+				continue
 			}
-			if states[i] != string(session.StatusInWorld) {
+			live++
+			s, err := deps.status(ctx, m.RPC)
+			if err != nil {
+				s = "starting"
+			}
+			states[i] = s
+			if s != string(session.StatusInWorld) {
 				ready = false
 			}
 		}
-		if i, failed := anyExit(); i >= 0 {
-			printFleetTable(stdout, members, states)
-			if failed {
-				fmt.Fprintf(stderr, "fleet: %s failed before the fleet was in world\n", members[i].Character)
-			} else {
-				fmt.Fprintf(stderr, "fleet: %s logged out before the fleet was in world\n", members[i].Character)
+		if o.stopOnFailure {
+			if i, failed := anyExit(); i >= 0 {
+				printFleetTable(stdout, members, states)
+				report(i, true)
+				if failed {
+					fmt.Fprintf(stderr, "fleet: %s failed before the fleet was in world\n", members[i].Character)
+				} else {
+					fmt.Fprintf(stderr, "fleet: %s logged out before the fleet was in world\n", members[i].Character)
+				}
+				return finish(true)
 			}
+		}
+		for i := range children {
+			if isDone(i) {
+				report(i, true)
+			}
+		}
+		if live == 0 {
+			printFleetTable(stdout, members, states)
+			fmt.Fprintln(stderr, "fleet: every character exited before the fleet was in world")
 			return finish(true)
 		}
 		if ready {
@@ -290,10 +466,16 @@ func runFleet(ctx context.Context, members []fleetMember, deps fleetDeps, o flee
 		}
 	}
 	printFleetTable(stdout, members, states)
-	fmt.Fprintf(stderr, "fleet: %d character(s) in world; Ctrl-C logs them all out\n", len(members))
+	inWorld := 0
+	for _, s := range states {
+		if s == string(session.StatusInWorld) {
+			inWorld++
+		}
+	}
+	fmt.Fprintf(stderr, "fleet: %d character(s) in world; Ctrl-C logs them all out\n", inWorld)
 
-	// Supervise: fail fast when a child dies, otherwise run until Ctrl-C or until every
-	// child has logged out through its own RPC.
+	// Supervise: report each child as it exits and keep the rest running, until Ctrl-C
+	// or until every child has exited (a logout through its own RPC included).
 	exited := make(chan struct{}, len(children))
 	for _, c := range children {
 		go func(c fleetChild) { <-c.Done(); exited <- struct{}{} }(c)
@@ -304,6 +486,14 @@ func runFleet(ctx context.Context, members []fleetMember, deps fleetDeps, o flee
 			fmt.Fprintln(stderr, "fleet: interrupt, logging every character out")
 			return finish(false)
 		case <-exited:
+			for i := range children {
+				if isDone(i) {
+					report(i, true)
+				}
+			}
+			if !o.stopOnFailure {
+				continue
+			}
 			if i, failed := anyExit(); failed {
 				fmt.Fprintf(stderr, "fleet: %s failed; stopping the rest\n", members[i].Character)
 				return finish(true)
@@ -353,8 +543,33 @@ type procChild struct {
 	code int
 }
 
-func startProcess(exe, settings string, m fleetMember, stderr io.Writer) (fleetChild, error) {
-	cmd := exec.Command(exe, "login", "--config", settings, "--rpc", m.RPC, m.Account, m.Character)
+// memberReconnect is the reconnect count of m: its own, else the fleet's.
+func memberReconnect(m fleetMember, fleetWide int) int {
+	if m.Reconnect != nil {
+		return *m.Reconnect
+	}
+	return fleetWide
+}
+
+// childArgs is the `login` command line of one member (after the executable). The password
+// is not on it; the account name is, as before.
+func childArgs(settings string, m fleetMember, fleetReconnect int, budgetAddr string) []string {
+	args := []string{"login", "--config", settings, "--rpc", m.RPC}
+	if n := memberReconnect(m, fleetReconnect); n > 0 {
+		args = append(args, "--reconnect", strconv.Itoa(n))
+	}
+	if budgetAddr != "" { // also without --reconnect: a busy answer at the first login is reported
+		args = append(args, "--login-budget", budgetAddr)
+	}
+	return append(args, m.Account, m.Character)
+}
+
+// startProcess runs exe with args and extra environment entries (the budget token).
+func startProcess(exe string, args, env []string, stderr io.Writer) (fleetChild, error) {
+	cmd := exec.Command(exe, args...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	// Own process group (unix): a terminal Ctrl-C reaches only the supervisor, which
 	// forwards exactly one interrupt; a second one would end the child's logout retry.
 	detachProcessGroup(cmd)

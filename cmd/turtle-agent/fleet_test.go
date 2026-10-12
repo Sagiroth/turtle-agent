@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http/httptest"
 	"os"
@@ -98,6 +99,9 @@ var party = []fleetMember{
 
 var fastOpts = fleetOpts{poll: 5 * time.Millisecond, wait: 2 * time.Second, stopGrace: time.Second}
 
+// stopOpts is fastOpts with the old all-or-nothing behaviour (--stop-on-failure).
+var stopOpts = func() fleetOpts { o := fastOpts; o.stopOnFailure = true; return o }()
+
 // syncBuf lets the test read output while runFleet still writes.
 type syncBuf struct {
 	mu sync.Mutex
@@ -156,7 +160,7 @@ func TestFleetAllInWorldThenCtrlCLogsOutEveryone(t *testing.T) {
 	}
 }
 
-func TestFleetChildFailureStopsTheRestAndFails(t *testing.T) {
+func TestFleetStopOnFailureStopsTheRestAndFails(t *testing.T) {
 	ff := newFakeFleet()
 	for _, m := range party {
 		ff.setState(m.RPC, "in_world")
@@ -165,7 +169,7 @@ func TestFleetChildFailureStopsTheRestAndFails(t *testing.T) {
 	defer cancel()
 	var out, errOut syncBuf
 	code := make(chan int, 1)
-	go func() { code <- runFleet(ctx, party, ff.deps(), fastOpts, &out, &errOut) }()
+	go func() { code <- runFleet(ctx, party, ff.deps(), stopOpts, &out, &errOut) }()
 	waitFor(t, "table", func() bool { return strings.Contains(out.String(), "Dpsthree") })
 	ff.child("127.0.0.1:9002").exit(exitDisconnected)
 	if c := <-code; c != exitFleet {
@@ -207,11 +211,11 @@ func TestFleetIncompleteLogoutDoesNotStopTheRest(t *testing.T) {
 	}
 }
 
-func TestFleetChildFailsBeforeWorld(t *testing.T) {
+func TestFleetStopOnFailureChildFailsBeforeWorld(t *testing.T) {
 	ff := newFakeFleet()
 	var out, errOut syncBuf
 	code := make(chan int, 1)
-	go func() { code <- runFleet(context.Background(), party, ff.deps(), fastOpts, &out, &errOut) }()
+	go func() { code <- runFleet(context.Background(), party, ff.deps(), stopOpts, &out, &errOut) }()
 	waitFor(t, "start", func() bool { return ff.child("127.0.0.1:9003") != nil })
 	ff.child("127.0.0.1:9001").exit(exitAuth)
 	if c := <-code; c != exitFleet {
@@ -354,14 +358,14 @@ func TestPrefixWriterSplitsLines(t *testing.T) {
 	}
 }
 
-func TestFleetLaterFailureNotHiddenByEarlierCleanExit(t *testing.T) {
+func TestFleetStopOnFailureLaterFailureNotHiddenByEarlierCleanExit(t *testing.T) {
 	ff := newFakeFleet()
 	for _, m := range party {
 		ff.setState(m.RPC, "in_world")
 	}
 	var out, errOut syncBuf
 	code := make(chan int, 1)
-	go func() { code <- runFleet(context.Background(), party, ff.deps(), fastOpts, &out, &errOut) }()
+	go func() { code <- runFleet(context.Background(), party, ff.deps(), stopOpts, &out, &errOut) }()
 	waitFor(t, "table", func() bool { return strings.Contains(out.String(), "Dpsthree") })
 	ff.child("127.0.0.1:9001").exit(0)
 	time.Sleep(30 * time.Millisecond)
@@ -379,6 +383,220 @@ func TestFleetLaterFailureNotHiddenByEarlierCleanExit(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "Healtwo failed") {
 		t.Errorf("stderr:\n%s", errOut.String())
+	}
+}
+
+// By default one failed child is reported and the others keep running; the fleet exit
+// code still says that a child failed.
+func TestFleetFailedChildDoesNotStopTheRest(t *testing.T) {
+	ff := newFakeFleet()
+	for _, m := range party {
+		ff.setState(m.RPC, "in_world")
+	}
+	var out, errOut syncBuf
+	code := make(chan int, 1)
+	go func() { code <- runFleet(context.Background(), party, ff.deps(), fastOpts, &out, &errOut) }()
+	waitFor(t, "table", func() bool { return strings.Contains(out.String(), "Dpsthree") })
+	ff.child("127.0.0.1:9002").exit(exitDisconnected)
+	waitFor(t, "report", func() bool {
+		return strings.Contains(errOut.String(), "Healtwo exited with code 6 (the server closed the connection)")
+	})
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case c := <-code:
+		t.Fatalf("fleet ended with %d after one failure", c)
+	default:
+	}
+	if ff.child("127.0.0.1:9001").stopped || ff.child("127.0.0.1:9003").stopped {
+		t.Fatal("survivors were stopped")
+	}
+	// The survivors log out cleanly later; the failure still decides the exit code.
+	ff.child("127.0.0.1:9001").exit(0)
+	ff.child("127.0.0.1:9003").exit(0)
+	if c := <-code; c != exitFleet {
+		t.Fatalf("exit %d, want %d", c, exitFleet)
+	}
+	if !strings.Contains(errOut.String(), "Tankone logged out") || !strings.Contains(errOut.String(), "1 of 3 character(s) exited with a failure") {
+		t.Errorf("stderr:\n%s", errOut.String())
+	}
+	if strings.Count(errOut.String(), "Healtwo exited") != 1 {
+		t.Errorf("failure reported more than once:\n%s", errOut.String())
+	}
+}
+
+// A child that fails while the fleet is still logging in leaves the others to finish.
+func TestFleetChildFailsBeforeWorldTheRestCarryOn(t *testing.T) {
+	ff := newFakeFleet()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var out, errOut syncBuf
+	code := make(chan int, 1)
+	go func() { code <- runFleet(ctx, party, ff.deps(), fastOpts, &out, &errOut) }()
+	waitFor(t, "start", func() bool { return ff.child("127.0.0.1:9003") != nil })
+	ff.child("127.0.0.1:9001").exit(exitAuth)
+	ff.setState("127.0.0.1:9002", "in_world")
+	ff.setState("127.0.0.1:9003", "in_world")
+	waitFor(t, "table", func() bool { return strings.Contains(out.String(), "Dpsthree") })
+	if !strings.Contains(out.String(), "exited (3)") || !strings.Contains(errOut.String(), "2 character(s) in world") ||
+		!strings.Contains(errOut.String(), "Tankone exited with code 3 (realmd rejected the login)") {
+		t.Errorf("out:\n%s\nerr:\n%s", out.String(), errOut.String())
+	}
+	cancel()
+	if c := <-code; c != exitFleet {
+		t.Fatalf("exit %d, want %d", c, exitFleet)
+	}
+	if !ff.child("127.0.0.1:9002").stopped {
+		t.Error("Ctrl-C did not reach the survivors")
+	}
+}
+
+func TestFleetStartErrorIsIsolated(t *testing.T) {
+	ff := newFakeFleet()
+	for _, m := range party {
+		ff.setState(m.RPC, "in_world")
+	}
+	d := ff.deps()
+	inner := d.start
+	d.start = func(m fleetMember, w io.Writer) (fleetChild, error) {
+		if m.Character == "Healtwo" {
+			return nil, errors.New("exec: no such file")
+		}
+		return inner(m, w)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var out, errOut syncBuf
+	code := make(chan int, 1)
+	go func() { code <- runFleet(ctx, party, d, fastOpts, &out, &errOut) }()
+	waitFor(t, "table", func() bool { return strings.Contains(out.String(), "Dpsthree") })
+	cancel()
+	if c := <-code; c != exitFleet {
+		t.Fatalf("exit %d", c)
+	}
+	if !strings.Contains(errOut.String(), "starting Healtwo: exec: no such file") || !strings.Contains(errOut.String(), "2 character(s) in world") {
+		t.Errorf("stderr:\n%s", errOut.String())
+	}
+	if ff.child("127.0.0.1:9003") == nil || !ff.child("127.0.0.1:9003").stopped {
+		t.Error("members after the failed start were not run, or not stopped")
+	}
+	// The same failure with --stop-on-failure ends the fleet before the next member starts.
+	ff2 := newFakeFleet()
+	d2 := ff2.deps()
+	inner2 := d2.start
+	d2.start = func(m fleetMember, w io.Writer) (fleetChild, error) {
+		if m.Character == "Healtwo" {
+			return nil, errors.New("exec: no such file")
+		}
+		return inner2(m, w)
+	}
+	if c := runFleet(context.Background(), party, d2, stopOpts, io.Discard, io.Discard); c != exitFleet {
+		t.Fatalf("stop-on-failure exit %d", c)
+	}
+	if ff2.child("127.0.0.1:9003") != nil {
+		t.Error("a member started after the failed one")
+	}
+}
+
+func TestFleetEveryChildFailingEndsTheFleet(t *testing.T) {
+	ff := newFakeFleet()
+	var out, errOut syncBuf
+	code := make(chan int, 1)
+	go func() { code <- runFleet(context.Background(), party, ff.deps(), fastOpts, &out, &errOut) }()
+	waitFor(t, "start", func() bool { return ff.child("127.0.0.1:9003") != nil })
+	for _, m := range party {
+		ff.child(m.RPC).exit(exitWorld)
+	}
+	if c := <-code; c != exitFleet || !strings.Contains(errOut.String(), "every character exited") {
+		t.Fatalf("exit %d, stderr:\n%s", c, errOut.String())
+	}
+}
+
+// The fleet paces its starts under realmd's login limit: with 2 logins allowed per window
+// the third member waits for the first to leave it, and says so.
+func TestFleetStartsWaitForTheLoginBudget(t *testing.T) {
+	ff := newFakeFleet()
+	for _, m := range party {
+		ff.setState(m.RPC, "in_world")
+	}
+	o := fastOpts
+	o.budget = newLoginBudget(2, 300*time.Millisecond)
+	var out, errOut syncBuf
+	begin := time.Now()
+	ctx, cancel := context.WithCancel(context.Background())
+	code := make(chan int, 1)
+	go func() { code <- runFleet(ctx, party, ff.deps(), o, &out, &errOut) }()
+	waitFor(t, "third start", func() bool { return ff.child("127.0.0.1:9003") != nil })
+	if d := time.Since(begin); d < 290*time.Millisecond {
+		t.Errorf("third member started after %s, before the first left the window", d)
+	}
+	if !strings.Contains(errOut.String(), "waiting") || !strings.Contains(errOut.String(), "to log in Dpsthree") {
+		t.Errorf("no budget line:\n%s", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "to log in Healtwo") {
+		t.Errorf("second member waited:\n%s", errOut.String())
+	}
+	cancel()
+	<-code
+}
+
+func TestFleetCtrlCEndsTheBudgetWait(t *testing.T) {
+	ff := newFakeFleet()
+	o := fastOpts
+	o.budget = newLoginBudget(1, time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	var errOut syncBuf
+	code := make(chan int, 1)
+	go func() { code <- runFleet(ctx, party, ff.deps(), o, io.Discard, &errOut) }()
+	waitFor(t, "budget wait", func() bool { return strings.Contains(errOut.String(), "waiting") })
+	cancel()
+	select {
+	case <-code:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fleet kept waiting for the budget after Ctrl-C")
+	}
+	if ff.child("127.0.0.1:9001") == nil || !ff.child("127.0.0.1:9001").stopped {
+		t.Error("the started member was not stopped")
+	}
+}
+
+func TestChildArgsAndReconnectOverride(t *testing.T) {
+	two, zero := 2, 0
+	plain := fleetMember{Account: "ACC", Character: "Plain", RPC: "127.0.0.1:9001"}
+	over := fleetMember{Account: "ACC2", Character: "Over", RPC: "127.0.0.1:9002", Reconnect: &two}
+	off := fleetMember{Account: "ACC3", Character: "Off", RPC: "127.0.0.1:9003", Reconnect: &zero}
+	for _, c := range []struct {
+		m     fleetMember
+		fleet int
+		addr  string
+		want  string
+	}{
+		{plain, 0, "", "login --config /s.json --rpc 127.0.0.1:9001 ACC Plain"},
+		{plain, 0, "127.0.0.1:5000", "login --config /s.json --rpc 127.0.0.1:9001 --login-budget 127.0.0.1:5000 ACC Plain"},
+		{plain, 3, "127.0.0.1:5000", "login --config /s.json --rpc 127.0.0.1:9001 --reconnect 3 --login-budget 127.0.0.1:5000 ACC Plain"},
+		{over, 0, "127.0.0.1:5000", "login --config /s.json --rpc 127.0.0.1:9002 --reconnect 2 --login-budget 127.0.0.1:5000 ACC2 Over"},
+		{off, 5, "127.0.0.1:5000", "login --config /s.json --rpc 127.0.0.1:9003 --login-budget 127.0.0.1:5000 ACC3 Off"},
+		{over, 0, "", "login --config /s.json --rpc 127.0.0.1:9002 --reconnect 2 ACC2 Over"},
+	} {
+		if got := strings.Join(childArgs("/s.json", c.m, c.fleet, c.addr), " "); got != c.want {
+			t.Errorf("got  %s\nwant %s", got, c.want)
+		}
+	}
+}
+
+func TestLoadFleetReconnectField(t *testing.T) {
+	ms, err := loadFleet(writeFile(t, "f.json", `{"members":[{"account":"A","character":"A","rpc":"127.0.0.1:9001","reconnect":4},{"account":"B","character":"B","rpc":"127.0.0.1:9002"}]}`), nil)
+	if err != nil || ms[0].Reconnect == nil || *ms[0].Reconnect != 4 || ms[1].Reconnect != nil {
+		t.Fatalf("%v %+v", err, ms)
+	}
+	_, err = loadFleet(writeFile(t, "f.json", `{"members":[{"account":"A","character":"A","rpc":"127.0.0.1:9001","reconnect":-1}]}`), nil)
+	if err == nil || !strings.Contains(err.Error(), "reconnect") {
+		t.Fatalf("negative reconnect: %v", err)
+	}
+}
+
+func TestFleetCmdRejectsNegativeReconnect(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if c := fleetCmd(context.Background(), []string{"--config", "x.json", "--reconnect", "-1"}, &out, &errOut); c != exitUsage || !strings.Contains(errOut.String(), "--reconnect") {
+		t.Fatalf("%d %q", c, errOut.String())
 	}
 }
 
@@ -417,5 +635,32 @@ func TestFleetTokenAndStatusHeader(t *testing.T) {
 	}
 	if _, err := rpcStatus(context.Background(), addr, ""); err == nil {
 		t.Fatal("status answered without a token")
+	}
+}
+
+// With --stop-on-failure a child that fails while the start loop waits for the login
+// budget stops the fleet at once, and the member waiting for its slot never starts.
+func TestFleetStopOnFailureActsDuringTheBudgetWait(t *testing.T) {
+	ff := newFakeFleet()
+	o := stopOpts
+	o.budget = newLoginBudget(1, time.Hour)
+	var errOut syncBuf
+	code := make(chan int, 1)
+	go func() { code <- runFleet(context.Background(), party, ff.deps(), o, io.Discard, &errOut) }()
+	waitFor(t, "budget wait", func() bool { return strings.Contains(errOut.String(), "waiting") })
+	ff.child("127.0.0.1:9001").exit(exitDisconnected)
+	select {
+	case c := <-code:
+		if c != exitFleet {
+			t.Fatalf("exit %d", c)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fleet kept waiting for the budget after a child failed")
+	}
+	if ff.child("127.0.0.1:9002") != nil {
+		t.Error("the waiting member started")
+	}
+	if !strings.Contains(errOut.String(), "Tankone failed; stopping the rest") {
+		t.Errorf("stderr:\n%s", errOut.String())
 	}
 }

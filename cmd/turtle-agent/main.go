@@ -35,13 +35,19 @@ func main() {
 	os.Exit(code)
 }
 
-// signalContext ends on the first Ctrl-C or SIGTERM and then hands both signals back to
+// signalContext ends on the first Ctrl-C, SIGTERM or SIGHUP and then hands both signals back to
 // the default action, so a second Ctrl-C ends the process at once, even while a logout
 // is being retried (review I1). The handler is stopped before the context ends.
 func signalContext() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	sigs := []os.Signal{os.Interrupt, syscall.SIGTERM}
+	// SIGHUP: the terminal closed. Under nohup it is ignored on purpose, and Notify would
+	// undo that.
+	if !signal.Ignored(syscall.SIGHUP) {
+		sigs = append(sigs, syscall.SIGHUP)
+	}
+	signal.Notify(c, sigs...)
 	go func() {
 		<-c
 		signal.Stop(c)
@@ -78,7 +84,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 func usage(w io.Writer) {
 	fmt.Fprintln(w, `usage:
   turtle-agent login [--config FILE] [--capture FILE] [--stay DURATION] [--rpc ADDR] [--reconnect N] [<account>] <character>
-  turtle-agent fleet --config FILE [--settings FILE] [--stagger DURATION] [--wait DURATION]
+  turtle-agent fleet --config FILE [--settings FILE] [--stagger DURATION] [--wait DURATION] [--reconnect N] [--stop-on-failure]
   turtle-agent scrub-check [--config FILE] <capture>...
   turtle-agent capture-stats <capture>
   turtle-agent capture events [--from RFC3339] [--to RFC3339] [--kinds a,b] [--out FILE [--force]] <capture>

@@ -33,3 +33,4 @@ turtle-agent file | agent-wow source | how
 tools/opcodegen/main.go | tools/opcodecatalog/main.go | ported (enum walk and assignment regex kept; 1.12 enum, gaps allowed, name table added)
 internal/auth/srp.go | pkg/auth/srp.go | ported (group and SRP6 arithmetic kept; unpadded BigNumber hashing, no K zero-strip, short-M1 redraw)
 internal/worldconn/conn.go | pkg/worldconn/protocol.go, pkg/worldconn/conn.go | ported (ReadFull framing, serialized writes, Dial-then-authenticate kept; 4-byte server header, XOR cipher, 1.12 auth session and response rewritten)
+internal/session/session.go | pkg/world/engine.go | ported (single-owner select loop, ping cadence, logout wait kept; 1.12 login sequence, readiness on SMSG_LOGIN_VERIFY_WORLD and all handlers new)

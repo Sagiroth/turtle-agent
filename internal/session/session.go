@@ -188,6 +188,7 @@ type Session struct {
 	self      Character
 	mapID     uint32
 	pos       [4]float32
+	walkEnd   *[3]float32 // where the last stopped walk had got to, before a server move; read by walk_path
 	latency   uint32
 	unknown   map[uint16]int
 	parseErrs int

@@ -524,6 +524,10 @@ func (s *Session) stopWalk(reason error, sendStop bool) {
 	if sendStop {
 		s.syncWalk(now)
 	}
+	end := w.at(now)
+	s.mu.Lock()
+	s.walkEnd = &end
+	s.mu.Unlock()
 	s.walk = nil
 	if sendStop {
 		s.mu.Lock()
@@ -612,7 +616,6 @@ func (s *Session) onTeleportAck(body []byte) error {
 	if a.GUID != self {
 		return nil
 	}
-	s.stopWalk(errTeleported, false)
 	s.gossip = nil // the client closes an NPC window when the player is moved away
 	// A .go xyz puts the player at the given z, perhaps in the air: dropToFloor below
 	// falls to the navmesh floor, else the next position from the server settles it
@@ -622,6 +625,7 @@ func (s *Session) onTeleportAck(body []byte) error {
 	s.pos[3] = a.Move.O
 	s.mu.Unlock()
 	s.store.MoveTo(self, a.Move.X, a.Move.Y, a.Move.Z, a.Move.O)
+	s.stopWalk(errTeleported, false) // after the position, so a walk_path woken by it reads the new one
 	if err := s.conn.WritePacket(opcode.MSGMoveTeleportAck, game.BuildTeleportAck(self, a.Counter, s.clock())); err != nil {
 		return &fatalError{err}
 	}
@@ -649,7 +653,6 @@ func (s *Session) onNewWorld(body []byte) error {
 	if err != nil {
 		return err
 	}
-	s.stopWalk(errNewMap, false)
 	s.gossip = nil
 	s.serverPosition([3]float32{nw.X, nw.Y, nw.Z}, false)
 	s.mu.Lock()
@@ -657,6 +660,7 @@ func (s *Session) onNewWorld(body []byte) error {
 	s.target = 0
 	self := s.self.GUID
 	s.mu.Unlock()
+	s.stopWalk(errNewMap, false) // after the position, so a walk_path woken by it reads the new one
 	s.store.Clear()
 	if err := s.conn.WritePacket(opcode.MSGMoveWorldportAck, nil); err != nil { // MovementHandler.cpp:43-49
 		return &fatalError{err}

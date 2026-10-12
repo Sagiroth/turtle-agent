@@ -163,6 +163,11 @@ func TestWalkPathReplansAfterAServerMove(t *testing.T) {
 	if r.Trace[2].Text != "moved by the server" || r.Trace[3].TMS < 300 {
 		t.Fatalf("trace %+v", r.Trace)
 	}
+	// Walked counts the first leg up to the fear (a few tenths of a yard at most) and the second leg
+	// from where the server put the player, not the 2.2 yd jump itself.
+	if second := math.Hypot(7, 2); float64(r.Walked) < second-0.01 || float64(r.Walked) > second+1 {
+		t.Fatalf("walked %.2f, want about %.2f", r.Walked, second)
+	}
 	h.logout()
 }
 
@@ -439,4 +444,26 @@ func TestWalkPathReplansAfterAKnockback(t *testing.T) {
 		t.Fatalf("status %+v", st)
 	}
 	h.logout()
+}
+
+func TestWalkPathReportsTheTeleportPosition(t *testing.T) {
+	f := &fakePlanner{replies: []func(from, to navmesh.Vec3) navmesh.Path{straight}}
+	h := start(t, Options{Planner: f})
+	h.enterWorld()
+	done := make(chan WalkReport, 1)
+	go func() { r, _ := h.s.WalkPath(context.Background(), me.X+8, me.Y, me.Z); done <- r }()
+	h.expect(opcode.MSGMoveStartForward)
+	w := packet.NewWriter().PackedGUID(me.GUID).U32(7)
+	game.WriteMoveInfo(w, game.MoveInfo{X: me.X + 12, Y: me.Y, Z: me.Z})
+	h.send(opcode.MSGMoveTeleportAck, w.Bytes())
+	h.expect(opcode.MSGMoveTeleportAck)
+	r := <-done
+	h.logout()
+	if r.Replans != 1 || r.Trace[2].Kind != "interrupted" || r.Trace[2].From[0] != me.X+12 {
+		t.Fatalf("%+v", r)
+	}
+	// 4 yd back to the goal; the 12 yd teleport is not walked.
+	if r.Walked > 5 {
+		t.Fatalf("walked %.2f counts the teleport", r.Walked)
+	}
 }

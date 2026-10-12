@@ -125,11 +125,17 @@ type pendingDuration struct {
 	arrived time.Time // when the duration came, for pendingAuraWindow
 }
 
-// pendingAuraWindow is how long a duration waits for a spell to take its slot. The server sends
-// it just before the update that puts the spell in the slot, within the same tick (SpellAuras.cpp:
-// 6896-6909). An older one came from an aura that was applied and removed within its tick: it
-// must not time the spell that fills the slot later.
-const pendingAuraWindow = time.Second
+// pendingAuraWindow is how long a duration waits for the spell that takes its slot. The server
+// sends the duration at once, straight to the player (SpellAuras.cpp:6909, 7576-7588), but the
+// object update that puts the spell in the slot goes out at the end of the map tick (Map.cpp:903).
+// Past MapUpdate.ObjectsUpdate.Timeout (default 100 ms, Map.cpp:2797) the rest of that update waits
+// for a later tick, so under load the spell can trail its duration by more than a second (inferred
+// from the code, not measured). The window is 5 s to cover that. A duration older than it is dropped.
+// Residual: a slot that changes to a spell with no duration packet of its own takes a pending time,
+// which may be a refresh of the spell it replaced. The core sends a packet for every non-passive
+// aura it puts in a slot, so this is narrow, and the packet has no spell id to tell it apart from a
+// rank swap.
+const pendingAuraWindow = 5 * time.Second
 
 type casting struct {
 	spell uint32
@@ -371,7 +377,7 @@ func (s *Store) DelayCast(g packet.GUID, ms uint32) {
 // so the packet can come first. The packet has no spell id: a duration for a slot that holds
 // a spell is that spell's, and one for an empty slot waits for the spell that fills it. Either
 // way it stays pending for pendingAuraWindow: a different spell that takes the slot in that
-// time (a rank swap in the same tick, which the server sends the duration ahead of) takes it.
+// time (a rank swap, whose duration the server sends ahead of the object update) takes it.
 func (s *Store) AuraDuration(g packet.GUID, slot int, ms int32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -74,10 +74,10 @@ func TestCasting(t *testing.T) {
 	}
 }
 
-// A duration sent while a slot is empty waits for the spell that fills it, if that comes
-// within a second, and survives updates to other units and slots. A duration sent while a
-// spell holds its slot is that spell's; a different spell that takes the slot within a second
-// takes it (a rank swap in the same tick), and one that takes it later does not.
+// A duration sent while a slot is empty waits for the spell that fills it, within
+// pendingAuraWindow, and survives updates to other units and slots. A duration sent while a
+// spell holds its slot is that spell's; a different spell that takes the slot within the window
+// takes it (a rank swap), and one that takes it later does not.
 func TestAuraDurationWaitsForItsSpell(t *testing.T) {
 	s, c := newClockStore()
 	s.Apply([]Block{createBlock(wolf, TypeUnit, 0, 0, map[uint16]uint32{UnitHealth: 50, UnitMaxHealth: 50})})
@@ -150,5 +150,22 @@ func TestPendingAuraWindow(t *testing.T) {
 				t.Fatalf("remaining %+v, want %d ms", u.Auras[0], want)
 			}
 		})
+	}
+}
+
+// A refresh of the spell that holds a slot restarts that spell's timer. The spell does not
+// change, so nothing takes the pending duration over, and a spell that fills another slot
+// never does.
+func TestSameSpellRefreshRestartsTimer(t *testing.T) {
+	s, c := newClockStore()
+	s.Apply([]Block{createBlock(wolf, TypeUnit, 0, 0, map[uint16]uint32{UnitAura + 3: 433})})
+	s.AuraDuration(wolf, 3, 30000)
+	c.add(10 * time.Second)
+	s.AuraDuration(wolf, 3, 30000) // Food refreshed: a full 30 s from now
+	s.Apply([]Block{{Type: BlockValues, GUID: wolf, Values: map[uint16]uint32{UnitAura + 3: 433, UnitAura + 4: 1243}}})
+	u, _ := s.Get(wolf, 0, 0, 0)
+	if len(u.Auras) != 2 || u.Auras[0].Slot != 3 || u.Auras[0].SpellID != 433 || u.Auras[0].RemainingMS == nil || *u.Auras[0].RemainingMS != 30000 ||
+		u.Auras[1].Slot != 4 || u.Auras[1].RemainingMS != nil {
+		t.Fatalf("%+v", u.Auras)
 	}
 }

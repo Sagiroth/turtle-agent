@@ -118,3 +118,49 @@ func TestPercentHealthPassesThrough(t *testing.T) {
 		t.Fatalf("%+v %+v", u, ch)
 	}
 }
+
+// A create block for a GUID the store already holds (a respawn, a unit back in range)
+// starts the object afresh: old auras and values are gone and only ChangeCreated is
+// reported (ruling T20 minor 1).
+func TestCreateForExistingGUIDResets(t *testing.T) {
+	s := NewStore()
+	s.Apply([]Block{createBlock(wolf, TypeUnit, 1, 1, map[uint16]uint32{UnitHealth: 0, UnitMaxHealth: 50, UnitAura + 33: 589, UnitTarget: 0x2A})})
+	ch := s.Apply([]Block{createBlock(wolf, TypeUnit, 2, 2, map[uint16]uint32{UnitHealth: 50, UnitMaxHealth: 50})})
+	if len(ch) != 1 || ch[0] != (Change{GUID: wolf, Kind: ChangeCreated}) {
+		t.Fatalf("%+v", ch)
+	}
+	if u, _ := s.Get(wolf, 0, 0, 0); u.Health != 50 || u.Dead || len(u.Auras) != 0 || u.Target != 0 || u.X != 2 {
+		t.Fatalf("%+v", u)
+	}
+}
+
+// Only units report ChangeRemoved; game objects leave range silently (ruling T20 minor 2).
+func TestOutOfRangeReportsOnlyUnits(t *testing.T) {
+	s := NewStore()
+	const chest packet.GUID = 0xF110000000000003
+	s.Apply([]Block{createBlock(wolf, TypeUnit, 1, 1, nil), createBlock(chest, TypeGameObject, 1, 1, nil)})
+	ch := s.Apply([]Block{{Type: BlockOutOfRange, GUIDs: []packet.GUID{chest, wolf}}})
+	if len(ch) != 1 || ch[0] != (Change{GUID: wolf, Kind: ChangeRemoved}) {
+		t.Fatalf("%+v", ch)
+	}
+	if _, ok := s.Get(chest, 0, 0, 0); ok {
+		t.Fatal("game object kept")
+	}
+}
+
+// Units at the same distance come back in GUID order, so a limit cuts the same set every
+// call (ruling T20 minor 3).
+func TestUnitsTieBreakOnGUID(t *testing.T) {
+	s := NewStore()
+	var blocks []Block
+	for _, g := range []packet.GUID{0x35, 0x31, 0x34, 0x32, 0x33} {
+		blocks = append(blocks, createBlock(g, TypePlayer, 3, 4, nil))
+	}
+	s.Apply(blocks)
+	for i := 0; i < 20; i++ {
+		us := s.Units(Filter{Limit: 3}, 0, 0, 0)
+		if len(us) != 3 || us[0].GUID != 0x31 || us[1].GUID != 0x32 || us[2].GUID != 0x33 {
+			t.Fatalf("%+v", us)
+		}
+	}
+}

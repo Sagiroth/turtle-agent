@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/pjerra/turtle-agent/internal/events"
+	"github.com/pjerra/turtle-agent/internal/objects"
 	"github.com/pjerra/turtle-agent/internal/rpc"
 	"github.com/pjerra/turtle-agent/internal/session"
 )
@@ -38,6 +39,14 @@ type chatLogParams struct {
 	Since  uint64 `json:"since"`
 	Limit  int    `json:"limit,omitempty"`
 	WaitMS int    `json:"wait_ms,omitempty"`
+}
+
+type unitsParams struct {
+	Near    float32 `json:"near,omitempty"`
+	Entry   uint32  `json:"entry,omitempty"`
+	Hostile *bool   `json:"hostile,omitempty"`
+	Name    string  `json:"name,omitempty"`
+	Limit   int     `json:"limit,omitempty"`
 }
 
 // registerMethods wires the spec's JSON-RPC methods (v1) to the session; later
@@ -74,6 +83,13 @@ func registerMethods(srv *rpc.Server, s *session.Session) {
 	}))
 	srv.Register("party", rpc.Typed(func(ctx context.Context, _ empty) (session.PartyInfo, error) {
 		return s.Party(), nil
+	}))
+	srv.Register("units", rpc.Typed(func(ctx context.Context, p unitsParams) ([]objects.Unit, error) {
+		us := s.Units(objects.Filter{Near: p.Near, Entry: p.Entry, Hostile: p.Hostile, Name: p.Name, Limit: p.Limit})
+		if us == nil {
+			us = []objects.Unit{}
+		}
+		return us, nil
 	}))
 }
 

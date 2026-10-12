@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/pjerra/turtle-agent/internal/events"
+	"github.com/pjerra/turtle-agent/internal/objects"
 	"github.com/pjerra/turtle-agent/internal/opcode"
 	"github.com/pjerra/turtle-agent/internal/packet"
 	"github.com/pjerra/turtle-agent/internal/worldconn"
@@ -70,6 +71,7 @@ type Options struct {
 	// NamesWait bounds how long an event waits for a source or target name before it is
 	// logged with the names known so far; 0: 2 s.
 	NamesWait time.Duration
+	Store     *objects.Store // nil: a new store
 }
 
 // maxLoginRetries bounds the retries after SMSG_CHARACTER_LOGIN_FAILED code 1. With the
@@ -86,6 +88,10 @@ type StatusInfo struct {
 	Y           float32        `json:"y"`
 	Z           float32        `json:"z"`
 	O           float32        `json:"o"`
+	Health      uint32         `json:"health"`
+	MaxHealth   uint32         `json:"max_health"`
+	Power       uint32         `json:"power"`
+	MaxPower    uint32         `json:"max_power"`
 	LatencyMS   uint32         `json:"latency_ms"`
 	Unknown     map[string]int `json:"unknown_opcodes"`
 	ParseErrors int            `json:"parse_errors"`
@@ -121,6 +127,7 @@ type Session struct {
 	conn     *worldconn.Conn
 	opts     Options
 	log      *events.Log
+	store    *objects.Store
 	logger   io.Writer
 	handlers map[uint16]handler
 	reqs     chan request
@@ -174,11 +181,14 @@ func New(conn *worldconn.Conn, opts Options) *Session {
 	if opts.NamesWait == 0 {
 		opts.NamesWait = 2 * time.Second
 	}
+	if opts.Store == nil {
+		opts.Store = objects.NewStore()
+	}
 	s := &Session{
 		conn: conn, opts: opts, log: opts.Log, logger: opts.Logger,
 		handlers: map[uint16]handler{}, reqs: make(chan request), done: make(chan struct{}),
 		ready: make(chan struct{}), start: time.Now(), state: StatusConnecting, unknown: map[uint16]int{},
-		names: newNameCache(),
+		names: newNameCache(), store: opts.Store,
 	}
 	s.register()
 	return s
@@ -189,6 +199,7 @@ func (s *Session) register() {
 	s.registerCore()
 	s.registerChat()
 	s.registerParty()
+	s.registerWorld()
 }
 
 func (s *Session) registerCore() {
@@ -232,11 +243,16 @@ func (s *Session) Status() StatusInfo {
 	for op, n := range s.unknown {
 		unknown[opcode.Name(op)] = n
 	}
-	return StatusInfo{
+	info := StatusInfo{
 		State: s.state, Character: s.self.Name, GUID: s.self.GUID, Level: s.self.Level, Map: s.mapID,
 		X: s.pos[0], Y: s.pos[1], Z: s.pos[2], O: s.pos[3], LatencyMS: s.latency,
 		Unknown: unknown, ParseErrors: s.parseErrs, LastSeq: s.log.Last(), Error: s.lastErr,
 	}
+	// The player's own values from the store (zero until its create block arrives).
+	if u, ok := s.store.Get(s.self.GUID, s.pos[0], s.pos[1], s.pos[2]); ok {
+		info.Health, info.MaxHealth, info.Power, info.MaxPower = u.Health, u.MaxHealth, u.Power, u.MaxPower
+	}
+	return info
 }
 
 // Run drives the character from the character list to logout. It returns nil after a

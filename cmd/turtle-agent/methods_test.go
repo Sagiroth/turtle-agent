@@ -15,6 +15,8 @@ import (
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/game"
 	"github.com/pjerra/turtle-agent/internal/game/gametest"
+	"github.com/pjerra/turtle-agent/internal/objects"
+	"github.com/pjerra/turtle-agent/internal/objects/objtest"
 	"github.com/pjerra/turtle-agent/internal/opcode"
 	"github.com/pjerra/turtle-agent/internal/packet"
 	"github.com/pjerra/turtle-agent/internal/rpc"
@@ -336,4 +338,53 @@ func errCode(m map[string]any) int {
 	e, _ := m["error"].(map[string]any)
 	c, _ := e["code"].(float64)
 	return int(c)
+}
+
+// units is a bare array (never null) of {guid, name, health, max_health, dead, ...}; status
+// adds the player's own health and power (T14 contract, read by wowharness/headless.py).
+func TestUnitsAndStatusHealth(t *testing.T) {
+	r := newRig(t)
+	if out := r.call("units", "{}"); out["error"] != nil || out["result"] == nil || len(out["result"].([]any)) != 0 {
+		t.Fatalf("no units: %v", out)
+	}
+	const wolf packet.GUID = 0xF13000012B000001
+	w := objtest.Header(2)
+	for _, u := range []struct {
+		g      packet.GUID
+		typ    uint8
+		x      float32
+		hp, mx uint32
+	}{{0x2A, objects.TypePlayer, 1, 700, 800}, {wolf, objects.TypeUnit, 11, 0, 50}} {
+		w.U8(uint8(objects.BlockCreate2)).PackedGUID(u.g).U8(u.typ)
+		objtest.Living(w, 0x20, game.MoveInfo{X: u.x, Y: 2, Z: 3}, nil)
+		objtest.Values(w, 192, map[uint16]uint32{objects.UnitHealth: u.hp, objects.UnitMaxHealth: u.mx, objects.UnitPower1: 10, objects.UnitMaxPower1: 20})
+	}
+	r.srv.Send(opcode.SMSGUpdateObject, w.Bytes())
+	r.expect(opcode.CMSGCreatureQuery)
+	r.srv.Send(opcode.SMSGCreatureQueryResponse, packet.NewWriter().U32(299).CString("Young Wolf").U8(0).U8(0).U8(0).CString("").
+		U32(0).U32(1).U32(1).U32(0).U32(0).U32(0).U32(161).U8(0).U8(0).Bytes())
+	var us []any
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		us = r.call("units", `{"name":"wolf","limit":200}`)["result"].([]any)
+		if len(us) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("units %v", us)
+		}
+	}
+	u := us[0].(map[string]any)
+	if u["guid"] != "0xF13000012B000001" || u["name"] != "Young Wolf" || u["health"] != float64(0) || u["max_health"] != float64(50) || u["dead"] != true {
+		t.Fatalf("%v", u)
+	}
+	if out := r.call("units", `{"name":"bear"}`)["result"].([]any); len(out) != 0 {
+		t.Fatalf("bear %v", out)
+	}
+	if out := r.call("units", `{"hostile":false,"near":5}`)["result"].([]any); len(out) != 0 {
+		t.Fatalf("near %v", out)
+	}
+	st := r.call("status", "{}")["result"].(map[string]any)
+	if st["health"] != float64(700) || st["max_health"] != float64(800) || st["power"] != float64(10) || st["max_power"] != float64(20) {
+		t.Fatalf("status %v", st)
+	}
 }

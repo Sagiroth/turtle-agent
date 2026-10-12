@@ -18,8 +18,9 @@ const (
 	ChangeCombat
 )
 
-// Change is a state change the session turns into events. Objects seen for the first
-// time report only ChangeCreated, so a login burst does not flood the log with auras.
+// Change is a state change the session turns into events. A create block reports only
+// ChangeCreated, so a login burst does not flood the log with auras. ChangeRemoved is
+// reported for units only.
 type Change struct {
 	GUID     packet.GUID
 	Kind     ChangeKind
@@ -97,13 +98,13 @@ func (s *Store) Apply(blocks []Block) []Change {
 	for _, b := range blocks {
 		switch b.Type {
 		case BlockCreate, BlockCreate2:
-			o, existed := s.get(b.GUID)
-			if !existed {
-				ch = append(ch, Change{GUID: b.GUID, Kind: ChangeCreated})
-			}
-			o.typ = b.ObjType
+			// A create block carries the whole object, so one for a GUID already held (a
+			// respawn, a unit back in range) starts it afresh: no stale auras or target.
+			o := &object{guid: b.GUID, typ: b.ObjType, values: map[uint16]uint32{}}
+			s.objs[b.GUID] = o
+			ch = append(ch, Change{GUID: b.GUID, Kind: ChangeCreated})
 			moveObject(o, b.Move)
-			ch = setValues(o, b.Values, ch, existed)
+			ch = setValues(o, b.Values, ch, false)
 		case BlockValues:
 			o, existed := s.get(b.GUID) // values before a create we missed are kept
 			ch = setValues(o, b.Values, ch, existed)
@@ -113,9 +114,11 @@ func (s *Store) Apply(blocks []Block) []Change {
 			}
 		case BlockOutOfRange:
 			for _, g := range b.GUIDs {
-				if _, ok := s.objs[g]; ok {
+				if o, ok := s.objs[g]; ok {
 					delete(s.objs, g)
-					ch = append(ch, Change{GUID: g, Kind: ChangeRemoved})
+					if isUnit(o) {
+						ch = append(ch, Change{GUID: g, Kind: ChangeRemoved})
+					}
 				}
 			}
 		}
@@ -202,7 +205,12 @@ func (s *Store) Units(f Filter, ox, oy, oz float32) []Unit {
 		out = append(out, u)
 	}
 	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].Distance < out[j].Distance })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Distance != out[j].Distance {
+			return out[i].Distance < out[j].Distance
+		}
+		return out[i].GUID < out[j].GUID
+	})
 	limit := f.Limit
 	if limit <= 0 {
 		limit = 100

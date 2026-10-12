@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -18,8 +19,36 @@ import (
 	"github.com/pjerra/turtle-agent/internal/worldconn"
 )
 
-// dial is a seam so a test can see which key the login path hands to the world server.
-var dial = worldconn.Dial
+// Seams for tests: dial shows which key the login path hands to the world server,
+// authLogin lets an end-to-end test skip realmd's SRP and pick the ticket.
+var (
+	dial      = worldconn.Dial
+	authLogin = auth.Login
+)
+
+// withPrefix labels err with where it came from, unless it already says so (the auth
+// and worldconn errors carry their own "realmd:" / "world:" prefix).
+func withPrefix(prefix string, err error) string {
+	if strings.HasPrefix(err.Error(), prefix) {
+		return err.Error()
+	}
+	return prefix + " " + err.Error()
+}
+
+// checkCapture runs before the throttled realmd login so a bad --capture never costs an
+// attempt: the file must not exist and the secrets known up front must be long enough.
+// The key is 40 bytes and checked later by capture.Create.
+func checkCapture(path, account, password string) error {
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("capture: %s already exists (captures are never overwritten)", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("capture: %w", err)
+	}
+	if len(account) < 3 || len(password) < 3 {
+		return fmt.Errorf("capture: %w", capture.ErrSecretTooShort)
+	}
+	return nil
+}
 
 // dialWorld keys the world connection with Ticket.KeyBytes(), the unpadded form the
 // server hashes (39 bytes when the high byte of K is zero), never Ticket.Key[:].
@@ -52,18 +81,25 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return exitUsage
 	}
 
+	if *capPath != "" {
+		if err := checkCapture(*capPath, account, password); err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitUsage
+		}
+	}
+
 	actx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	ticket, err := auth.Login(actx, st.Realmd, account, password)
+	ticket, err := authLogin(actx, st.Realmd, account, password)
 	cancel()
 	if err != nil {
-		fmt.Fprintln(stderr, "realmd:", err)
+		fmt.Fprintln(stderr, withPrefix("realmd:", err))
 		return exitAuth
 	}
 	// The account name is sensitive (ruling P10): the progress line does not repeat it.
 	fmt.Fprintf(stderr, "realmd: authenticated, %d realm(s)\n", len(ticket.Realms))
 	realm, err := ticket.Pick(st.Realm)
 	if err != nil {
-		fmt.Fprintln(stderr, "realmd:", err)
+		fmt.Fprintln(stderr, withPrefix("realmd:", err))
 		return exitRealm
 	}
 	addr := realm.Address
@@ -96,7 +132,7 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	conn, err := dialWorld(wctx, addr, ticket, tap)
 	cancel()
 	if err != nil {
-		fmt.Fprintln(stderr, "world:", err)
+		fmt.Fprintln(stderr, withPrefix("world:", err))
 		return exitWorld
 	}
 	fmt.Fprintf(stderr, "world: authenticated on %s (%s)\n", realm.Name, addr)

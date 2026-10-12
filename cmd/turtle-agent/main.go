@@ -53,7 +53,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 func usage(w io.Writer) {
 	fmt.Fprintln(w, `usage:
-  turtle-agent login [--config FILE] [--capture FILE] [--stay DURATION] [--rpc ADDR] <account> <character>
+  turtle-agent login [--config FILE] [--capture FILE] [--stay DURATION] <account> <character>
   turtle-agent scrub-check [--config FILE] <capture>...
   turtle-agent capture-stats <capture>
   turtle-agent version`)

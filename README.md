@@ -6,13 +6,14 @@ A headless World of Warcraft client for **vanilla 1.12 / Turtle WoW 1.18.1** ser
 One process logs one character in, with no game window, and exposes it over a local JSON-RPC API. Use it to drive a
 test character from scripts or AI agents: chat, channels and GM commands, addon messages, NPC gossip, party, units
 around you, target, attack, cast, short walks, walks on the server's own navmesh and GM teleports, raid icons, group
-loot rolls, using items from the bags, corpse loot, mounts, equipping from the backpack, and an ordered event log of chat, combat, marks and rolls.
+loot rolls, using items from the bags, corpse loot, mounts, equipping from the backpack, buying and selling at
+vendors, trainers and quests, and an ordered event log of chat, combat, marks, rolls and NPC results.
 
 It was built to test server-side bots ([TortoiseBots](https://github.com/Sagiroth/TortoiseBots)) on a private test
 server: log in, hire or invite bots, start a fight, then read back the combat log and what each bot did.
 
 > Use it only on servers you run or are allowed to test on. It has no Warden emulation and does no rendering or
-> inventory management beyond listing the bags, using and equipping items, and taking corpse loot.
+> inventory management beyond listing the bags, using and equipping items, taking corpse loot, and buying and selling.
 
 ## Quick start
 
@@ -146,14 +147,27 @@ browser (`Origin` header) and other `Host` names are refused.
 | `tbm` | `command` (a `.bot` command without `.bot`), `via` (chat, the default, or addon) | `since` |
 | `tbm_handshake` | `via`, `wait_ms` (default 5000) | `since`, `next`, `version`, `caps`, `transport`, `roster[]`, `bot_state`, `errors`, `lines`, `complete` |
 | `join_channel` / `leave_channel` | `name`, `password` / `name` | |
-| `gossip_hello` | `guid`, `wait_ms` | `since`, `event` (the menu, with `wait_ms`) |
-| `gossip_select` | `guid`, `option`, `code` (coded options only), `wait_ms` | `since`, `event` (next menu or `gossip_complete`) |
+| `gossip_hello` | `guid`, `wait_ms` | `since`, `event`: the first answer within `wait_ms`: the menu (`gossip`), `gossip_complete`, or what the NPC opens at once (`quest_list`, `quest_details`, `quest_request_items`, `quest_offer_reward`, `vendor_list`, `trainer_list`) |
+| `gossip_select` | `guid`, `option`, `code` (coded options only), `wait_ms` | `since`, `event` (next menu, `gossip_complete`, or the list or quest panel the option opens) |
+| `vendor_list` | `guid`, `wait_ms` | `since`, `event` (`vendor_list`, or `vendor_sell_failed` when no vendor is in reach) |
+| `buy` | `guid`, `item_entry`, `count` (purchases, default 1, at most 255; each hands over the line's `buy_count` items), `bag` + `slot` (optional destination: bag 255 is the backpack, 19-22 a bag), `wait_ms` | `since`, `event` (`vendor_buy`, `vendor_buy_failed` or `inventory_error`) |
+| `sell` | `guid`, `item_entry` (first in the backpack) or `slot` (+ `bag`, as for `equip`), `count` (default 0: the whole stack, at most 255), `wait_ms` | `since`, `item` (the item sent), `event` (`vendor_sell` or `vendor_sell_failed`) |
+| `trainer_list` | `guid`, `wait_ms` | `since`, `event` (`trainer_list`) |
+| `train` | `guid`, `spell_id`, `wait_ms` | `since`, `event` (`trainer_trained` or `trainer_failed`) |
+| `quest_hello` | `guid`, `wait_ms` | like `gossip_hello`, through CMSG_QUESTGIVER_HELLO |
+| `quest_query` | `guid`, `quest_id`, `wait_ms` | `since`, `event` (`quest_details`) |
+| `quest_accept` | `guid`, `quest_id`, `wait_ms` | `since`, `event` (`quest_accepted` or `quest_error`) |
+| `quest_complete` | `guid`, `quest_id`, `wait_ms` | `since`, `event` (`quest_offer_reward`, or `quest_request_items` while the items are missing, or `quest_error`) |
+| `quest_reward` | `guid`, `quest_id`, `choice` (index into the offer's choices, 0-5; optional when the offer has at most one), `wait_ms` | `since`, `event` (`quest_rewarded`, `quest_error`, or the offer again when the server refuses) |
+| `quest_abandon` | `quest_id`, `wait_ms` | `since`, `event` (`quest_abandoned`) |
+| `quest_log` | | `quests[]` from the character's own quest log: `slot`, `quest_id`, `complete`, `failed`, `counts[4]` |
 | `logout` | | `outcome` (`complete` or `closed_by_server`); `lost` (-32002) and `timeout` (-32004) are errors with `data.outcome`; the reply is written before the process exits |
 
 Events have `seq`, `time`, `kind`, `source`, `target`, `spell_id`, `amount`, `crit`, `text`, `party` and `data`.
 Kinds cover chat, system, whispers, melee, spell damage, periodic ticks, heals, energize, spell start/go/miss/fail,
 auras, deaths, kills, party changes, raid icons (`raid_mark`), group loot rolls (`loot_roll_start`, `loot_roll`, `loot_roll_won`,
-`loot_all_passed`, tied together by `data.roll_id`), refused equips and item uses (`inventory_error`), corpse loot (`loot_open`,
+`loot_all_passed`, tied together by `data.roll_id`), refused equips and item uses (`inventory_error`), NPC dealings (vendor, trainer and quest events, see
+[Vendors, trainers and quests](#vendors-trainers-and-quests)), corpse loot (`loot_open`,
 `loot_taken`, `loot_money`, `loot_money_share`, `loot_error`, `loot_closed`), the player's own mount and stand state (`mount`,
 `mount_result`, `stand_state`) and session state. Cursors are exclusive; `dropped` says older events were evicted.
 A chat or system line whose colour codes were stripped keeps the original in `data.raw` (protocol lines such as
@@ -261,6 +275,51 @@ Each `units` row (and `unit`) also says what the unit is doing:
 Spell names come from the core's `spell_template` (`sql/base/tw_world_spell_template.sql`), packed into
 `internal/spells/names.tsv.gz` by `make spellnames CORE=<tortoise-wow checkout>`. A spell the server's database
 added later has no `name`.
+
+## Vendors, trainers and quests
+
+Every request here is sent at once and answered by events; each method also takes `wait_ms` and then returns the first
+event that answers it, as `gossip_hello` does (`event` is null when nothing came in time; read `events` from `since`
+for the rest). The NPC must be within reach: the core answers a request from too far away with nothing, or with a
+refusal event. These packets follow vanilla 1.12 as the core sends them (`ItemHandler.cpp`, `NPCHandler.cpp`,
+`QuestHandler.cpp`, `GossipDef.cpp`).
+
+| Event | `source` / data |
+| --- | --- |
+| `vendor_list` | the vendor; `items[]` (`index`, `item_entry`, `display_id`, `stock` (-1: unlimited), `price` in copper, `durability`, `buy_count`), `empty` |
+| `vendor_buy` | the vendor; `item_entry` (from the oldest purchase asked of that vendor), `count`, `stock`, `slot` (the vendor's own line number; the server skips lines you cannot use, so it is not `index`) |
+| `vendor_buy_failed` | the vendor (none when out of reach); `item_entry`, `code`, `reason` (`cant_find_item`, `item_already_sold`, `not_enough_money`, `seller_dont_like_you`, `too_far`, `item_sold_out`, `cant_carry_more`, `rank_required`, `reputation_required`). A full bag is an `inventory_error` instead |
+| `vendor_sell` | the vendor; `item_guid`, `item_entry`, `bag`, `slot`, `count` sold. The core sends no packet for a sale, so the agent reports it when the item leaves its slot or its stack shrinks (within 5 s of the request) |
+| `vendor_sell_failed` | the vendor (none when out of reach); `code`, `reason` (`cant_find_item`, `cant_sell_item`, `cant_find_vendor`, `not_your_item`, `unknown`, `only_empty_bag`), `item_guid`, `item_entry` |
+| `trainer_list` | the trainer; `trainer_type` (0 class, 1 mounts, 2 tradeskills, 3 pets), `greeting`, `spells[]` (`spell_id`, `state` learnable, unavailable or known, `cost`, `level`, `req_skill`, `req_skill_value`, `req_spell_1`, `req_spell_2`, `primary_profession`) |
+| `trainer_trained` | the trainer; `spell_id` |
+| `trainer_failed` | the trainer; `spell_id`, `code`, `reason` (`unavailable`, `not_enough_money`, `not_enough_skill`) |
+| `quest_list` | the NPC; `greeting`, `quests[]` (`id`, `icon`, `level`, `title`) |
+| `quest_details` | the NPC; `quest_id`, `title`, `details`, `objectives`, `can_accept`, `choices[]`, `rewards[]` (`item_entry`, `count`), `money`, `reward_spell` |
+| `quest_request_items` | the NPC; `quest_id`, `title`, `text`, `money` asked, `items[]` asked, `completable` |
+| `quest_offer_reward` | the NPC; `quest_id`, `title`, `text`, `choices[]`, `rewards[]`, `money`, `reward_spell` |
+| `quest_accepted` | the NPC; `quest_id`, `slot`, `complete`. The core sends no packet for an accept; the agent reports it when the quest appears in the log (within 5 s) |
+| `quest_rewarded` | the NPC the reward was asked of; `quest_id`, `xp`, `money`, `rewards[]` |
+| `quest_abandoned` | `quest_id`, when the quest leaves the log (within 5 s) |
+| `quest_error` | `error`: `invalid` (the core refused: `reason` such as `low_level`, `already_on_quest`, `inventory_full`), `failed_at_giver` (a hand-in failed: `quest_id`, `reason`) or `log_full` |
+| `quest_update` | `update`: `kill` (`quest_id`, `entry`, `count`, `required`; `target` is the victim), `item` (`item_entry`, `count`; the packet does not name the quest), `complete`, `failed`, `timer_failed` (`quest_id`) |
+
+How to use them:
+
+- **Vendors.** `vendor_list` asks a vendor NPC directly; a vendor reached through a gossip option (`icon` 1) answers
+  `gossip_select` with the list. `buy` takes the item entry (the list needs not be read first; the server checks its
+  own). `sell` picks the item as `equip` does and refuses a count above the stack. A refused buy or sale arrives as a
+  failed event; a sale the server accepted has no answer of its own (see `vendor_sell` above).
+- **Trainers.** `trainer_list` then `train` with a `spell_id` from the list. A `learnable` spell can be bought; the
+  server decides the rest.
+- **Quests.** A quest giver answers a hello with a gossip menu (its quests in `data.quests`), a `quest_list`, or at once
+  with the one quest's panel. The panels follow the client: a quest you are not on is `quest_query` (details), then
+  `quest_accept`; a quest you are on is `quest_complete`, which shows `quest_request_items` and, when you hold the
+  items, presses "Complete Quest" for you so the `quest_offer_reward` follows; then `quest_reward` with the `choice`.
+  `quest_accept`, `quest_complete` and `quest_reward` work without the earlier steps too, since the core checks each
+  one. `quest_reward` is checked against the last offer seen for that NPC and quest (a `choice` is needed when it
+  has several). `quest_abandon` clears the quest's log slot (`quest_log`). A refusal the core answers with nothing
+  (an NPC that does not give that quest closes the window with `gossip_complete`) leaves `event` null.
 
 ## Movement
 
@@ -382,9 +441,9 @@ with the same calls as its real-client backend (`chat`, `gm`, `state`, `tail_cha
 | --- | --- |
 | `internal/auth` | SRP6 and realmd: logon challenge/proof, realm list |
 | `internal/worldconn` | TCP framing, the 1.12 header cipher, auth session with the addon block |
-| `internal/session` | single-owner session loop: login, ping, chat, addon messages, channels, gossip, names, party, world, actions, combat, raid icons, loot rolls, inventory, equip and use, corpse loot, mounts, logout |
-| `internal/game` | packet codecs for chat, addon messages, channels, gossip, queries, groups, actions, the combat log, raid icons, loot rolls, the loot window, items and mounts |
-| `internal/objects` | update-object parser and the object store: units (positions, splines, auras, casts), and the items in the backpack and bags |
+| `internal/session` | single-owner session loop: login, ping, chat, addon messages, channels, gossip, names, party, world, actions, combat, raid icons, loot rolls, inventory, equip and use, vendors, trainers and quests, corpse loot, mounts, logout |
+| `internal/game` | packet codecs for chat, addon messages, channels, gossip, queries, groups, actions, the combat log, raid icons, loot rolls, the loot window, items, mounts, vendors, trainers and quests |
+| `internal/objects` | update-object parser and the object store: units (positions, splines, auras, casts), the items in the backpack and bags, and the quest log |
 | `internal/spells` | spell names by id, from the core's `spell_template` (`tools/spellnamegen`) |
 | `internal/navmesh` | tile loading and path planning over the core's Detour (cgo); `navfixture` builds synthetic tiles |
 | `internal/events` | ordered event log with cursors |

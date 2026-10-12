@@ -221,6 +221,7 @@ type Session struct {
 	loot            lootState        // the open loot window (lootwindow.go)
 	mount           mountState       // the player's mount (useitem.go)
 	gossip          *game.GossipMenu // the open gossip menu, nil once closed
+	npc             npcState         // vendor, trainer and quest requests awaiting their results
 	fall            *fallState
 	last            lastMove // what the server has for the player
 	lastClock       uint32   // the last MovementInfo client time sent
@@ -259,7 +260,7 @@ func New(conn *worldconn.Conn, opts Options) *Session {
 		conn: conn, opts: opts, log: opts.Log, logger: opts.Logger,
 		handlers: map[uint16]handler{}, reqs: make(chan request), done: make(chan struct{}),
 		ready: make(chan struct{}), start: time.Now(), state: StatusConnecting, unknown: map[uint16]int{},
-		names: newNameCache(), store: opts.Store, rolls: map[rollKey]*openRoll{}, runSpeed: defaultRunSpeed, redact: newRedactor(opts.Redact, opts.RedactAnywhere),
+		names: newNameCache(), store: opts.Store, rolls: map[rollKey]*openRoll{}, npc: newNPCState(), runSpeed: defaultRunSpeed, redact: newRedactor(opts.Redact, opts.RedactAnywhere),
 	}
 	s.register()
 	return s
@@ -279,6 +280,7 @@ func (s *Session) register() {
 	s.registerLootWindow()
 	s.registerUseItem()
 	s.registerSocial()
+	s.registerNPC()
 }
 
 func (s *Session) registerCore() {
@@ -467,6 +469,7 @@ func (s *Session) dispatch(p worldconn.Packet) error {
 		return nil
 	}
 	err := h(p.Body)
+	s.checkNPC()
 	if err == nil {
 		return nil
 	}
@@ -495,6 +498,7 @@ func (s *Session) dispatch(p worldconn.Packet) error {
 
 func (s *Session) onTick(now time.Time) error {
 	s.flushNames(now)
+	s.prunePending(now)
 	if err := s.tickWalk(); err != nil {
 		return err
 	}

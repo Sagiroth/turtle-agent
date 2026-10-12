@@ -104,13 +104,24 @@ func registerSocialMethods(srv *rpc.Server, cur func() *session.Session) {
 	}))
 }
 
-// nextGossip waits up to waitMS for the first gossip or gossip_complete event after since;
-// waitMS 0 does not look at all.
+// gossipKinds are the answers to a gossip hello or select: the menu, its end, or what an
+// option opens (a vendor or trainer list, or a quest panel).
+var gossipKinds = []string{events.KindGossip, events.KindGossipComplete, events.KindVendorList, events.KindTrainerList,
+	events.KindQuestList, events.KindQuestDetails, events.KindQuestRequestItems, events.KindQuestOfferReward}
+
+// nextGossip waits up to waitMS for the first answer event after since; waitMS 0 does not
+// look at all.
 func nextGossip(ctx context.Context, log *events.Log, since uint64, waitMS int) *events.Event {
+	return firstEvent(ctx, log, since, gossipKinds, waitMS)
+}
+
+// firstEvent waits up to waitMS for the first event of one of kinds after since, or returns
+// nil when none came; waitMS 0 does not look at all.
+func firstEvent(ctx context.Context, log *events.Log, since uint64, kinds []string, waitMS int) *events.Event {
 	if waitMS <= 0 {
 		return nil
 	}
-	q := events.Query{Since: since, Kinds: []string{events.KindGossip, events.KindGossipComplete}, Limit: 1}
+	q := events.Query{Since: since, Kinds: kinds, Limit: 1}
 	if p := readEvents(ctx, log, q, waitMS); len(p.Events) > 0 {
 		return &p.Events[0]
 	}

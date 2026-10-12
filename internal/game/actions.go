@@ -123,11 +123,9 @@ func ParseMovementChange(body []byte, hasSpeed bool) (MovementChange, error) {
 
 // BuildMovementChangeAck acknowledges a forced change: u64 guid, u32 counter, MovementInfo,
 // and the new speed for speed changes (MovementHandler.cpp:430-443, :657-668). The server
-// matches the echoed speed within 0.01 (Unit.cpp:7497-7523). A nil speed also gives
-// CMSG_MOVE_KNOCK_BACK_ACK (MovementHandler.cpp:739-751), whose MovementInfo must carry
-// MoveJumping and the knockback's values (Unit.cpp:7479-7495). The water-walk, hover and
-// feather-fall acks add a u32 apply after MovementInfo (MovementHandler.cpp:543-558); this
-// builder does not write it.
+// matches the echoed speed within 0.01 (Unit.cpp:7497-7523). A nil speed gives the root
+// and unroot acks. Knockbacks use BuildKnockBackAck, the water-walk, hover and feather-fall
+// toggles BuildMovementToggleAck.
 func BuildMovementChangeAck(g packet.GUID, counter uint32, m MoveInfo, speed *float32) []byte {
 	w := packet.NewWriter().GUID(g).U32(counter)
 	WriteMoveInfo(w, m)
@@ -136,6 +134,51 @@ func BuildMovementChangeAck(g packet.GUID, counter uint32, m MoveInfo, speed *fl
 	}
 	return w.Bytes()
 }
+
+// KnockBack is SMSG_MOVE_KNOCK_BACK (MovementPacketSender.cpp:198-205). ZSpeed is the
+// server's -verticalSpeed (Unit.cpp:10674): negative throws the player up.
+type KnockBack struct {
+	GUID                      packet.GUID
+	Counter                   uint32
+	Cos, Sin, XYSpeed, ZSpeed float32
+}
+
+func ParseKnockBack(body []byte) (KnockBack, error) {
+	r := packet.NewReader(body)
+	k := KnockBack{GUID: r.PackedGUID(), Counter: r.U32(), Cos: r.F32(), Sin: r.F32(), XYSpeed: r.F32(), ZSpeed: r.F32()}
+	if err := r.Err(); err != nil {
+		return KnockBack{}, fmt.Errorf("SMSG_MOVE_KNOCK_BACK: %w", err)
+	}
+	return k, nil
+}
+
+// BuildKnockBackAck is CMSG_MOVE_KNOCK_BACK_ACK: u64 guid, u32 counter, MovementInfo
+// (MovementHandler.cpp:743-750). The server keeps the change only when the MovementInfo
+// carries MoveJumping and the order's four values within 0.01 (Unit.cpp:7479-7495), so
+// they are copied from k over whatever m holds.
+func BuildKnockBackAck(k KnockBack, m MoveInfo) []byte {
+	m.Flags |= MoveJumping
+	m.JumpZSpeed, m.JumpCos, m.JumpSin, m.JumpXYSpeed = k.ZSpeed, k.Cos, k.Sin, k.XYSpeed
+	w := packet.NewWriter().GUID(k.GUID).U32(k.Counter)
+	WriteMoveInfo(w, m)
+	return w.Bytes()
+}
+
+// BuildMovementToggleAck is CMSG_MOVE_WATER_WALK_ACK, CMSG_MOVE_HOVER_ACK or
+// CMSG_MOVE_FEATHER_FALL_ACK: u64 guid, u32 counter, MovementInfo, then a u32 apply that
+// must match the order (MovementHandler.cpp:549-558, Unit.cpp:7437-7449).
+func BuildMovementToggleAck(g packet.GUID, counter uint32, m MoveInfo, apply bool) []byte {
+	w := packet.NewWriter().GUID(g).U32(counter)
+	WriteMoveInfo(w, m)
+	if apply {
+		return w.U32(1).Bytes()
+	}
+	return w.U32(0).Bytes()
+}
+
+// BuildCancelCast is CMSG_CANCEL_CAST (SpellHandler.cpp:411-414); spell 0 cancels any
+// cast, channel or auto-repeat in progress (Object.cpp:5428-5440).
+func BuildCancelCast(spell uint32) []byte { return packet.NewWriter().U32(spell).Bytes() }
 
 type AttackPair struct {
 	Attacker, Victim packet.GUID

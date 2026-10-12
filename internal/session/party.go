@@ -18,6 +18,8 @@ type PartyMember struct {
 	Online    bool        `json:"online"`
 	Dead      bool        `json:"dead"`
 	Leader    bool        `json:"leader"`
+	Assistant bool        `json:"assistant,omitempty"` // a raid assistant
+	Subgroup  int         `json:"subgroup,omitempty"`  // raid subgroup 1-8, as the raid frame numbers them; 0 in a party
 	Health    uint16      `json:"health"`
 	MaxHealth uint16      `json:"max_health"`
 	PowerType uint8       `json:"power_type"`
@@ -32,6 +34,7 @@ type PartyInfo struct {
 	InGroup       bool          `json:"in_group"`
 	Raid          bool          `json:"raid,omitempty"`      // a raid group, not a party
 	Assistant     bool          `json:"assistant,omitempty"` // the player is a raid assistant
+	Subgroup      int           `json:"subgroup,omitempty"`  // the player's raid subgroup 1-8; 0 in a party
 	Leader        packet.GUID   `json:"leader,omitempty"`
 	Members       []PartyMember `json:"members"`
 	PendingInvite string        `json:"pending_invite,omitempty"`
@@ -206,11 +209,18 @@ func (s *Session) onGroupList(body []byte) error {
 	next := PartyInfo{InGroup: len(g.Members) > 0, Leader: g.Leader, PendingInvite: s.party.PendingInvite}
 	next.Raid = next.InGroup && g.Type == game.GroupRaid
 	next.Assistant = next.InGroup && g.OwnFlags&game.GroupAssistant != 0
+	if next.Raid { // a party's list carries subgroup 0 for everyone
+		next.Subgroup = int(game.FlagsSubgroup(g.OwnFlags)) + 1
+	}
 	var joined []PartyMember
 	for _, gm := range g.Members {
 		m, known := old[gm.GUID]
 		m.Name, m.GUID, m.Leader = gm.Name, gm.GUID, gm.GUID == g.Leader
 		m.Online, m.Dead = gm.Status&game.MemberOnline != 0, gm.Status&(game.MemberDead|game.MemberGhost) != 0
+		m.Assistant, m.Subgroup = next.Raid && gm.Flags&game.GroupAssistant != 0, 0
+		if next.Raid {
+			m.Subgroup = int(game.FlagsSubgroup(gm.Flags)) + 1
+		}
 		next.Members = append(next.Members, m)
 		delete(old, gm.GUID)
 		if !known {

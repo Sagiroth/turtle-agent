@@ -100,7 +100,12 @@ browser (`Origin` header) and other `Host` names are refused.
 | `events` | `since`, `kinds`, `limit`, `wait_ms` | page: `events`, `next`, `more`, `dropped` |
 | `chat_log` | `since`, `limit` | chat and system events only |
 | `invite` / `accept_invite` / `leave_group` | `name` / – / – | |
-| `party` | | `in_group`, `leader`, `members[]` with health and online state, `marks` (raid icon name to guid) |
+| `promote` | `guid` or `name` (a group member) | Leader only. Returns once the server's group list shows the new leader |
+| `assistant` | `guid` or `name` (a raid member, or the player itself), `clear` (true takes the flag away) | Leader of a raid only |
+| `convert_raid` | | Leader only: turns the party into a raid |
+| `raid_move` | `guid` or `name`, `subgroup` (1-8), `swap_with` (name) | Leader or assistant of a raid: puts the member in the subgroup; with `swap_with` trades places with that member of the target subgroup, which also works when it is full (five) |
+| `disband` | | Leader only: removes every other member, which ends the group. `leave_group` only takes the player out and the group lives on |
+| `party` | | `in_group`, `raid`, `leader`, `assistant` and `subgroup` (the player's own), `members[]` with health, online state, `assistant` and `subgroup`, `marks` (raid icon name to guid) |
 | `units` | `limit`, `name` | nearby units, nearest first: guid, name, level, health, dead, hostile, in_party; `hostile` means an attackable-looking creature (no NPC flags, not player-controlled), not a faction check: it counts neutral critters and never an enemy-faction player |
 | `target` | `guid` or `name` (prefers living units) | |
 | `attack` / `stop_attack` | | |
@@ -129,6 +134,14 @@ auras, deaths, kills, party changes, raid icons (`raid_mark`), group loot rolls 
 `loot_all_passed`, tied together by `data.roll_id`), refused equips (`inventory_error`) and session state. Cursors are exclusive; `dropped` says older events were evicted.
 A chat or system line whose colour codes were stripped keeps the original in `data.raw` (protocol lines such as
 `TBM:ROSTER|…|removing` lose `|r` otherwise).
+
+Group control (`promote`, `assistant`, `convert_raid`, `raid_move`, `disband`): the server drops a group command it
+refuses without a reply, so each call checks the rank it can see (leader, or assistant for `raid_move`), sends the
+packet and waits up to 2 s for the group list that shows the change; it errors at once without the rank or outside a
+raid, and after 2 s with "no SMSG_GROUP_LIST". A call that finds the group already in the wanted state (already
+leader, already a raid, flag already set, already in the subgroup) succeeds without sending. `subgroup` counts 1-8 as
+the raid frame does (the wire counts 0-7); `party` reports it only for a raid. `promote` needs the target online
+(`HandleGroupSetLeaderOpcode`, GroupHandler.cpp:334-352). Not verified against a live server.
 
 Addons, channels and NPCs:
 

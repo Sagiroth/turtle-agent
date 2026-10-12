@@ -105,7 +105,7 @@ type QuestDetails struct {
 	Title, Details, Objective string
 	AutoAccept                bool // the "auto finish" word, 1 when the server shows the Accept button
 	Choices, Rewards          []QuestItem
-	Money                     uint32
+	Money                     int32 // GetRewOrReqMoney is signed: a negative sum is what the player pays
 	RewardSpell               uint32
 }
 
@@ -115,7 +115,7 @@ func ParseQuestDetails(body []byte) (QuestDetails, error) {
 	d.AutoAccept = r.U32() != 0
 	d.Choices = readQuestItems(r)
 	d.Rewards = readQuestItems(r)
-	d.Money = r.U32()
+	d.Money = r.I32()
 	d.RewardSpell = r.U32()
 	for i, n := uint32(0), r.U32(); i < n && r.Err() == nil; i++ {
 		r.U32() // emote
@@ -154,11 +154,12 @@ func ParseQuestRequestItems(body []byte) (QuestRequestItems, error) {
 // QuestOfferReward is SMSG_QUESTGIVER_OFFER_REWARD (GossipDef.cpp:637-749): the panel with
 // the Complete button, where one of Choices is picked.
 type QuestOfferReward struct {
-	NPC                packet.GUID
-	Quest              uint32
-	Title, Text        string
-	Choices, Rewards   []QuestItem
-	Money, RewardSpell uint32
+	NPC              packet.GUID
+	Quest            uint32
+	Title, Text      string
+	Choices, Rewards []QuestItem
+	Money            int32 // signed, as in the details
+	RewardSpell      uint32
 }
 
 func ParseQuestOfferReward(body []byte) (QuestOfferReward, error) {
@@ -171,7 +172,7 @@ func ParseQuestOfferReward(body []byte) (QuestOfferReward, error) {
 	}
 	q.Choices = readQuestItems(r)
 	q.Rewards = readQuestItems(r)
-	q.Money = r.U32()
+	q.Money = r.I32()
 	r.U32() // unused
 	q.RewardSpell = r.U32()
 	return q, done(r, "SMSG_QUESTGIVER_OFFER_REWARD")
@@ -182,7 +183,7 @@ func ParseQuestOfferReward(body []byte) (QuestOfferReward, error) {
 type QuestComplete struct {
 	Quest   uint32
 	XP      uint32
-	Money   uint32
+	Money   int32 // signed, as in the details: the core writes GetRewOrReqMoney
 	Rewards []QuestItem
 }
 
@@ -190,7 +191,7 @@ func ParseQuestComplete(body []byte) (QuestComplete, error) {
 	r := packet.NewReader(body)
 	c := QuestComplete{Quest: r.U32()}
 	r.U32() // 3
-	c.XP, c.Money = r.U32(), r.U32()
+	c.XP, c.Money = r.U32(), r.I32()
 	for i, n := uint32(0), r.U32(); i < n && r.Err() == nil; i++ {
 		it := QuestItem{Entry: r.U32(), Count: r.U32()}
 		if r.Err() == nil {

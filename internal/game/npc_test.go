@@ -70,6 +70,42 @@ func TestParseListInventory(t *testing.T) {
 	}
 }
 
+// Bytes written out by hand from the core's code, not by the test writers: SMSG_LIST_INVENTORY
+// with one line (ItemHandler.cpp:916-981) and SMSG_BUY_FAILED (Player.cpp:13589-13599).
+func TestParseLiteralBytes(t *testing.T) {
+	list := []byte{
+		0x01, 0x00, 0x00, 0x01, 0x20, 0x00, 0x30, 0xF1, // vendor guid 0xF130002001000001
+		0x01,                   // one line
+		0x01, 0x00, 0x00, 0x00, // line number
+		0x9F, 0x00, 0x00, 0x00, // item 159
+		0xA4, 0x46, 0x00, 0x00, // display id 18084
+		0xFF, 0xFF, 0xFF, 0xFF, // unlimited
+		0x64, 0x00, 0x00, 0x00, // price 100
+		0x00, 0x00, 0x00, 0x00, // durability
+		0x01, 0x00, 0x00, 0x00, // buy count
+	}
+	got, err := game.ParseListInventory(list)
+	want := game.VendorList{Vendor: npc, Items: []game.VendorItem{{Index: 1, Entry: 159, DisplayID: 18084, Stock: -1, Price: 100, BuyCount: 1}}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v %v\nwant %+v", got, err, want)
+	}
+	failed := []byte{0x01, 0x00, 0x00, 0x01, 0x20, 0x00, 0x30, 0xF1, 0x9F, 0x00, 0x00, 0x00, 0x02}
+	if f, err := game.ParseBuyFailed(failed); err != nil || f != (game.BuyFailed{Vendor: npc, Item: 159, Code: 2}) {
+		t.Fatalf("%+v %v", f, err)
+	}
+	// The reward money of the quest panels is signed (GetRewOrReqMoney): -50 copper is a fee.
+	complete := []byte{
+		0x07, 0, 0, 0, // quest 7
+		0x03, 0, 0, 0, // 3
+		0xC2, 0x01, 0, 0, // 450 xp
+		0xCE, 0xFF, 0xFF, 0xFF, // -50
+		0, 0, 0, 0, // no items
+	}
+	if c, err := game.ParseQuestComplete(complete); err != nil || c.Money != -50 || c.XP != 450 || c.Quest != 7 {
+		t.Fatalf("%+v %v", c, err)
+	}
+}
+
 func TestParseBuySell(t *testing.T) {
 	if b, err := game.ParseBuyItem(gametest.BuyItem(npc, 3, 18, 2)); err != nil || b != (game.BuyItem{Vendor: npc, Slot: 3, Stock: 18, Count: 2}) {
 		t.Fatalf("%+v %v", b, err)
@@ -102,7 +138,7 @@ func TestParseTrainerList(t *testing.T) {
 		t.Fatalf("length %d", len(body))
 	}
 	got, err := game.ParseTrainerList(body)
-	want := game.TrainerList{Trainer: npc, Type: 2, Greeting: "Hello.", Spells: []game.TrainerSpell{
+	want := game.TrainerList{Trainer: npc, Type: 2, Declared: 2, Greeting: "Hello.", Spells: []game.TrainerSpell{
 		{Spell: 2457, State: "learnable", Cost: 10, Level: 1},
 		{Spell: 2018, State: "unavailable", Cost: 100, Level: 5, ReqSkill: 164, ReqSkillValue: 1, ReqSpell1: 9, ReqSpell2: 8, PrimaryProfession: true}}}
 	if err != nil || !reflect.DeepEqual(got, want) {
@@ -113,6 +149,21 @@ func TestParseTrainerList(t *testing.T) {
 	}
 	if _, err := game.ParseTrainerList(body[:len(body)-10]); err == nil {
 		t.Fatal("truncated list accepted")
+	}
+	// The core counts a line it did not write (NPCHandler.cpp:121-126, :229-236): the header
+	// says 3 spells and 2 follow. The list still parses, and Declared tells.
+	short := append([]byte(nil), body...)
+	short[12] = 3
+	if l, err := game.ParseTrainerList(short); err != nil || l.Declared != 3 || !reflect.DeepEqual(l.Spells, want.Spells) || l.Greeting != "Hello." {
+		t.Fatalf("%+v %v", l, err)
+	}
+	// More lines than declared, or a line cut short, is a broken packet.
+	short[12] = 1
+	if _, err := game.ParseTrainerList(short); err == nil {
+		t.Fatal("more spells than declared accepted")
+	}
+	if _, err := game.ParseTrainerList(append(body[:20:20], 0)); err == nil {
+		t.Fatal("cut line accepted")
 	}
 	if s, err := game.ParseTrainerSucceeded(gametest.TrainerBuySucceeded(npc, 5)); err != nil || s != (game.TrainerSucceeded{Trainer: npc, Spell: 5}) {
 		t.Fatalf("%+v %v", s, err)

@@ -36,18 +36,21 @@ type pendingBuy struct {
 	expires time.Time
 }
 
-// pendingSell is a sale waiting for the sold item to leave its slot. The core answers a
-// sale with the changed inventory and money fields, and only a refusal with a packet.
+// pendingSell is a sale waiting for the sold item to leave its slot and the player's money
+// to go up. The core answers a sale with the changed inventory and money fields, and only a
+// refusal with a packet.
 type pendingSell struct {
 	vendor  packet.GUID
 	item    objects.Item // as it was when the sale was sent
 	count   uint32       // 0: the whole stack
+	money   uint32       // the player's copper when the sale was sent
 	expires time.Time
 }
 
 // VendorList asks a vendor for its list (CMSG_LIST_INVENTORY). The answer is a vendor_list
-// event. The core only answers a living player within reach of a vendor NPC, and otherwise
-// sends a SMSG_SELL_ITEM refusal (a vendor_sell_failed event with item_guid 0).
+// event. A dead player gets no answer at all (ItemHandler.cpp:789-791); for a living one out
+// of reach of a vendor NPC the core sends a SMSG_SELL_ITEM refusal (a vendor_sell_failed
+// event with item_guid 0).
 func (s *Session) VendorList(ctx context.Context, vendor packet.GUID) error {
 	if vendor == 0 {
 		return errors.New("vendor_list needs the vendor's guid")
@@ -141,7 +144,8 @@ func (s *Session) Sell(ctx context.Context, vendor packet.GUID, ref EquipRef, co
 			return nil, fmt.Errorf("sell: the stack holds %d, not %d", it.Count, count)
 		}
 		s.prunePending(time.Now())
-		s.npc.sells = append(s.npc.sells, pendingSell{vendor: vendor, item: it, count: count, expires: time.Now().Add(npcWait)})
+		money, _ := s.store.Money(s.selfGUID())
+		s.npc.sells = append(s.npc.sells, pendingSell{vendor: vendor, item: it, count: count, money: money, expires: time.Now().Add(npcWait)})
 		return it, s.conn.WritePacket(opcode.CMSGSellItem, game.BuildSellItem(vendor, it.GUID, uint8(count)))
 	})
 	if err != nil {
@@ -223,9 +227,14 @@ func (s *Session) onSellItem(body []byte) error {
 	return nil
 }
 
-// checkSells emits vendor_sell for each pending sale whose item has left its slot.
+// checkSells emits vendor_sell for each pending sale whose item has left its slot (or whose
+// stack shrank) while the player's money went up. The event is inferred: the core sends no
+// packet for a sale. The money test keeps a move, an equip, a use or a destroy of the same
+// item from passing for a sale, and a sale the core drops silently (ItemHandler.cpp:553-554)
+// from passing either.
 func (s *Session) checkSells() {
 	self := s.selfGUID()
+	money, _ := s.store.Money(self)
 	kept := s.npc.sells[:0]
 	for _, p := range s.npc.sells {
 		cur, ok := s.store.ItemAt(self, p.item.Bag, p.item.Slot)
@@ -239,7 +248,11 @@ func (s *Session) checkSells() {
 			kept = append(kept, p)
 			continue
 		}
-		d := map[string]any{"item_guid": p.item.GUID, "item_entry": p.item.Entry, "bag": p.item.Bag, "slot": p.item.Slot}
+		if money <= p.money {
+			kept = append(kept, p) // the item moved, the money has not arrived yet, or it was no sale
+			continue
+		}
+		d := map[string]any{"item_guid": p.item.GUID, "item_entry": p.item.Entry, "bag": p.item.Bag, "slot": p.item.Slot, "money": money - p.money}
 		if sold != 0 {
 			d["count"] = sold
 		}
@@ -285,8 +298,12 @@ func (s *Session) onTrainerList(body []byte) error {
 		}
 		spells[i] = m
 	}
-	s.emit(events.Event{Kind: events.KindTrainerList, SourceGUID: l.Trainer,
-		Data: map[string]any{"trainer_type": l.Type, "greeting": l.Greeting, "spells": spells}})
+	d := map[string]any{"trainer_type": l.Type, "greeting": l.Greeting, "spells": spells}
+	if int(l.Declared) != len(l.Spells) {
+		// The core counts a line it sometimes does not write (see ParseTrainerList).
+		d["declared"] = l.Declared
+	}
+	s.emit(events.Event{Kind: events.KindTrainerList, SourceGUID: l.Trainer, Data: d})
 	return nil
 }
 

@@ -154,7 +154,8 @@ func (s *Session) QuestReward(ctx context.Context, npc packet.GUID, quest uint32
 		if choice != nil {
 			pick = *choice
 		}
-		if n, ok := s.npc.offers[questKey{npc, quest}]; ok {
+		if o, ok := s.npc.offers[questKey{npc, quest}]; ok {
+			n := o.choices
 			switch {
 			case choice == nil && n > 1:
 				return nil, fmt.Errorf("quest_reward: the offer has %d reward choices; pass choice (0-%d)", n, n-1)
@@ -162,7 +163,7 @@ func (s *Session) QuestReward(ctx context.Context, npc packet.GUID, quest uint32
 				return nil, fmt.Errorf("quest_reward: the offer has %d reward choices; choice %d is out of range", n, pick)
 			}
 		}
-		s.npc.rewarding[quest] = npc
+		s.npc.rewarding[quest] = rewardAsk{npc, time.Now().Add(npcWait)}
 		return nil, s.conn.WritePacket(opcode.CMSGQuestgiverChooseReward, game.BuildQuestgiverChooseReward(npc, quest, pick))
 	})
 	return err
@@ -278,7 +279,7 @@ func (s *Session) onQuestOfferReward(body []byte) error {
 	}
 	k := questKey{q.NPC, q.Quest}
 	delete(s.npc.completes, k)
-	s.npc.offers[k] = len(q.Choices)
+	s.npc.offers[k] = offer{len(q.Choices), time.Now().Add(offerKeep)}
 	s.emit(events.Event{Kind: events.KindQuestOfferReward, SourceGUID: q.NPC, Data: map[string]any{
 		"quest_id": q.Quest, "title": q.Title, "text": q.Text, "choices": questItems(q.Choices), "rewards": questItems(q.Rewards),
 		"money": q.Money, "reward_spell": q.RewardSpell}})
@@ -291,7 +292,7 @@ func (s *Session) onQuestRewarded(body []byte) error {
 		return err
 	}
 	// The packet does not name the NPC: it is the one the reward was asked of.
-	npc := s.npc.rewarding[c.Quest]
+	npc := s.npc.rewarding[c.Quest].npc
 	delete(s.npc.rewarding, c.Quest)
 	delete(s.npc.offers, questKey{npc, c.Quest})
 	s.emit(events.Event{Kind: events.KindQuestRewarded, SourceGUID: npc, Data: map[string]any{

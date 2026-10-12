@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/objects"
@@ -101,10 +102,13 @@ func registerNPCMethods(srv *rpc.Server, cur func() *session.Session) {
 		return call(ctx, p, acceptKinds, func(s *session.Session) error { return s.QuestAccept(ctx, p.GUID, p.QuestID) })
 	}))
 	srv.Register("quest_complete", rpc.Typed(func(ctx context.Context, p npcParams) (npcResult, error) {
+		start := time.Now()
 		res, err := call(ctx, p, completeKinds, func(s *session.Session) error { return s.QuestComplete(ctx, p.GUID, p.QuestID) })
-		// A request_items panel with the items in hand is followed by the offer: report that.
+		// A request_items panel with the items in hand is followed by the offer: report that,
+		// within the wait_ms the caller gave in all.
 		if err == nil && res.Event != nil && res.Event.Kind == events.KindQuestRequestItems && res.Event.Data["completable"] == true {
-			if next := firstEvent(ctx, log, res.Event.Seq, []string{events.KindQuestOfferReward, events.KindQuestError}, p.WaitMS); next != nil {
+			left := p.WaitMS - int(time.Since(start).Milliseconds())
+			if next := firstEvent(ctx, log, res.Event.Seq, []string{events.KindQuestOfferReward, events.KindQuestError}, max(left, 1)); next != nil {
 				res.Event = next
 			}
 		}

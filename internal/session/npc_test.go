@@ -140,6 +140,56 @@ func TestVendorListAndBuy(t *testing.T) {
 	}
 }
 
+// coinage sets the player's copper.
+func coinage(h *harness, copper uint32) {
+	h.t.Helper()
+	w := objtest.Header(1).U8(uint8(objects.BlockValues)).PackedGUID(me.GUID)
+	objtest.Values(w, playerEnd, map[uint16]uint32{objects.PlayerCoinage: copper})
+	h.send(opcode.SMSGUpdateObject, w.Bytes())
+}
+
+// An item that leaves its slot with no money coming (moved, used, destroyed) is no sale, and
+// neither is anything seen while the store is empty after a teleport.
+func TestSaleAndLogChangesNeedEvidence(t *testing.T) {
+	ctx := context.Background()
+	h := npcWorld(t)
+	h.send(opcode.SMSGUpdateObject, ownInventory(map[uint8]packet.GUID{23: swordGUID}, map[packet.GUID][2]uint32{swordGUID: {2589, 1}}))
+	waitFor(t, func() bool { return len(h.s.Inventory()) == 1 })
+	questLog(h, 2, 100, 0)
+	waitFor(t, func() bool { return len(h.s.QuestLog()) == 1 })
+	if _, err := h.s.Sell(ctx, vendorGUID, EquipRef{Entry: 2589}, 0); err != nil {
+		t.Fatal(err)
+	}
+	h.expect(opcode.CMSGSellItem)
+	if err := h.s.QuestAbandon(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	h.expect(opcode.CMSGQuestlogRemoveQuest)
+	if err := h.s.QuestAccept(ctx, giverGUID, 101); err != nil {
+		t.Fatal(err)
+	}
+	h.expect(opcode.CMSGQuestgiverAcceptQuest)
+
+	// SMSG_NEW_WORLD empties the store: no sale, abandon or accept may be read from that.
+	h.send(opcode.SMSGNewWorld, packet.NewWriter().U32(1).F32(1).F32(2).F32(3).F32(0).Bytes())
+	h.expect(opcode.MSGMoveWorldportAck)
+	time.Sleep(150 * time.Millisecond)
+	for _, k := range []string{events.KindVendorSell, events.KindQuestAbandoned, events.KindQuestAccepted} {
+		if n := len(ofKind(h.s.Log(), k)); n != 0 {
+			t.Fatalf("%s after a teleport: %d", k, n)
+		}
+	}
+	// The player is back with the item gone and the quest gone but no money: only the quest events are real.
+	h.send(opcode.SMSGUpdateObject, ownInventory(nil, nil))
+	waitFor(t, func() bool { return len(ofKind(h.s.Log(), events.KindQuestAbandoned)) == 1 })
+	if n := len(ofKind(h.s.Log(), events.KindVendorSell)); n != 0 {
+		t.Fatalf("sale without money: %d", n)
+	}
+	coinage(h, 80)
+	waitFor(t, func() bool { return len(ofKind(h.s.Log(), events.KindVendorSell)) == 1 })
+	h.logout()
+}
+
 func TestSellItems(t *testing.T) {
 	ctx := context.Background()
 	h := npcWorld(t)
@@ -172,8 +222,14 @@ func TestSellItems(t *testing.T) {
 	w := objtest.Header(1).U8(uint8(objects.BlockValues)).PackedGUID(potionGUID)
 	objtest.Values(w, 0x30, map[uint16]uint32{objects.ItemStackCount: 3})
 	h.send(opcode.SMSGUpdateObject, w.Bytes())
+	// The stack shrank, but a sale shows in the money too: nothing is reported before it.
+	waitFor(t, func() bool { it, _ := h.s.store.ItemAt(me.GUID, 255, 30); return it.Count == 3 })
+	if n := len(ofKind(h.s.Log(), events.KindVendorSell)); n != 0 {
+		t.Fatalf("sold without money: %d", n)
+	}
+	coinage(h, 150)
 	e := lastOfKind(t, h.s.Log(), events.KindVendorSell)
-	if e.Source != "Booty Vendor" || e.Data["item_entry"] != uint32(118) || e.Data["count"] != uint32(2) || e.Data["item_guid"] != potionGUID {
+	if e.Source != "Booty Vendor" || e.Data["item_entry"] != uint32(118) || e.Data["count"] != uint32(2) || e.Data["item_guid"] != potionGUID || e.Data["money"] != uint32(150) {
 		t.Fatalf("%+v", e)
 	}
 
@@ -188,6 +244,11 @@ func TestSellItems(t *testing.T) {
 	w = objtest.Header(1).U8(uint8(objects.BlockValues)).PackedGUID(me.GUID)
 	objtest.Values(w, playerEnd, map[uint16]uint32{objects.PlayerInvSlotHead + 46: 0, objects.PlayerInvSlotHead + 47: 0})
 	h.send(opcode.SMSGUpdateObject, w.Bytes())
+	waitFor(t, func() bool { _, ok := h.s.store.ItemAt(me.GUID, 255, 23); return !ok })
+	if n := len(ofKind(h.s.Log(), events.KindVendorSell)); n != 1 {
+		t.Fatalf("sold without money: %d", n)
+	}
+	coinage(h, 400)
 	waitFor(t, func() bool { return len(ofKind(h.s.Log(), events.KindVendorSell)) == 2 })
 	if e := ofKind(h.s.Log(), events.KindVendorSell)[1]; e.Data["item_entry"] != uint32(2589) || e.Data["count"] != uint32(1) {
 		t.Fatalf("%+v", e)
@@ -203,8 +264,10 @@ func TestSellItems(t *testing.T) {
 	if e.Source != "Booty Vendor" || e.Data["item_entry"] != uint32(118) || e.Data["reason"] != "cant_sell_item" || e.Data["item_guid"] != potionGUID {
 		t.Fatalf("%+v", e)
 	}
-	if len(h.s.npc.sells) != 0 {
-		t.Fatalf("pending %+v", h.s.npc.sells)
+	// The pending list belongs to the owner loop: read it there.
+	v, _ := h.s.do(ctx, func() (any, error) { return len(h.s.npc.sells), nil })
+	if v.(int) != 0 {
+		t.Fatalf("%d sales still pending", v)
 	}
 	// No vendor in reach: the core names no vendor and no item.
 	h.send(opcode.SMSGSellItem, gametest.SellItem(0, 0, 3))
@@ -294,7 +357,7 @@ func TestQuestAcceptAndAbandon(t *testing.T) {
 	e = lastOfKind(t, h.s.Log(), events.KindQuestDetails)
 	ch := e.Data["choices"].([]map[string]any)
 	if e.Data["quest_id"] != uint32(100) || e.Data["title"] != "Rats in the Cellar" || e.Data["objectives"] != "Kill 8 rats." || e.Data["can_accept"] != true ||
-		len(ch) != 2 || ch[1]["item_entry"] != uint32(118) || ch[1]["count"] != uint32(2) || e.Data["money"] != uint32(250) ||
+		len(ch) != 2 || ch[1]["item_entry"] != uint32(118) || ch[1]["count"] != uint32(2) || e.Data["money"] != int32(250) ||
 		e.Data["rewards"].([]map[string]any)[0]["count"] != uint32(5) {
 		t.Fatalf("%+v", e)
 	}
@@ -393,7 +456,7 @@ func TestQuestHandIn(t *testing.T) {
 	choices := []gametest.QuestReward{{Entry: 2589, Count: 1}, {Entry: 118, Count: 2}}
 	h.send(opcode.SMSGQuestgiverOfferReward, gametest.QuestGiverOfferReward(giverGUID, 100, "Rats in the Cellar", "Well done.", choices, nil, 250, 0))
 	e = lastOfKind(t, h.s.Log(), events.KindQuestOfferReward)
-	if e.Data["quest_id"] != uint32(100) || len(e.Data["choices"].([]map[string]any)) != 2 || e.Data["text"] != "Well done." || e.Data["money"] != uint32(250) {
+	if e.Data["quest_id"] != uint32(100) || len(e.Data["choices"].([]map[string]any)) != 2 || e.Data["text"] != "Well done." || e.Data["money"] != int32(250) {
 		t.Fatalf("%+v", e)
 	}
 
@@ -418,7 +481,7 @@ func TestQuestHandIn(t *testing.T) {
 	h.send(opcode.SMSGQuestgiverQuestComplete, gametest.QuestGiverQuestComplete(100, 450, 250, gametest.QuestReward{Entry: 118, Count: 2}))
 	e = lastOfKind(t, h.s.Log(), events.KindQuestRewarded)
 	r := e.Data["rewards"].([]map[string]any)
-	if e.Source != "Quest Giver" || e.Data["quest_id"] != uint32(100) || e.Data["xp"] != uint32(450) || e.Data["money"] != uint32(250) || len(r) != 1 || r[0]["item_entry"] != uint32(118) {
+	if e.Source != "Quest Giver" || e.Data["quest_id"] != uint32(100) || e.Data["xp"] != uint32(450) || e.Data["money"] != int32(250) || len(r) != 1 || r[0]["item_entry"] != uint32(118) {
 		t.Fatalf("%+v", e)
 	}
 

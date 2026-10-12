@@ -14,12 +14,27 @@ type npcState struct {
 	accepts   []pendingQuest
 	abandons  []pendingQuest
 	completes map[questKey]time.Time // quest_complete asked, the hand-in not yet pressed through
-	offers    map[questKey]int       // reward choices of the last offer from that NPC for that quest
-	rewarding map[uint32]packet.GUID // quest id to the NPC its reward was asked of
+	offers    map[questKey]offer     // the last offer from that NPC for that quest
+	rewarding map[uint32]rewardAsk   // quest id to the NPC its reward was asked of
 }
 
+// offer is a quest_offer_reward seen: how many reward choices it had, kept for offerKeep.
+type offer struct {
+	choices int
+	expires time.Time
+}
+
+// rewardAsk is the NPC a quest_reward was sent to, kept until the reward arrives or npcWait ends.
+type rewardAsk struct {
+	npc     packet.GUID
+	expires time.Time
+}
+
+// offerKeep is how long an offer is remembered for checking a quest_reward against it.
+const offerKeep = 10 * time.Minute
+
 func newNPCState() npcState {
-	return npcState{completes: map[questKey]time.Time{}, offers: map[questKey]int{}, rewarding: map[uint32]packet.GUID{}}
+	return npcState{completes: map[questKey]time.Time{}, offers: map[questKey]offer{}, rewarding: map[uint32]rewardAsk{}}
 }
 
 // registerNPC installs the vendor, trainer and quest handlers.
@@ -31,6 +46,14 @@ func (s *Session) registerNPC() {
 // checkNPC looks for the evidence the pending sales, accepts and abandons wait for. It runs
 // after every packet, since the core answers those requests with changed update fields.
 func (s *Session) checkNPC() {
+	// SMSG_NEW_WORLD clears the store: until the player's own object is back, an empty slot or
+	// an empty quest log is "unknown", not "gone".
+	if len(s.npc.sells) == 0 && len(s.npc.accepts) == 0 && len(s.npc.abandons) == 0 {
+		return
+	}
+	if _, ok := s.store.Money(s.selfGUID()); !ok {
+		return
+	}
 	if len(s.npc.sells) > 0 {
 		s.checkSells()
 	}
@@ -68,6 +91,16 @@ func (s *Session) prunePending(now time.Time) {
 	for k, until := range n.completes {
 		if !now.Before(until) {
 			delete(n.completes, k)
+		}
+	}
+	for k, o := range n.offers {
+		if !now.Before(o.expires) {
+			delete(n.offers, k)
+		}
+	}
+	for q, a := range n.rewarding {
+		if !now.Before(a.expires) {
+			delete(n.rewarding, q)
 		}
 	}
 }

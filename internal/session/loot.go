@@ -69,7 +69,7 @@ func (s *Session) Roll(ctx context.Context, ref RollRef, choice string) (RollInf
 		if err := s.inWorld(); err != nil {
 			return nil, err
 		}
-		s.pruneRolls(time.Now())
+		s.pruneRolls(s.now())
 		var found []RollInfo
 		for k, r := range s.rolls {
 			if (ref.ID != 0 && r.id != ref.ID) || (ref.Slot != nil && k.slot != *ref.Slot) || (ref.Looted != 0 && k.looted != ref.Looted) {
@@ -110,7 +110,7 @@ func (s *Session) rollFor(looted packet.GUID, slot, item uint32, countdown time.
 	r, ok := s.rolls[k]
 	if !ok || r.item != item {
 		s.lastRollID++
-		r = &openRoll{id: s.lastRollID, item: item, expires: time.Now().Add(countdown + rollGrace)}
+		r = &openRoll{id: s.lastRollID, item: item, expires: s.now().Add(countdown + rollGrace)}
 		s.rolls[k] = r
 	}
 	return r
@@ -130,7 +130,7 @@ func (s *Session) onLootStartRoll(body []byte) error {
 	if err != nil {
 		return err
 	}
-	s.pruneRolls(time.Now())
+	s.pruneRolls(s.now())
 	delete(s.rolls, rollKey{st.Looted, st.Slot}) // a new roll on the same slot starts afresh
 	r := s.rollFor(st.Looted, st.Slot, st.Item, time.Duration(st.Countdown)*time.Millisecond)
 	d := rollData(r, st.Looted, st.Slot, st.Item, st.RandomProp)

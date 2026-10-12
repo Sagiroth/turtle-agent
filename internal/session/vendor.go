@@ -95,11 +95,24 @@ func (s *Session) Buy(ctx context.Context, vendor packet.GUID, ref BuyRef) error
 			}
 			body, op = game.BuildBuyItemInSlot(vendor, ref.Entry, bagGUID, *ref.Slot, count), opcode.CMSGBuyItemInSlot
 		}
-		s.prunePending(time.Now())
-		s.npc.buys = append(s.npc.buys, pendingBuy{vendor: vendor, entry: ref.Entry, count: count, expires: time.Now().Add(npcWait)})
+		s.noteBuy(vendor, ref.Entry, count)
 		return nil, s.conn.WritePacket(op, body)
 	})
 	return err
+}
+
+// noteBuy, noteSell and the quest note functions record a request the agent sent, whose
+// result the session turns into an event once the evidence arrives. The RPC methods call
+// them before writing the packet; a replay calls them for the request packets in a capture.
+func (s *Session) noteBuy(vendor packet.GUID, entry uint32, count uint8) {
+	s.prunePending(s.now())
+	s.npc.buys = append(s.npc.buys, pendingBuy{vendor: vendor, entry: entry, count: count, expires: s.now().Add(npcWait)})
+}
+
+func (s *Session) noteSell(vendor packet.GUID, it objects.Item, count uint32) {
+	s.prunePending(s.now())
+	money, _ := s.store.Money(s.selfGUID())
+	s.npc.sells = append(s.npc.sells, pendingSell{vendor: vendor, item: it, count: count, money: money, expires: s.now().Add(npcWait)})
 }
 
 // bagGUID is the GUID the server wants for a destination bag: the player's own for the
@@ -143,9 +156,7 @@ func (s *Session) Sell(ctx context.Context, vendor packet.GUID, ref EquipRef, co
 		if it.Count != 0 && count > it.Count {
 			return nil, fmt.Errorf("sell: the stack holds %d, not %d", it.Count, count)
 		}
-		s.prunePending(time.Now())
-		money, _ := s.store.Money(s.selfGUID())
-		s.npc.sells = append(s.npc.sells, pendingSell{vendor: vendor, item: it, count: count, money: money, expires: time.Now().Add(npcWait)})
+		s.noteSell(vendor, it, count)
 		return it, s.conn.WritePacket(opcode.CMSGSellItem, game.BuildSellItem(vendor, it.GUID, uint8(count)))
 	})
 	if err != nil {

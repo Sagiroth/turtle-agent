@@ -209,7 +209,7 @@ func (s *Session) onKnockBack(body []byte) error {
 	if k.GUID != s.selfGUID() {
 		return nil
 	}
-	now := time.Now()
+	now := s.now()
 	s.stopWalk(errKnockedBack, false)
 	from := s.last.pos
 	// The ack only needs the start; it goes out before the flight is traced against the
@@ -243,7 +243,7 @@ func (s *Session) tickFall() error {
 	if f == nil {
 		return nil
 	}
-	now := time.Now()
+	now := s.now()
 	if !now.Before(f.land) {
 		p := f.landPos
 		s.mu.Lock()
@@ -319,7 +319,7 @@ func (s *Session) toggleHandler(o toggleOrder) handler {
 		} else {
 			s.toggles &^= o.flag
 		}
-		now := time.Now()
+		now := s.now()
 		s.syncWalk(now)
 		s.mu.Lock()
 		mi := s.moveInfoAt(s.currentFlags(), now)

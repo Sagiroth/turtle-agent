@@ -169,7 +169,7 @@ func (s *Session) clockAt(now time.Time) uint32 {
 	return c
 }
 
-func (s *Session) clock() uint32 { return s.clockAt(time.Now()) }
+func (s *Session) clock() uint32 { return s.clockAt(s.now()) }
 
 // peekClock is the client time clockAt(now) will give, without taking it.
 func (s *Session) peekClock(now time.Time) uint32 {
@@ -349,7 +349,7 @@ func (s *Session) Face(ctx context.Context, g packet.GUID) error {
 		}
 		s.mu.Lock()
 		s.pos[3] = o
-		mi := s.moveInfoAt(s.currentFlags(), time.Now())
+		mi := s.moveInfoAt(s.currentFlags(), s.now())
 		s.mu.Unlock()
 		if err := s.checkStep(mi); err != nil {
 			return nil, fmt.Errorf("face refused: %w", err)
@@ -416,7 +416,7 @@ func (s *Session) walkStraight(ctx context.Context, to [3]float32, o walkOpts) e
 			done <- nil
 			return done, nil
 		}
-		now := time.Now()
+		now := s.now()
 		pts := append(append([][3]float32{from}, o.via...), [3]float32{x, y, z})
 		w := newWalk(pts, s.runSpeed, now, done)
 		w.onMesh = o.onMesh
@@ -464,7 +464,7 @@ func (s *Session) tickWalk() error {
 	if w == nil {
 		return nil
 	}
-	now := time.Now()
+	now := s.now()
 	if w.arrived(now) {
 		s.walk = nil
 		z := clampZ(w.to[2], s.last, s.peekClock(now), w.speed)
@@ -506,7 +506,7 @@ func (s *Session) tickWalk() error {
 func (s *Session) abortWalk(w *walkState, reason error) error {
 	s.mu.Lock()
 	s.pos[0], s.pos[1], s.pos[2] = s.last.pos[0], s.last.pos[1], s.last.pos[2]
-	mi := s.moveInfoAt(s.currentFlags(), time.Now())
+	mi := s.moveInfoAt(s.currentFlags(), s.now())
 	s.mu.Unlock()
 	err := s.sendMove(opcode.MSGMoveStop, mi, game.BuildMovement(mi))
 	w.done <- fmt.Errorf("walk stopped: %w", reason)
@@ -520,7 +520,7 @@ func (s *Session) stopWalk(reason error, sendStop bool) {
 	if w == nil {
 		return
 	}
-	now := time.Now()
+	now := s.now()
 	if sendStop {
 		s.syncWalk(now)
 	}
@@ -631,7 +631,7 @@ func (s *Session) onTeleportAck(body []byte) error {
 	}
 	s.emit(events.Event{Kind: events.KindSession, Data: map[string]any{"state": "teleported", "x": a.Move.X, "y": a.Move.Y, "z": a.Move.Z}})
 	s.teleported()
-	if err := s.dropToFloor(time.Now()); err != nil {
+	if err := s.dropToFloor(s.now()); err != nil {
 		return &fatalError{err}
 	}
 	return nil
@@ -685,7 +685,7 @@ func (s *Session) speedHandler(op, ack uint16) handler {
 		if c.GUID != self {
 			return nil
 		}
-		now := time.Now()
+		now := s.now()
 		s.syncWalk(now)
 		if op == opcode.SMSGForceRunSpeedChange {
 			s.setRunSpeed(c.Speed, now)
@@ -720,7 +720,7 @@ func (s *Session) seedRunSpeed(blocks []objects.Block) {
 	self := s.selfGUID()
 	for _, b := range blocks {
 		if (b.Type == objects.BlockCreate || b.Type == objects.BlockCreate2) && b.GUID == self && b.Move != nil && b.Move.Living {
-			s.setRunSpeed(b.Move.Speeds[1], time.Now())
+			s.setRunSpeed(b.Move.Speeds[1], s.now())
 			s.toggles = b.Move.Info.Flags & toggleFlags
 		}
 	}
@@ -742,7 +742,7 @@ func (s *Session) rootHandler(ack uint16, apply bool) handler {
 		if apply {
 			s.stopWalk(errRooted, true)
 		}
-		now := time.Now()
+		now := s.now()
 		s.syncWalk(now)
 		s.mu.Lock()
 		mi := s.moveInfoAt(s.currentFlags(), now)

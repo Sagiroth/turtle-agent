@@ -185,6 +185,7 @@ type Session struct {
 	done     chan struct{}
 	ready    chan struct{}
 	start    time.Time
+	clockFn  func() time.Time // nil: the wall clock; a replay sets the time of the record it handles
 
 	mu        sync.Mutex // guards these fields for readers outside the loop
 	state     Status
@@ -268,6 +269,15 @@ func New(conn *worldconn.Conn, opts Options) *Session {
 	}
 	s.register()
 	return s
+}
+
+// now is the session's clock: the wall clock, or in a replay the time of the packet being
+// handled, so timeouts and event times follow the capture instead of the replay's speed.
+func (s *Session) now() time.Time {
+	if s.clockFn != nil {
+		return s.clockFn()
+	}
+	return time.Now()
 }
 
 // register installs every packet handler; each feature adds its own register call here.
@@ -443,11 +453,19 @@ func (s *Session) send(ctx context.Context, op uint16, body []byte) error {
 // emit queues e behind events still waiting for names and appends whatever is ready.
 // The names of e are asked for at once, so its wait overlaps the waits ahead of it.
 func (s *Session) emit(e events.Event) {
+	if s.clockFn != nil { // a replay: time and mono_ms follow the capture, mono_ms from its first record
+		if e.Time.IsZero() {
+			e.Time = s.now()
+		}
+		if e.MonoMS == 0 {
+			e.MonoMS = max(1, s.now().Sub(s.start).Milliseconds()) // 0 would be stamped with the real clock
+		}
+	}
 	events.Stamp(&e)
 	s.fillNames(&e)
 	party := s.partyInvolved(e.SourceGUID) || s.partyInvolved(e.TargetGUID)
-	s.names.waiting = append(s.names.waiting, pendingEvent{e: e, until: time.Now().Add(s.opts.NamesWait), party: party})
-	s.flushNames(time.Now())
+	s.names.waiting = append(s.names.waiting, pendingEvent{e: e, until: s.now().Add(s.opts.NamesWait), party: party})
+	s.flushNames(s.now())
 }
 
 // appendEvent stores a ready event, flagging it (party, decided at emit) when the player, a party member or one of
@@ -460,7 +478,7 @@ func (s *Session) appendEvent(e events.Event, party bool) {
 }
 
 // flushPending appends everything still waiting, with the names known so far.
-func (s *Session) flushPending() { s.flushNames(time.Now().Add(time.Hour)) }
+func (s *Session) flushPending() { s.flushNames(s.now().Add(time.Hour)) }
 
 func (s *Session) dispatch(p worldconn.Packet) error {
 	h, ok := s.handlers[p.Op]
@@ -527,7 +545,7 @@ func (s *Session) onTick(now time.Time) error {
 			}
 			// Schedule from the send, not from the tick: a tick read late after a loop stall
 			// would put the next ping under the server's 27 s floor (WorldSocket.cpp:413-433).
-			sent := time.Now()
+			sent := s.now()
 			if !s.pongWait { // the timeout runs from the oldest unanswered ping
 				s.pingSent, s.pongWait = sent, true
 			}
@@ -637,7 +655,7 @@ func (s *Session) onLoginFailed(body []byte) error {
 	}
 	if code == 1 && s.State() == StatusLoggingIn && s.loginRetries < maxLoginRetries {
 		s.loginRetries++
-		s.loginRetryAt = time.Now().Add(s.opts.LoginRetryDelay)
+		s.loginRetryAt = s.now().Add(s.opts.LoginRetryDelay)
 		fmt.Fprintf(s.logger, "world: SMSG_CHARACTER_LOGIN_FAILED (code 1), character locked (backup?); retrying in %s (%d/%d)\n",
 			s.opts.LoginRetryDelay, s.loginRetries, maxLoginRetries)
 		return nil
@@ -657,7 +675,7 @@ func (s *Session) onVerifyWorld(body []byte) error {
 	s.mu.Unlock()
 	s.last = lastMove{pos: [3]float32{x, y, z}}
 	s.names.setPlayer(self.GUID, self.Name)
-	s.nextPing = time.Now().Add(s.opts.PingInterval)
+	s.nextPing = s.now().Add(s.opts.PingInterval)
 	if err := s.conn.WritePacket(opcode.CMSGSetActiveMover, packet.NewWriter().GUID(self.GUID).Bytes()); err != nil {
 		return &fatalError{err}
 	}
@@ -703,7 +721,7 @@ func (s *Session) Logout(ctx context.Context) (LogoutOutcome, error) {
 			return nil, err
 		}
 		s.logout = &logoutOp{done: make(chan struct{})}
-		s.logoutDeadline = time.Now().Add(s.opts.LogoutTimeout)
+		s.logoutDeadline = s.now().Add(s.opts.LogoutTimeout)
 		s.logoutAccepted = false
 		s.setState(StatusLoggingOut)
 		return s.logout, nil

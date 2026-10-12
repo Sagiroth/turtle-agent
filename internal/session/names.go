@@ -83,7 +83,7 @@ func (s *Session) nameOf(g packet.GUID) (string, bool) {
 	if ok {
 		return n, true
 	}
-	if s.silent(g, time.Now()) {
+	if s.silent(g, s.now()) {
 		return "", true
 	}
 	s.askName(g)
@@ -143,7 +143,7 @@ func (s *Session) giveUp(g packet.GUID) {
 // asked: its create block brings the entry and asks again. A write error surfaces on the
 // next send.
 func (s *Session) askName(g packet.GUID) {
-	now := time.Now()
+	now := s.now()
 	if g.IsPlayer() {
 		if t, ok := s.names.askedGUID[g]; ok && now.Sub(t) < nameQueryInterval {
 			return
@@ -206,7 +206,7 @@ func (s *Session) onNameQueryResponse(body []byte) error {
 		return err
 	}
 	s.names.setPlayer(info.GUID, info.Name)
-	s.flushNames(time.Now())
+	s.flushNames(s.now())
 	return nil
 }
 
@@ -220,6 +220,6 @@ func (s *Session) onCreatureQueryResponse(body []byte) error {
 		name = fmt.Sprintf("creature %d", info.Entry)
 	}
 	s.names.setCreature(info.Entry, name)
-	s.flushNames(time.Now())
+	s.flushNames(s.now())
 	return nil
 }

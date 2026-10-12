@@ -175,7 +175,7 @@ func (s *Session) onMonsterMove(body []byte) error {
 		s.serverMoved(m.Dest)
 		s.splineUntil = time.Time{}
 		if !m.Stop {
-			s.splineUntil = time.Now().Add(time.Duration(m.Duration) * time.Millisecond)
+			s.splineUntil = s.now().Add(time.Duration(m.Duration) * time.Millisecond)
 		}
 	}
 	return nil

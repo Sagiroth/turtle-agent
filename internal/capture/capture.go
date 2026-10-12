@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -20,6 +21,9 @@ import (
 const (
 	magic       = "TWCAP1\n"
 	redactedBit = 0x80
+	// maxTimeStep is how far back a record's time may jump before the file counts as corrupt:
+	// the writer stamps records under its lock, so only a wall-clock step moves them back.
+	maxTimeStep = time.Minute
 )
 
 // neverStored bodies are dropped whatever they contain.
@@ -169,7 +173,34 @@ func (w *Writer) Close() error {
 	return w.err
 }
 
+// IsCaptureFile reports whether the file at path starts with the capture magic.
+func IsCaptureFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	head := make([]byte, len(magic))
+	n, _ := io.ReadFull(f, head)
+	return string(head[:n]) == magic
+}
+
+// ReadFile reads a whole capture; a damaged or cut-off record is an error.
 func ReadFile(path string) ([]Record, error) {
+	recs, err := ReadFilePartial(path)
+	if err != nil {
+		return nil, err
+	}
+	return recs, nil
+}
+
+// ReadFilePartial is ReadFile for a capture whose writer died before it flushed its last
+// record (a killed agent, a capture still being written): it returns the records before the
+// damage together with the error that stopped it, which is nil for a clean file. The error
+// says "cut off" when the file ends inside a record and "corrupt" when a record is not one
+// the writer can have written (a direction byte other than 0 or 1, an opcode at or past
+// NUM_MSG_TYPES, or a time more than a minute before the record before it).
+func ReadFilePartial(path string) ([]Record, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("capture: %w", err)
@@ -179,14 +210,30 @@ func ReadFile(path string) ([]Record, error) {
 	}
 	r := packet.NewReader(raw[len(magic):])
 	var recs []Record
+	var prev time.Time
 	for r.Remaining() > 0 {
 		flags, ts, op, n := r.U8(), r.U64(), r.U16(), r.U32()
+		if err := r.Err(); err != nil {
+			return recs, fmt.Errorf("capture %s: cut off in the header of record %d: %w", path, len(recs), err)
+		}
+		at := time.Unix(0, int64(ts))
+		switch {
+		case flags&^redactedBit > uint8(worldconn.ClientToServer):
+			return recs, fmt.Errorf("capture %s: corrupt at record %d: direction byte 0x%02X", path, len(recs), flags)
+		case op >= opcode.NumMsgTypes:
+			return recs, fmt.Errorf("capture %s: corrupt at record %d: opcode 0x%04X is at or past NUM_MSG_TYPES", path, len(recs), op)
+		case !prev.IsZero() && at.Before(prev.Add(-maxTimeStep)):
+			return recs, fmt.Errorf("capture %s: corrupt at record %d: time runs back %s", path, len(recs), prev.Sub(at).Round(time.Second))
+		case int64(n) > int64(r.Remaining()):
+			return recs, fmt.Errorf("capture %s: cut off in the body of record %d: %d bytes announced, %d left", path, len(recs), n, r.Remaining())
+		}
 		body := r.Bytes(int(n))
 		if err := r.Err(); err != nil {
-			return nil, fmt.Errorf("capture %s: record %d: %w", path, len(recs), err)
+			return recs, fmt.Errorf("capture %s: cut off in the body of record %d: %w", path, len(recs), err)
 		}
+		prev = at
 		recs = append(recs, Record{
-			Dir: worldconn.Direction(flags &^ redactedBit), Time: time.Unix(0, int64(ts)),
+			Dir: worldconn.Direction(flags &^ redactedBit), Time: at,
 			Op: op, Body: body, Redacted: flags&redactedBit != 0,
 		})
 	}

@@ -1,0 +1,178 @@
+package session
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"time"
+
+	"github.com/pjerra/turtle-agent/internal/events"
+	"github.com/pjerra/turtle-agent/internal/game"
+	"github.com/pjerra/turtle-agent/internal/opcode"
+)
+
+// maxFlight bounds a knockback flight; a longer one lands early at the starting height.
+const maxFlight = 10 * time.Second
+
+// lastMove is the movement the server last has for the player: our last movement packet,
+// or a position the server sent, which it holds as standing still there.
+type lastMove struct {
+	pos    [3]float32
+	ctime  uint32
+	flags  uint32
+	jumpXY float32
+}
+
+// stepMargin is the slack the session allows a step over the anticheat's bound: half the
+// 0.5 yard the server adds (Movement.cpp:576-578), the other half kept in reserve.
+const stepMargin = 0.25
+
+// checkStep holds a walk or facing packet to the distance the anticheat allows after the
+// last movement (Movement::GetMaxAllowedDist, Movement.cpp:849-890, checked at :574-595):
+// nothing after standing still, the run speed for the client-time gap while running, the
+// jump speed across and the terminal speed up or down in the air. A z change past the bound
+// is CHEAT_TYPE_OVERSPEED_Z (:593-595).
+func (s *Session) checkStep(next game.MoveInfo) error {
+	l := s.last
+	dt := 0.0
+	if next.Time > l.ctime {
+		dt = float64(next.Time-l.ctime) / 1000
+	}
+	var dxy, dz float64
+	switch {
+	case l.flags&game.MoveMaskMoving == 0:
+	case l.flags&(game.MoveJumping|game.MoveFallingFar) != 0:
+		term := game.TerminalVelocity
+		if l.flags&game.MoveSafeFall != 0 {
+			term = game.TerminalSafeFall
+		}
+		dxy, dz = float64(l.jumpXY)*dt, term*dt
+	default:
+		dxy, dz = float64(s.runSpeed)*dt, float64(s.runSpeed)*dt
+	}
+	if d := math.Abs(float64(next.Z - l.pos[2])); d > dz+stepMargin {
+		return fmt.Errorf("a %.2f yd change of height in %.3f s is over the %.2f yd the server allows (OVERSPEED_Z)", d, dt, dz)
+	}
+	if d := math.Hypot(float64(next.X-l.pos[0]), float64(next.Y-l.pos[1])); d > dxy+stepMargin {
+		return fmt.Errorf("a %.2f yd step in %.3f s is over the %.2f yd the server allows", d, dt, dxy)
+	}
+	return nil
+}
+
+// sendMove writes a packet that carries mi and records mi as what the server now has.
+func (s *Session) sendMove(op uint16, mi game.MoveInfo, body []byte) error {
+	if err := s.conn.WritePacket(op, body); err != nil {
+		return err
+	}
+	s.last = lastMove{pos: [3]float32{mi.X, mi.Y, mi.Z}, ctime: mi.Time, flags: mi.Flags, jumpXY: mi.JumpXYSpeed}
+	return nil
+}
+
+// serverPosition records a position the server put the player at. zKnown is false when
+// the z may be in the air (a GM teleport); the next position from the server settles it.
+func (s *Session) serverPosition(p [3]float32, zKnown bool) {
+	s.fall = nil
+	s.last = lastMove{pos: p, ctime: s.last.ctime}
+	s.mu.Lock()
+	s.pos[0], s.pos[1], s.pos[2] = p[0], p[1], p[2]
+	s.falling, s.zUnknown = false, !zKnown
+	s.mu.Unlock()
+}
+
+// fallState is a knockback flight: a ballistic arc from where the server threw the player.
+type fallState struct {
+	kb       game.KnockBack
+	from     [3]float32
+	start    time.Time
+	land     time.Duration // back at the starting height, the ground assumed
+	term     float64
+	nextBeat time.Time
+}
+
+func (f *fallState) at(now time.Time) [3]float32 {
+	t := min(max(now.Sub(f.start), 0), f.land).Seconds()
+	xy := float64(f.kb.XYSpeed) * t
+	return [3]float32{f.from[0] + f.kb.Cos*float32(xy), f.from[1] + f.kb.Sin*float32(xy),
+		f.from[2] - float32(game.FallDrop(t, float64(f.kb.ZSpeed), f.term))}
+}
+
+// syncFall moves s.pos to where the flight is at now.
+func (s *Session) syncFall(now time.Time) {
+	if s.fall == nil {
+		return
+	}
+	p := s.fall.at(now)
+	s.mu.Lock()
+	s.pos[0], s.pos[1], s.pos[2] = p[0], p[1], p[2]
+	s.mu.Unlock()
+}
+
+// onKnockBack acks SMSG_MOVE_KNOCK_BACK and starts the flight. The server throws the player
+// from the position it last had (Unit.cpp:10662-10682, Movement.cpp:103-115): a walk's last
+// heartbeat, not where the walk has got to since. The ack carries MoveJumping and the
+// order's values (Unit.cpp:7479-7495). The server sends no knockback while the player is
+// rooted or stunned (:10664).
+func (s *Session) onKnockBack(body []byte) error {
+	k, err := game.ParseKnockBack(body)
+	if err != nil {
+		return err
+	}
+	if k.GUID != s.selfGUID() {
+		return nil
+	}
+	now := time.Now()
+	s.stopWalk(errors.New("knocked back by the server; walk stopped"), false)
+	term := game.TerminalVelocity
+	if s.toggles&game.MoveSafeFall != 0 {
+		term = game.TerminalSafeFall
+	}
+	land := min(time.Duration(game.FallLandTime(float64(k.ZSpeed), term)*float64(time.Second)), maxFlight)
+	from := s.last.pos
+	s.fall = &fallState{kb: k, from: from, start: now, land: land, term: term, nextBeat: now.Add(500 * time.Millisecond)}
+	s.mu.Lock()
+	s.pos[0], s.pos[1], s.pos[2] = from[0], from[1], from[2]
+	s.falling = true
+	mi := s.moveInfoAt(s.currentFlags(), now)
+	s.mu.Unlock()
+	if err := s.sendMove(opcode.CMSGMoveKnockBackAck, mi, game.BuildKnockBackAck(k, mi)); err != nil {
+		return &fatalError{err}
+	}
+	s.emit(events.Event{Kind: events.KindSession, Data: map[string]any{"state": "knocked_back", "x": from[0], "y": from[1], "z": from[2],
+		"speed_xy": k.XYSpeed, "speed_z": k.ZSpeed, "flight_ms": land.Milliseconds()}})
+	return nil
+}
+
+// tickFall sends the flight's heartbeats every 500 ms and MSG_MOVE_FALL_LAND when the arc
+// is back at the starting height. With no terrain the agent cannot know the ground: the
+// landing z is the starting z until the server sends a position (Status.ZUnknown).
+func (s *Session) tickFall() error {
+	f := s.fall
+	if f == nil {
+		return nil
+	}
+	now := time.Now()
+	if end := f.start.Add(f.land); !now.Before(end) {
+		p := f.at(end)
+		s.fall = nil
+		s.mu.Lock()
+		s.pos[0], s.pos[1], s.pos[2] = p[0], p[1], p[2]
+		s.falling, s.zUnknown = false, true
+		mi := s.moveInfoAt(s.currentFlags(), now)
+		s.mu.Unlock()
+		mi.FallTime = uint32(f.land.Milliseconds())
+		if err := s.sendMove(opcode.MSGMoveFallLand, mi, game.BuildMovement(mi)); err != nil {
+			return err
+		}
+		s.emit(events.Event{Kind: events.KindSession, Data: map[string]any{"state": "landed", "x": p[0], "y": p[1], "z": p[2], "z_unknown": true}})
+		return nil
+	}
+	if now.Before(f.nextBeat) {
+		return nil
+	}
+	f.nextBeat = now.Add(500 * time.Millisecond)
+	s.syncFall(now)
+	s.mu.Lock()
+	mi := s.moveInfoAt(s.currentFlags(), now)
+	s.mu.Unlock()
+	return s.sendMove(opcode.MSGMoveHeartbeat, mi, game.BuildMovement(mi))
+}

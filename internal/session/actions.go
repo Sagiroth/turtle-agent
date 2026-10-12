@@ -17,6 +17,9 @@ import (
 const (
 	maxWalk         = 40  // yards; longer moves use Teleport
 	defaultRunSpeed = 7.0 // yards per second until the server sets another
+	// maxWalkTime keeps a slow walk inside the 35 s an RPC client waits for walk_to
+	// (wow-play-harness HeadlessClient); a 40-yard walk at the 7 yd/s run speed takes 5.7 s.
+	maxWalkTime = 30 * time.Second
 )
 
 type walkState struct {
@@ -69,6 +72,7 @@ func (s *Session) registerActions() {
 	}
 	s.handlers[opcode.SMSGForceMoveRoot] = s.rootHandler(opcode.CMSGForceMoveRootAck, true)
 	s.handlers[opcode.SMSGForceMoveUnroot] = s.rootHandler(opcode.CMSGForceMoveUnrootAck, false)
+	s.handlers[opcode.SMSGMoveKnockBack] = s.onKnockBack
 	s.handlers[opcode.SMSGAttackstart] = s.onAttackStart
 	s.handlers[opcode.SMSGAttackstop] = s.onAttackStop
 	for op, reason := range swingErrors {
@@ -86,22 +90,40 @@ func (s *Session) inWorld() error {
 	return nil
 }
 
-// clock is the MovementInfo client time: milliseconds on the session's monotonic clock,
-// plus one, because the anticheat flags a zero time and a clock that runs backwards or
-// more than 5 s ahead of the server's (Movement.cpp:377, :434-475).
-func (s *Session) clock() uint32 { return uint32(time.Since(s.start).Milliseconds()) + 1 }
+// clockAt is the MovementInfo client time at now: milliseconds on the session's monotonic
+// clock, plus one, because the anticheat flags a zero time and a clock that runs backwards
+// or more than 5 s ahead of the server's (Movement.cpp:377, :434-475). It never goes back,
+// even for a now read before the last packet's. Owner loop only.
+func (s *Session) clockAt(now time.Time) uint32 {
+	c := max(uint32(now.Sub(s.start).Milliseconds())+1, s.lastClock)
+	s.lastClock = c
+	return c
+}
 
-// moveInfo is the player's current MovementInfo; the caller holds s.mu.
-func (s *Session) moveInfo(flags uint32) game.MoveInfo {
-	return game.MoveInfo{Flags: flags, Time: s.clock(), X: s.pos[0], Y: s.pos[1], Z: s.pos[2], O: s.pos[3]}
+func (s *Session) clock() uint32 { return s.clockAt(time.Now()) }
+
+// moveInfoAt is the player's MovementInfo at now, its client time read from the same
+// instant as the position, so a step never covers more ground than its time gap allows. In
+// the air it carries the knockback's jump values and the time fallen. The caller holds s.mu.
+func (s *Session) moveInfoAt(flags uint32, now time.Time) game.MoveInfo {
+	m := game.MoveInfo{Flags: flags, Time: s.clockAt(now), X: s.pos[0], Y: s.pos[1], Z: s.pos[2], O: s.pos[3]}
+	if f := s.fall; f != nil && flags&game.MoveJumping != 0 {
+		m.FallTime = uint32(max(now.Sub(f.start), 0).Milliseconds())
+		m.JumpZSpeed, m.JumpCos, m.JumpSin, m.JumpXYSpeed = f.kb.ZSpeed, f.kb.Cos, f.kb.Sin, f.kb.XYSpeed
+	}
+	return m
 }
 
 // currentFlags are the movement flags the player has now. MoveRoot stays on while rooted,
-// or the anticheat records ROOT_MOVE (Movement.cpp:186-204).
+// or the anticheat records ROOT_MOVE (Movement.cpp:186-204); water walking, hover and
+// feather fall stay on while the server has them applied.
 func (s *Session) currentFlags() uint32 {
-	var f uint32
+	f := s.toggles
 	if s.walk != nil {
 		f |= game.MoveForward
+	}
+	if s.fall != nil {
+		f |= game.MoveJumping
 	}
 	if s.rooted {
 		f |= game.MoveRoot
@@ -109,8 +131,9 @@ func (s *Session) currentFlags() uint32 {
 	return f
 }
 
-// syncWalk moves s.pos to where the running walk is at now.
+// syncWalk moves s.pos to where the running walk or flight is at now.
 func (s *Session) syncWalk(now time.Time) {
+	s.syncFall(now)
 	if s.walk == nil {
 		return
 	}
@@ -118,6 +141,14 @@ func (s *Session) syncWalk(now time.Time) {
 	s.mu.Lock()
 	s.pos[0], s.pos[1], s.pos[2] = p[0], p[1], p[2]
 	s.mu.Unlock()
+}
+
+// airborne refuses an action the player cannot take in the air.
+func (s *Session) airborne(what string) error {
+	if f := s.fall; f != nil {
+		return fmt.Errorf("in the air after a knockback; %s waits for the landing in %.1f s", what, time.Until(f.start.Add(f.land)).Seconds())
+	}
+	return nil
 }
 
 // Target selects a unit by guid, or by name, and returns it. A name picks the nearest
@@ -228,16 +259,25 @@ func (s *Session) Face(ctx context.Context, g packet.GUID) error {
 		if s.walk != nil {
 			return nil, errors.New("walking; wait for walk_to to finish")
 		}
+		if err := s.airborne("face"); err != nil {
+			return nil, err
+		}
 		s.mu.Lock()
 		s.pos[3] = o
-		mi := s.moveInfo(s.currentFlags())
+		mi := s.moveInfoAt(s.currentFlags(), time.Now())
 		s.mu.Unlock()
-		return nil, s.conn.WritePacket(opcode.MSGMoveSetFacing, game.BuildMovement(mi))
+		if err := s.checkStep(mi); err != nil {
+			return nil, fmt.Errorf("face refused: %w", err)
+		}
+		return nil, s.sendMove(opcode.MSGMoveSetFacing, mi, game.BuildMovement(mi))
 	})
 	return err
 }
 
-// WalkTo walks in a straight line to a point at most maxWalk yards away and returns on arrival.
+// WalkTo walks in a straight line to a point at most maxWalk yards away and returns on
+// arrival. The walk is timed on the 3D distance, so it climbs or drops no faster than the
+// run speed, the bound the anticheat holds a z change to (Movement.cpp:885-887, OVERSPEED_Z
+// at :593-595); every step is checked against that bound before it is sent.
 func (s *Session) WalkTo(ctx context.Context, x, y, z float32) error {
 	v, err := s.do(ctx, func() (any, error) {
 		if err := s.inWorld(); err != nil {
@@ -252,6 +292,9 @@ func (s *Session) WalkTo(ctx context.Context, x, y, z float32) error {
 		if left := time.Until(s.splineUntil); left > 0 {
 			return nil, fmt.Errorf("moved by the server (fear, charm or a scripted move); walk_to waits %.1f s until it ends", left.Seconds())
 		}
+		if err := s.airborne("walk_to"); err != nil {
+			return nil, err
+		}
 		s.mu.Lock()
 		from := [3]float32{s.pos[0], s.pos[1], s.pos[2]}
 		s.mu.Unlock()
@@ -265,14 +308,21 @@ func (s *Session) WalkTo(ctx context.Context, x, y, z float32) error {
 			done <- nil
 			return done, nil
 		}
+		dur := time.Duration(dist / float64(s.runSpeed) * float64(time.Second))
+		if dur > maxWalkTime {
+			return nil, fmt.Errorf("walk_to would take %.0f s at %.1f yd/s, over %s; walk a shorter way or teleport", dur.Seconds(), s.runSpeed, maxWalkTime)
+		}
 		now := time.Now()
 		w := &walkState{from: from, to: [3]float32{x, y, z}, o: game.Facing(from[0], from[1], x, y), start: now,
-			dur: time.Duration(dist / float64(s.runSpeed) * float64(time.Second)), nextBeat: now.Add(500 * time.Millisecond), done: done}
+			dur: dur, nextBeat: now.Add(500 * time.Millisecond), done: done}
 		s.mu.Lock()
 		s.pos[3] = w.o
-		mi := s.moveInfo(game.MoveForward)
+		mi := s.moveInfoAt(s.currentFlags()|game.MoveForward, now)
 		s.mu.Unlock()
-		if err := s.conn.WritePacket(opcode.MSGMoveStartForward, game.BuildMovement(mi)); err != nil {
+		if err := s.checkStep(mi); err != nil {
+			return nil, fmt.Errorf("walk_to refused: the start is not where the server has the player: %w", err)
+		}
+		if err := s.sendMove(opcode.MSGMoveStartForward, mi, game.BuildMovement(mi)); err != nil {
 			return nil, err
 		}
 		s.walk = w
@@ -311,9 +361,14 @@ func (s *Session) tickWalk() error {
 		s.walk = nil
 		s.mu.Lock()
 		s.pos = [4]float32{w.to[0], w.to[1], w.to[2], w.o}
-		mi := s.moveInfo(s.currentFlags())
+		// A straight line that changed height may end above or below the ground.
+		s.zUnknown = s.zUnknown || math.Abs(float64(w.to[2]-w.from[2])) > 0.5
+		mi := s.moveInfoAt(s.currentFlags(), now)
 		s.mu.Unlock()
-		err := s.conn.WritePacket(opcode.MSGMoveStop, game.BuildMovement(mi))
+		if err := s.checkStep(mi); err != nil {
+			return s.abortWalk(w, err)
+		}
+		err := s.sendMove(opcode.MSGMoveStop, mi, game.BuildMovement(mi))
 		w.done <- err
 		return err
 	}
@@ -323,9 +378,25 @@ func (s *Session) tickWalk() error {
 	w.nextBeat = now.Add(500 * time.Millisecond)
 	s.syncWalk(now)
 	s.mu.Lock()
-	mi := s.moveInfo(s.currentFlags())
+	mi := s.moveInfoAt(s.currentFlags(), now)
 	s.mu.Unlock()
-	return s.conn.WritePacket(opcode.MSGMoveHeartbeat, game.BuildMovement(mi))
+	if err := s.checkStep(mi); err != nil {
+		s.walk = nil
+		return s.abortWalk(w, err)
+	}
+	return s.sendMove(opcode.MSGMoveHeartbeat, mi, game.BuildMovement(mi))
+}
+
+// abortWalk ends a walk whose next step would break the anticheat's bound: it stops where
+// the server last had the player, a step of zero length, and reports why. s.walk is nil.
+func (s *Session) abortWalk(w *walkState, reason error) error {
+	s.mu.Lock()
+	s.pos[0], s.pos[1], s.pos[2] = s.last.pos[0], s.last.pos[1], s.last.pos[2]
+	mi := s.moveInfoAt(s.currentFlags(), time.Now())
+	s.mu.Unlock()
+	err := s.sendMove(opcode.MSGMoveStop, mi, game.BuildMovement(mi))
+	w.done <- fmt.Errorf("walk stopped: %w", reason)
+	return err
 }
 
 // stopWalk ends a walk early; sendStop is false when the server moved the player. The
@@ -335,15 +406,20 @@ func (s *Session) stopWalk(reason error, sendStop bool) {
 	if w == nil {
 		return
 	}
+	now := time.Now()
 	if sendStop {
-		s.syncWalk(time.Now())
+		s.syncWalk(now)
 	}
 	s.walk = nil
 	if sendStop {
 		s.mu.Lock()
-		mi := s.moveInfo(s.currentFlags())
+		mi := s.moveInfoAt(s.currentFlags(), now)
 		s.mu.Unlock()
-		_ = s.conn.WritePacket(opcode.MSGMoveStop, game.BuildMovement(mi))
+		if s.checkStep(mi) != nil {
+			_ = s.abortWalk(w, reason)
+			return
+		}
+		_ = s.sendMove(opcode.MSGMoveStop, mi, game.BuildMovement(mi))
 	}
 	w.done <- reason
 }
@@ -372,11 +448,12 @@ func (s *Session) Teleport(ctx context.Context, x, y, z float32, mapID int) erro
 	}
 	tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	ch := v.(chan struct{})
 	select {
-	case <-v.(chan struct{}):
+	case <-ch:
 		return nil
 	case <-tctx.Done():
-		s.dropTeleportWaiter(v.(chan struct{}))
+		s.dropTeleportWaiter(ch)
 		return fmt.Errorf("teleport: no MSG_MOVE_TELEPORT_ACK or SMSG_NEW_WORLD within 10 s (does the account have GM rights?): %w", tctx.Err())
 	case <-s.done:
 		return ErrClosed
@@ -423,8 +500,11 @@ func (s *Session) onTeleportAck(body []byte) error {
 	}
 	s.stopWalk(errors.New("teleported by the server"), false)
 	s.gossip = nil // the client closes an NPC window when the player is moved away
+	// A .go xyz puts the player at the given z, perhaps in the air; the next position from
+	// the server settles it (review M13).
+	s.serverPosition([3]float32{a.Move.X, a.Move.Y, a.Move.Z}, false)
 	s.mu.Lock()
-	s.pos = [4]float32{a.Move.X, a.Move.Y, a.Move.Z, a.Move.O}
+	s.pos[3] = a.Move.O
 	s.mu.Unlock()
 	s.store.MoveTo(self, a.Move.X, a.Move.Y, a.Move.Z, a.Move.O)
 	if err := s.conn.WritePacket(opcode.MSGMoveTeleportAck, game.BuildTeleportAck(self, a.Counter, s.clock())); err != nil {
@@ -453,6 +533,7 @@ func (s *Session) onNewWorld(body []byte) error {
 	}
 	s.stopWalk(errors.New("teleported to another map"), false)
 	s.gossip = nil
+	s.serverPosition([3]float32{nw.X, nw.Y, nw.Z}, false)
 	s.mu.Lock()
 	s.mapID, s.pos = nw.Map, [4]float32{nw.X, nw.Y, nw.Z, nw.O}
 	s.target = 0
@@ -488,10 +569,10 @@ func (s *Session) speedHandler(op, ack uint16) handler {
 			s.setRunSpeed(c.Speed, now)
 		}
 		s.mu.Lock()
-		mi := s.moveInfo(s.currentFlags())
+		mi := s.moveInfoAt(s.currentFlags(), now)
 		s.mu.Unlock()
 		speed := c.Speed
-		return s.conn.WritePacket(ack, game.BuildMovementChangeAck(self, c.Counter, mi, &speed))
+		return s.sendMove(ack, mi, game.BuildMovementChangeAck(self, c.Counter, mi, &speed))
 	}
 }
 
@@ -537,10 +618,12 @@ func (s *Session) rootHandler(ack uint16, apply bool) handler {
 		if apply {
 			s.stopWalk(errors.New("rooted by the server; walk stopped"), true)
 		}
+		now := time.Now()
+		s.syncWalk(now)
 		s.mu.Lock()
-		mi := s.moveInfo(s.currentFlags())
+		mi := s.moveInfoAt(s.currentFlags(), now)
 		s.mu.Unlock()
-		return s.conn.WritePacket(ack, game.BuildMovementChangeAck(self, c.Counter, mi, nil))
+		return s.sendMove(ack, mi, game.BuildMovementChangeAck(self, c.Counter, mi, nil))
 	}
 }
 

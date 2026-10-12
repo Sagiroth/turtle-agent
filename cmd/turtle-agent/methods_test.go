@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -400,7 +401,21 @@ func TestUnitsAndStatusHealth(t *testing.T) {
 	if out := r.call("units", `{"hostile":false,"near":5}`)["result"].([]any); len(out) != 0 {
 		t.Fatalf("near %v", out)
 	}
+	// Position, its age and the distances from the player (issue #16).
 	st := r.call("status", "{}")["result"].(map[string]any)
+	px, py, pz := st["x"].(float64), st["y"].(float64), st["z"].(float64)
+	d2 := math.Hypot(11-px, 2-py)
+	d3 := math.Sqrt(d2*d2 + (3-pz)*(3-pz))
+	if age, ok := u["pos_age_ms"].(float64); !ok || age < 0 || u["x"] != float64(11) || u["y"] != float64(2) || u["z"] != float64(3) || u["moving"] != false ||
+		math.Abs(u["distance_2d"].(float64)-d2) > 1e-3 || math.Abs(u["distance"].(float64)-d3) > 1e-3 {
+		t.Fatalf("position %v, player at %v %v %v", u, px, py, pz)
+	}
+	if out := r.call("units", fmt.Sprintf(`{"name":"wolf","within":%f}`, d3+0.01))["result"].([]any); len(out) != 1 {
+		t.Fatalf("within %v", out)
+	}
+	if out := r.call("units", fmt.Sprintf(`{"name":"wolf","within":%f}`, d3-0.01))["result"].([]any); len(out) != 0 {
+		t.Fatalf("within %v", out)
+	}
 	if st["health"] != float64(700) || st["max_health"] != float64(800) || st["power"] != float64(10) || st["max_power"] != float64(20) {
 		t.Fatalf("status %v", st)
 	}

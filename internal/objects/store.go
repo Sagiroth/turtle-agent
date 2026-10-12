@@ -4,6 +4,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/pjerra/turtle-agent/internal/packet"
 )
@@ -36,34 +37,40 @@ type Change struct {
 // (0 only when dead) and MaxHealth 100 (Object.cpp:727-748). The store passes those
 // values through as sent, so Dead and ChangeHealth deltas then work on percents.
 type Unit struct {
-	GUID      packet.GUID `json:"guid"`
-	Type      string      `json:"type"` // "player" or "creature"
-	Entry     uint32      `json:"entry,omitempty"`
-	Name      string      `json:"name"`
-	X         float32     `json:"x"`
-	Y         float32     `json:"y"`
-	Z         float32     `json:"z"`
-	O         float32     `json:"o"`
-	Distance  float32     `json:"distance"`
-	Health    uint32      `json:"health"`
-	MaxHealth uint32      `json:"max_health"`
-	PowerType uint8       `json:"power_type"`
-	Power     uint32      `json:"power"`
-	MaxPower  uint32      `json:"max_power"`
-	Level     uint32      `json:"level"`
-	Faction   uint32      `json:"faction"`
-	Target    packet.GUID `json:"target,omitempty"`
-	Flags     uint32      `json:"flags"`
-	NPCFlags  uint32      `json:"npc_flags"`
-	InCombat  bool        `json:"in_combat"`
-	Dead      bool        `json:"dead"`
-	Hostile   bool        `json:"hostile"`
-	InParty   bool        `json:"in_party"`
-	Auras     []uint32    `json:"auras,omitempty"`
+	GUID  packet.GUID `json:"guid"`
+	Type  string      `json:"type"` // "player" or "creature"
+	Entry uint32      `json:"entry,omitempty"`
+	Name  string      `json:"name"`
+	X     float32     `json:"x"`
+	Y     float32     `json:"y"`
+	Z     float32     `json:"z"`
+	O     float32     `json:"o"`
+	// PosAgeMS is how long ago the server last said where the unit is (a create or
+	// movement block, a movement relay or a spline); -1 when it never did, and the
+	// distances are then -1 too. While Moving, x/y/z are the spline's current point.
+	PosAgeMS   int64       `json:"pos_age_ms"`
+	Moving     bool        `json:"moving"`
+	Distance   float32     `json:"distance"`    // 3D, from the player
+	Distance2D float32     `json:"distance_2d"` // ignoring height
+	Health     uint32      `json:"health"`
+	MaxHealth  uint32      `json:"max_health"`
+	PowerType  uint8       `json:"power_type"`
+	Power      uint32      `json:"power"`
+	MaxPower   uint32      `json:"max_power"`
+	Level      uint32      `json:"level"`
+	Faction    uint32      `json:"faction"`
+	Target     packet.GUID `json:"target,omitempty"`
+	Flags      uint32      `json:"flags"`
+	NPCFlags   uint32      `json:"npc_flags"`
+	InCombat   bool        `json:"in_combat"`
+	Dead       bool        `json:"dead"`
+	Hostile    bool        `json:"hostile"`
+	InParty    bool        `json:"in_party"`
+	Auras      []uint32    `json:"auras,omitempty"`
 }
 
 type Filter struct {
-	Near    float32 // 0: any distance
+	Near    float32 // 3D yards; 0: any distance (units with no known position never match)
 	Entry   uint32
 	Hostile *bool
 	Name    string // applied by the session after names are filled in
@@ -75,14 +82,24 @@ type object struct {
 	typ        uint8
 	values     map[uint16]uint32
 	x, y, z, o float32
+	posAt      time.Time // zero: no position yet
+	track      *track    // the server spline the unit follows, if any
 }
 
 type Store struct {
 	mu   sync.RWMutex
 	objs map[packet.GUID]*object
+	now  func() time.Time
 }
 
-func NewStore() *Store { return &Store{objs: map[packet.GUID]*object{}} }
+func NewStore() *Store { return &Store{objs: map[packet.GUID]*object{}, now: time.Now} }
+
+// SetClock replaces time.Now for position ages and spline progress (tests).
+func (s *Store) SetClock(now func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.now = now
+}
 
 func (s *Store) get(g packet.GUID) (*object, bool) {
 	o, ok := s.objs[g]
@@ -106,14 +123,14 @@ func (s *Store) Apply(blocks []Block) []Change {
 			o := &object{guid: b.GUID, typ: b.ObjType, values: map[uint16]uint32{}}
 			s.objs[b.GUID] = o
 			ch = append(ch, Change{GUID: b.GUID, Kind: ChangeCreated})
-			moveObject(o, b.Move)
+			s.moveObject(o, b.Move)
 			ch = setValues(o, b.Values, ch, false)
 		case BlockValues:
 			o, existed := s.get(b.GUID) // values before a create we missed are kept
 			ch = setValues(o, b.Values, ch, existed)
 		case BlockMovement:
 			if o, ok := s.objs[b.GUID]; ok {
-				moveObject(o, b.Move)
+				s.moveObject(o, b.Move)
 			}
 		case BlockOutOfRange:
 			for _, g := range b.GUIDs {
@@ -124,9 +141,27 @@ func (s *Store) Apply(blocks []Block) []Change {
 	return ch
 }
 
-func moveObject(o *object, m *Movement) {
-	if m != nil && m.HasPosition {
-		o.x, o.y, o.z, o.o = m.X, m.Y, m.Z, m.O
+// moveObject takes the position of a create or movement block. A unit on a spline
+// carries on along it from the block's time passed (the core sends the whole route and
+// how far along it the unit is, packet_builder.cpp:154-180); the block's position is
+// where the unit stood when the server wrote it.
+func (s *Store) moveObject(o *object, m *Movement) {
+	if m == nil || !m.HasPosition {
+		return
+	}
+	now := s.now()
+	o.x, o.y, o.z, o.o, o.posAt, o.track = m.X, m.Y, m.Z, m.O, now, nil
+	if sp := m.Spline; sp != nil && sp.Flags&splineDone == 0 && len(sp.Points) >= 3 {
+		// The first and last points of the path are Spline's virtual points
+		// (SplineBase::InitCatmullRom, spline.cpp:240-271), linear paths included: the
+		// initializers table maps ModeLinear to InitCatmullRom (spline.cpp:49-55), and
+		// every create-block spline in the captures has them (TestCapturedCreateSplines).
+		pts := sp.Points[1 : len(sp.Points)-1]
+		start := now.Add(-time.Duration(sp.TimePassed) * time.Millisecond)
+		o.track = newTrack(pts, start, time.Duration(sp.Duration)*time.Millisecond, sp.Flags&splineCyclic != 0)
+		if o.track != nil && sp.Flags&splineFinalAngle != 0 {
+			o.track.finalO, o.track.hasFinalO = sp.FinalAngle, true
+		}
 	}
 }
 
@@ -165,31 +200,68 @@ func (s *Store) Destroy(g packet.GUID) bool {
 	return ok
 }
 
+// MoveTo puts g where a movement relay says it is, ending any spline it was on.
 func (s *Store) MoveTo(g packet.GUID, x, y, z, o float32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if ob, ok := s.objs[g]; ok {
-		ob.x, ob.y, ob.z, ob.o = x, y, z, o
+		ob.x, ob.y, ob.z, ob.o, ob.posAt, ob.track = x, y, z, o, s.now(), nil
 	}
 }
 
-// MoveSpline puts g at a spline's destination and turns it along the way it travelled.
-// A stop, or a move with no horizontal travel, keeps the facing it had.
-func (s *Store) MoveSpline(g packet.GUID, x, y, z float32, stop bool) {
+// MoveSpline starts g on a spline from SMSG_MONSTER_MOVE. Until the spline's duration has
+// run, g is at the spline's current point, facing along it; then at its destination,
+// facing the spline's final angle or the way it last travelled. A stop puts g at the
+// stop's point; a stop, or a move with no horizontal travel, keeps the facing it had.
+func (s *Store) MoveSpline(m MonsterMove) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ob, ok := s.objs[g]
+	ob, ok := s.objs[m.GUID]
 	if !ok {
 		return
 	}
-	if dx, dy := float64(x-ob.x), float64(y-ob.y); !stop && (dx != 0 || dy != 0) {
-		o := math.Atan2(dy, dx)
-		if o < 0 {
-			o += 2 * math.Pi
-		}
-		ob.o = float32(o)
+	now := s.now()
+	_, ob.o, _ = ob.pos(now) // the facing it has now, partway along an earlier spline
+	path := m.Path
+	if len(path) < 2 {
+		path = [][3]float32{m.Start, m.Dest}
 	}
-	ob.x, ob.y, ob.z = x, y, z
+	// A linear path of more than Movement.MaxPointsPerPacket (80) points goes out in
+	// parts: each later SMSG_MONSTER_MOVE of the same spline repeats the first point, then
+	// the points after those sent, with the time left to its last point (Unit.cpp:11437-11442,
+	// packet_builder.cpp:78-150). The unit carries on from where it is, through the points
+	// of the earlier part it has not reached yet.
+	if t := ob.track; t != nil && !m.Stop && m.ID != 0 && t.id == m.ID {
+		path = append(t.rest(now), path[1:]...)
+	}
+	ob.x, ob.y, ob.z, ob.posAt, ob.track = m.Dest[0], m.Dest[1], m.Dest[2], now, nil
+	if m.Stop {
+		return
+	}
+	if ob.track = newTrack(path, now, time.Duration(m.Duration)*time.Millisecond, m.Flags&splineCyclic != 0); ob.track != nil {
+		ob.track.id, ob.track.finalO, ob.track.hasFinalO = m.ID, m.FinalAngle, m.HasFinalAngle
+		return
+	}
+	// No time to take or no way to go: the unit is at the destination at once.
+	if dx, dy := float64(m.Dest[0]-m.Start[0]), float64(m.Dest[1]-m.Start[1]); dx != 0 || dy != 0 {
+		ob.o = angle(dx, dy)
+	}
+	if m.HasFinalAngle {
+		ob.o = m.FinalAngle
+	}
+}
+
+// pos is where o is at now, its facing, and whether it is still moving on a spline. A
+// spline with no horizontal travel leaves the facing the unit had before it.
+func (o *object) pos(now time.Time) (p [3]float32, face float32, moving bool) {
+	if o.track == nil {
+		return [3]float32{o.x, o.y, o.z}, o.o, false
+	}
+	p, face, ok, moving := o.track.at(now)
+	if !ok {
+		face = o.o
+	}
+	return p, face, moving
 }
 
 // Clear forgets every object (SMSG_NEW_WORLD).
@@ -206,7 +278,7 @@ func (s *Store) Get(g packet.GUID, ox, oy, oz float32) (Unit, bool) {
 	if !ok {
 		return Unit{}, false
 	}
-	return toUnit(o, ox, oy, oz), true
+	return toUnit(o, s.now(), ox, oy, oz), true
 }
 
 // Entry is g's creature entry: its OBJECT_FIELD_ENTRY when the store holds that, else
@@ -250,18 +322,22 @@ func guidAt(v map[uint16]uint32, i uint16) packet.GUID {
 func (s *Store) Units(f Filter, ox, oy, oz float32) []Unit {
 	s.mu.RLock()
 	var out []Unit
+	now := s.now()
 	for _, o := range s.objs {
 		if !isUnit(o) {
 			continue
 		}
-		u := toUnit(o, ox, oy, oz)
-		if (f.Near > 0 && u.Distance > f.Near) || (f.Entry != 0 && u.Entry != f.Entry) || (f.Hostile != nil && u.Hostile != *f.Hostile) {
+		u := toUnit(o, now, ox, oy, oz)
+		if (f.Near > 0 && (u.Distance < 0 || u.Distance > f.Near)) || (f.Entry != 0 && u.Entry != f.Entry) || (f.Hostile != nil && u.Hostile != *f.Hostile) {
 			continue
 		}
 		out = append(out, u)
 	}
 	s.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool {
+		if ui, uj := out[i].Distance < 0, out[j].Distance < 0; ui != uj {
+			return uj // units with no known position last
+		}
 		if out[i].Distance != out[j].Distance {
 			return out[i].Distance < out[j].Distance
 		}
@@ -287,10 +363,10 @@ func isUnit(o *object) bool {
 	return false
 }
 
-func toUnit(o *object, ox, oy, oz float32) Unit {
+func toUnit(o *object, now time.Time, ox, oy, oz float32) Unit {
 	v := o.values
 	u := Unit{
-		GUID: o.guid, Type: "creature", Entry: v[FieldEntry], X: o.x, Y: o.y, Z: o.z, O: o.o,
+		GUID: o.guid, Type: "creature", Entry: v[FieldEntry],
 		Health: v[UnitHealth], MaxHealth: v[UnitMaxHealth], PowerType: uint8(v[UnitBytes0] >> 24),
 		Level: v[UnitLevel], Faction: v[UnitFaction], Flags: v[UnitFlags], NPCFlags: v[UnitNPCFlags],
 		Target: guidAt(v, UnitTarget),
@@ -313,8 +389,16 @@ func toUnit(o *object, ox, oy, oz float32) Unit {
 			u.Auras = append(u.Auras, id)
 		}
 	}
-	dx, dy, dz := float64(o.x-ox), float64(o.y-oy), float64(o.z-oz)
+	if o.posAt.IsZero() {
+		u.PosAgeMS, u.Distance, u.Distance2D = -1, -1, -1
+		return u
+	}
+	p, face, moving := o.pos(now)
+	u.X, u.Y, u.Z, u.O, u.Moving = p[0], p[1], p[2], face, moving
+	u.PosAgeMS = max(now.Sub(o.posAt).Milliseconds(), 0)
+	dx, dy, dz := float64(p[0]-ox), float64(p[1]-oy), float64(p[2]-oz)
 	u.Distance = float32(math.Sqrt(dx*dx + dy*dy + dz*dz))
+	u.Distance2D = float32(math.Hypot(dx, dy))
 	return u
 }
 

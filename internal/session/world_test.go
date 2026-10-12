@@ -2,6 +2,7 @@ package session
 
 import (
 	"testing"
+	"time"
 
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/game"
@@ -72,7 +73,9 @@ func TestDeathAuraAndMoves(t *testing.T) {
 		len(r) != 1 || r[0].SpellID != 589 || r[0].Data["harmful"] != true || r[0].Seq < a[0].Seq {
 		t.Fatalf("auras %+v %+v", a, r)
 	}
-	if u, ok := h.s.Store().Get(wolfGUID, 0, 0, 0); !ok || u.X != 7 || u.Z != 9 {
+	// The spline takes 1 s; once it has run, the wolf is at its end.
+	h.s.Store().SetClock(func() time.Time { return time.Now().Add(2 * time.Second) })
+	if u, ok := h.s.Store().Get(wolfGUID, 0, 0, 0); !ok || u.X != 7 || u.Z != 9 || u.Moving {
 		t.Fatalf("monster move not applied: %+v", u)
 	}
 	if h.s.Status().ParseErrors != 1 {

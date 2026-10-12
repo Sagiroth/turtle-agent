@@ -309,3 +309,116 @@ func TestFlightStartsUnderTheMeshOfASlope(t *testing.T) {
 		t.Fatalf("no floor: landed at %v (floor %v), bump at %.2f", f.landPos, f.onFloor, f.bumpT)
 	}
 }
+
+// stalledPlanner is a navmesh whose every query waits stall (or until release closes), as
+// one behind a path_to reading tiles from a slow disk. Its floor is 5 yd under the player.
+type stalledPlanner struct {
+	stall   time.Duration
+	release chan struct{}
+}
+
+func (p stalledPlanner) wait() {
+	select {
+	case <-p.release:
+	case <-time.After(p.stall):
+	}
+}
+
+func (p stalledPlanner) Floors(_ uint32, x, y, lo, hi float32) ([]navmesh.Floor, error) {
+	p.wait()
+	return flat(me.Z-5).Floors(0, x, y, lo, hi)
+}
+
+func (p stalledPlanner) Plan(uint32, navmesh.Vec3, navmesh.Vec3) (navmesh.Path, error) {
+	p.wait()
+	return navmesh.Path{Status: navmesh.NoPath}, nil
+}
+
+// #42: a planner that stalls for 3 s holds back nothing of the session loop. A teleport is
+// acked at once and the floor search under it waits off the loop; a knockback is acked at
+// once, its flight keeps its heartbeats inside the anticheat's 1 s and lands on the guess
+// when the trace does not answer in time; another order is acked and pings keep their
+// cadence meanwhile. The late answers change nothing.
+func TestStalledPlannerKeepsTheLoopOnTime(t *testing.T) {
+	stall := stalledPlanner{stall: 3 * time.Second, release: make(chan struct{})}
+	h := start(t, Options{Planner: stall, PingInterval: 250 * time.Millisecond})
+	h.enterWorld()
+	quick := func(what string, since time.Time) {
+		t.Helper()
+		if d := time.Since(since); d > 200*time.Millisecond {
+			t.Fatalf("%s after %v", what, d)
+		}
+	}
+	done := make(chan error, 1)
+	go func() { done <- h.s.Teleport(context.Background(), 1, 2, 30, -1) }()
+	h.expect(opcode.CMSGMessagechat)
+	w := packet.NewWriter().PackedGUID(me.GUID).U32(7)
+	game.WriteMoveInfo(w, game.MoveInfo{X: 1, Y: 2, Z: 30})
+	sent := time.Now()
+	h.send(opcode.MSGMoveTeleportAck, w.Bytes())
+	h.expect(opcode.MSGMoveTeleportAck)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	quick("teleport ack", sent)
+
+	sent = time.Now()
+	h.send(opcode.SMSGMoveKnockBack, gametest.KnockBack(me.GUID, 5, 0, 1, 8, -15)) // 1.5 s flight
+	ack, _ := ackMove(t, h.expect(opcode.CMSGMoveKnockBackAck), 5)
+	quick("knockback ack", sent)
+	sent = time.Now()
+	h.send(opcode.SMSGForceRunSpeedChange, gametest.SpeedChange(me.GUID, 6, 7))
+	h.expect(opcode.CMSGForceRunSpeedChangeAck)
+	quick("speed ack", sent)
+	last := time.Now()
+	for time.Since(sent) < time.Second {
+		h.expect(opcode.CMSGPing)
+		if d := time.Since(last); d > 450*time.Millisecond {
+			t.Fatalf("a ping %v after the one before", d)
+		}
+		last = time.Now()
+	}
+
+	land, err := h.srv.Expect(opcode.MSGMoveFallLand, 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := []game.MoveInfo{ack}
+	for _, p := range h.srv.Skipped() {
+		if p.Op == opcode.MSGMoveHeartbeat {
+			steps = append(steps, readMove(p.Body))
+		}
+	}
+	lm := readMove(land.Body)
+	steps = append(steps, lm)
+	if len(steps) < 4 {
+		t.Fatalf("%d steps in a 1.5 s flight", len(steps))
+	}
+	for i := 1; i < len(steps); i++ {
+		if gap := steps[i].Time - steps[i-1].Time; gap > 700 {
+			t.Fatalf("step %d: %d ms after the one before", i, gap)
+		}
+	}
+	if lm.Z != ack.Z {
+		t.Fatalf("landing %+v, want the guess at z %.1f", lm, ack.Z)
+	}
+	close(stall.release) // the stalled queries answer now, too late
+	time.Sleep(100 * time.Millisecond)
+	if st := h.s.Status(); st.Falling || st.Z != lm.Z || st.Y != lm.Y || !st.ZUnknown {
+		t.Fatalf("after the late answers %+v", st)
+	}
+	h.logout()
+	for _, p := range h.srv.Skipped() {
+		if p.Op == opcode.MSGMoveFallLand {
+			t.Fatal("a second landing")
+		}
+	}
+	for _, e := range ofKind(h.s.Log(), events.KindSession) {
+		if e.Data["state"] == "landed" && (e.Data["floor"] != "guess" || e.Data["floor_late"] != true) {
+			t.Fatalf("landed event %v", e.Data)
+		}
+		if e.Data["state"] == "falling" {
+			t.Fatalf("the teleport's late floor search started a fall: %v", e.Data)
+		}
+	}
+}

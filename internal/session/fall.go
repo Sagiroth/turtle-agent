@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"math"
 	"time"
 
@@ -186,31 +187,62 @@ func (f *fallState) describe(state string, from [3]float32, now time.Time) map[s
 // no caller), so a first packet that had already dropped would break the z bound of a
 // player standing still (Movement.cpp:863-867, :593-595). Without a navmesh, or with no
 // floor under the point, the z stays a guess.
-func (s *Session) dropToFloor(now time.Time) error {
+//
+// The search, and the fall's trace with it, runs off the loop: it may read a tile or wait
+// behind a path_to that holds the planner, and the loop must keep its heartbeats, acks and
+// pings on time (#42). The player stands still at the teleport's position meanwhile; the
+// answer is dropped when the player has been moved since (a teleport, a walk, a knockback).
+func (s *Session) dropToFloor() {
 	floor := s.floorFunc()
 	if floor == nil {
-		return nil
+		return
 	}
 	s.mu.Lock()
 	p, o := [3]float32{s.pos[0], s.pos[1], s.pos[2]}, s.pos[3]
 	s.mu.Unlock()
-	fl, err := floor(p[0], p[1], p[2]-fallReach, p[2]+standSlack)
-	if err != nil {
-		return nil
+	placed, term := s.placed, fallTerm(s.toggles)
+	go func() {
+		fl, err := floor(p[0], p[1], p[2]-fallReach, p[2]+standSlack)
+		if err != nil {
+			return
+		}
+		g, ok := highest(fl, -math.MaxFloat32, p[2]+standSlack)
+		if !ok {
+			return
+		}
+		var f *fallState
+		if p[2]-g.Z > settleGap {
+			began := time.Unix(0, 0) // an epoch, not the loop's clock: startDrop moves the flight to its start
+			kb := game.KnockBack{Cos: float32(math.Cos(float64(o))), Sin: float32(math.Sin(float64(o)))}
+			f = &fallState{kb: kb, began: began, startZ: p[2], floor: floor}
+			f.arc(p, began, 0, term, false)
+		}
+		_, _ = s.do(context.Background(), func() (any, error) {
+			if s.placed != placed || s.fall != nil || s.walk != nil || s.last.pos != p {
+				return nil, nil // moved since
+			}
+			if f == nil {
+				s.mu.Lock()
+				s.zUnknown = g.Flags&navmesh.NavWater != 0
+				s.mu.Unlock()
+				return nil, nil
+			}
+			// A failed write closes the socket, and the loop ends on the read error.
+			return nil, s.startDrop(f, p, s.now())
+		})
+	}()
+}
+
+// startDrop starts a traced fall from rest at p, moved on to begin at now.
+func (s *Session) startDrop(f *fallState, p [3]float32, now time.Time) error {
+	d := now.Sub(f.began)
+	f.began, f.start, f.land = now, f.start.Add(d), f.land.Add(d)
+	f.nextBeat = now.Add(500 * time.Millisecond)
+	s.fall = f
+	if term := fallTerm(s.toggles); term != f.term { // feather fall came or went meanwhile
+		f.restart(now, term)
+		s.traceFall(now)
 	}
-	g, ok := highest(fl, -math.MaxFloat32, p[2]+standSlack)
-	if !ok {
-		return nil
-	}
-	if p[2]-g.Z <= settleGap {
-		s.mu.Lock()
-		s.zUnknown = g.Flags&navmesh.NavWater != 0
-		s.mu.Unlock()
-		return nil
-	}
-	kb := game.KnockBack{Cos: float32(math.Cos(float64(o))), Sin: float32(math.Sin(float64(o)))}
-	s.fall = &fallState{kb: kb, began: now, startZ: p[2], floor: floor, nextBeat: now.Add(500 * time.Millisecond)}
-	s.fall.arc(p, now, 0, fallTerm(s.toggles), false)
 	s.mu.Lock()
 	s.falling = true
 	mi := s.moveInfoAt(s.currentFlags(), now)
@@ -218,6 +250,53 @@ func (s *Session) dropToFloor(now time.Time) error {
 	if err := s.sendMove(opcode.MSGMoveHeartbeat, mi, game.BuildMovement(mi)); err != nil {
 		return err
 	}
-	s.emit(events.Event{Kind: events.KindSession, Data: s.fall.describe("falling", p, now)})
+	s.emit(events.Event{Kind: events.KindSession, Data: f.describe("falling", p, now)})
 	return nil
+}
+
+// traceWait bounds how long a flight waits for its trace before it keeps the guess landing.
+// No heartbeat goes out meanwhile, as the trace may still bend the arc (a wall, a ceiling);
+// with the 100 ms tick the next one is at most 600 ms after the packet before it, inside the
+// anticheat's 1 s (Movement.cpp:600-604).
+const traceWait = 300 * time.Millisecond
+
+// traceFall traces the current arc against the navmesh off the loop, on a copy of the
+// flight, and hands the landing back to the loop (s.do), which stays the flight's only
+// owner. A trace that answers after traceWait, after the arc was restarted, or after the
+// flight ended is dropped (#42).
+func (s *Session) traceFall(now time.Time) {
+	f := s.fall
+	if f == nil || f.floor == nil {
+		s.resolveFall()
+		return
+	}
+	s.traceSeq++
+	seq := s.traceSeq
+	f.tracing, f.traceBy = seq, now.Add(traceWait)
+	c := *f
+	go func() {
+		c.traced()
+		_, _ = s.do(context.Background(), func() (any, error) {
+			if s.fall != f || f.tracing != seq {
+				return nil, nil
+			}
+			f.stopXY, f.bumpT, f.land, f.landPos, f.onFloor, f.water = c.stopXY, c.bumpT, c.land, c.landPos, c.onFloor, c.water
+			s.resolveFall()
+			return nil, nil
+		})
+	}()
+}
+
+// resolveFall ends the wait for a trace and emits the flight's announcement, now that its
+// landing is known.
+func (s *Session) resolveFall() {
+	f := s.fall
+	if f == nil {
+		return
+	}
+	f.tracing = 0
+	if f.announce != "" {
+		s.emit(events.Event{Kind: events.KindSession, Data: f.describe(f.announce, f.annFrom, f.annAt)})
+		f.announce = ""
+	}
 }

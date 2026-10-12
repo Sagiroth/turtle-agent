@@ -131,8 +131,8 @@ func (p *Planner) Plan(mapID uint32, from, to Vec3) (Path, error) {
 		return Path{}, errors.New(`navmesh: no tiles folder; set "mmaps_dir" in the settings file`)
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	m, err := p.mesh(mapID)
+	p.mu.Unlock()
 	if err != nil {
 		return Path{}, err
 	}
@@ -140,13 +140,25 @@ func (p *Planner) Plan(mapID uint32, from, to Vec3) (Path, error) {
 	if err != nil {
 		return Path{}, err
 	}
-	m.missing = nil
 	var path Path
 	for _, margin := range []int{1, 3} {
-		if err := p.load(m, wantTiles(names, mapID, from, to, margin, p.max)); err != nil {
+		want := wantTiles(names, mapID, from, to, margin, p.max)
+		data, err := p.fetch(m, want)
+		if err != nil {
+			return Path{}, err
+		}
+		p.mu.Lock()
+		if p.maps[mapID] != m {
+			p.mu.Unlock()
+			return Path{}, errClosed
+		}
+		m.missing = nil
+		if err := p.load(m, want, data); err != nil {
+			p.mu.Unlock()
 			return Path{}, err
 		}
 		path = plan(m.eng, from, to)
+		p.mu.Unlock()
 		if path.Status == Complete || len(names) <= smallMap {
 			break
 		}
@@ -181,16 +193,28 @@ func (p *Planner) Floors(mapID uint32, x, y, lo, hi float32) ([]Floor, error) {
 	if m.missing[name] {
 		return nil, nil
 	}
+	var data map[string][]byte
 	if m.tiles[name] == nil {
-		if _, err := os.Stat(filepath.Join(p.dir, name)); errors.Is(err, os.ErrNotExist) {
+		// Read the tile with the lock let go, as fetch does for Plan.
+		p.mu.Unlock()
+		b, err := os.ReadFile(filepath.Join(p.dir, name))
+		p.mu.Lock()
+		if p.maps[mapID] != m {
+			return nil, errClosed
+		}
+		switch {
+		case errors.Is(err, os.ErrNotExist):
 			if m.missing == nil {
 				m.missing = map[string]bool{}
 			}
 			m.missing[name] = true
 			return nil, nil
+		case err != nil:
+			return nil, fmt.Errorf("navmesh: %w", err)
 		}
+		data = map[string][]byte{name: b}
 	}
-	if err := p.load(m, []string{name}); err != nil {
+	if err := p.load(m, []string{name}, data); err != nil {
 		return nil, err
 	}
 	fl, err := m.eng.floors(x, y, lo, hi)
@@ -245,9 +269,36 @@ func (p *Planner) list(mapID uint32) ([]string, error) {
 	return out, nil
 }
 
+// errClosed says Close ran while a query had the lock let go.
+var errClosed = errors.New("navmesh: planner closed")
+
+// fetch reads the wanted tiles that are not loaded yet, with the lock let go: a cold read
+// (64 tiles of 0.5-3 MB, perhaps from a slow disk) must not hold back a Floors query of the
+// session loop's fall and knockback traces (#42), which waits only for Detour itself.
+func (p *Planner) fetch(m *mapMesh, want []string) (map[string][]byte, error) {
+	p.mu.Lock()
+	var cold []string
+	for _, n := range want {
+		if m.tiles[n] == nil {
+			cold = append(cold, n)
+		}
+	}
+	p.mu.Unlock()
+	data := make(map[string][]byte, len(cold))
+	for _, n := range cold {
+		b, err := os.ReadFile(filepath.Join(p.dir, n))
+		if err != nil {
+			return nil, fmt.Errorf("navmesh: %w", err)
+		}
+		data[n] = b
+	}
+	return data, nil
+}
+
 // load makes the wanted tiles the loaded ones, unloading the least recently wanted others
-// first when they would not all fit.
-func (p *Planner) load(m *mapMesh, want []string) error {
+// first when they would not all fit. data holds tiles fetch read; one it lacks (unloaded
+// since by another query) is read here.
+func (p *Planner) load(m *mapMesh, want []string, data map[string][]byte) error {
 	m.tick++
 	missing := 0
 	for _, n := range want {
@@ -276,11 +327,14 @@ func (p *Planner) load(m *mapMesh, want []string) error {
 		if m.tiles[n] != nil {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(p.dir, n))
-		if err != nil {
-			return fmt.Errorf("navmesh: %w", err)
+		b, ok := data[n]
+		if !ok {
+			var err error
+			if b, err = os.ReadFile(filepath.Join(p.dir, n)); err != nil {
+				return fmt.Errorf("navmesh: %w", err)
+			}
 		}
-		ref, err := m.eng.addTile(data)
+		ref, err := m.eng.addTile(b)
 		if err != nil {
 			return fmt.Errorf("navmesh: %s: %w", n, err)
 		}

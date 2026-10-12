@@ -1,0 +1,255 @@
+package objects
+
+import (
+	"math"
+	"sort"
+	"sync"
+
+	"github.com/pjerra/turtle-agent/internal/packet"
+)
+
+type ChangeKind uint8
+
+const (
+	ChangeCreated ChangeKind = iota + 1
+	ChangeRemoved
+	ChangeHealth
+	ChangeAura
+	ChangeCombat
+)
+
+// Change is a state change the session turns into events. Objects seen for the first
+// time report only ChangeCreated, so a login burst does not flood the log with auras.
+type Change struct {
+	GUID     packet.GUID
+	Kind     ChangeKind
+	Slot     int // aura slot, ChangeAura only
+	Old, New uint32
+}
+
+// Unit is a player or creature snapshot. When the server's ShowHealthValues option is
+// off, units the client may not see the health of arrive as a percent: Health 1..100
+// (0 only when dead) and MaxHealth 100 (Object.cpp:727-748). The store passes those
+// values through as sent, so Dead and ChangeHealth deltas then work on percents.
+type Unit struct {
+	GUID      packet.GUID `json:"guid"`
+	Type      string      `json:"type"` // "player" or "creature"
+	Entry     uint32      `json:"entry,omitempty"`
+	Name      string      `json:"name"`
+	X         float32     `json:"x"`
+	Y         float32     `json:"y"`
+	Z         float32     `json:"z"`
+	O         float32     `json:"o"`
+	Distance  float32     `json:"distance"`
+	Health    uint32      `json:"health"`
+	MaxHealth uint32      `json:"max_health"`
+	PowerType uint8       `json:"power_type"`
+	Power     uint32      `json:"power"`
+	MaxPower  uint32      `json:"max_power"`
+	Level     uint32      `json:"level"`
+	Faction   uint32      `json:"faction"`
+	Target    packet.GUID `json:"target,omitempty"`
+	Flags     uint32      `json:"flags"`
+	NPCFlags  uint32      `json:"npc_flags"`
+	InCombat  bool        `json:"in_combat"`
+	Dead      bool        `json:"dead"`
+	Hostile   bool        `json:"hostile"`
+	InParty   bool        `json:"in_party"`
+	Auras     []uint32    `json:"auras,omitempty"`
+}
+
+type Filter struct {
+	Near    float32 // 0: any distance
+	Entry   uint32
+	Hostile *bool
+	Name    string // applied by the session after names are filled in
+	Limit   int    // 0: 100
+}
+
+type object struct {
+	guid       packet.GUID
+	typ        uint8
+	values     map[uint16]uint32
+	x, y, z, o float32
+}
+
+type Store struct {
+	mu   sync.RWMutex
+	objs map[packet.GUID]*object
+}
+
+func NewStore() *Store { return &Store{objs: map[packet.GUID]*object{}} }
+
+func (s *Store) get(g packet.GUID) (*object, bool) {
+	o, ok := s.objs[g]
+	if !ok {
+		o = &object{guid: g, values: map[uint16]uint32{}}
+		s.objs[g] = o
+	}
+	return o, ok
+}
+
+// Apply applies blocks in order and returns the resulting changes.
+func (s *Store) Apply(blocks []Block) []Change {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ch []Change
+	for _, b := range blocks {
+		switch b.Type {
+		case BlockCreate, BlockCreate2:
+			o, existed := s.get(b.GUID)
+			if !existed {
+				ch = append(ch, Change{GUID: b.GUID, Kind: ChangeCreated})
+			}
+			o.typ = b.ObjType
+			moveObject(o, b.Move)
+			ch = setValues(o, b.Values, ch, existed)
+		case BlockValues:
+			o, existed := s.get(b.GUID) // values before a create we missed are kept
+			ch = setValues(o, b.Values, ch, existed)
+		case BlockMovement:
+			if o, ok := s.objs[b.GUID]; ok {
+				moveObject(o, b.Move)
+			}
+		case BlockOutOfRange:
+			for _, g := range b.GUIDs {
+				if _, ok := s.objs[g]; ok {
+					delete(s.objs, g)
+					ch = append(ch, Change{GUID: g, Kind: ChangeRemoved})
+				}
+			}
+		}
+	}
+	return ch
+}
+
+func moveObject(o *object, m *Movement) {
+	if m != nil && m.HasPosition {
+		o.x, o.y, o.z, o.o = m.X, m.Y, m.Z, m.O
+	}
+}
+
+func setValues(o *object, vals map[uint16]uint32, ch []Change, report bool) []Change {
+	idx := make([]int, 0, len(vals))
+	for i := range vals {
+		idx = append(idx, int(i))
+	}
+	sort.Ints(idx)
+	for _, i := range idx {
+		k, v := uint16(i), vals[uint16(i)]
+		old := o.values[k]
+		o.values[k] = v
+		if !report || old == v {
+			continue
+		}
+		switch {
+		case k == UnitHealth:
+			ch = append(ch, Change{GUID: o.guid, Kind: ChangeHealth, Old: old, New: v})
+		case k >= UnitAura && k < UnitAura+AuraSlots:
+			ch = append(ch, Change{GUID: o.guid, Kind: ChangeAura, Slot: int(k - UnitAura), Old: old, New: v})
+		case k == UnitFlags && (old^v)&UnitFlagInCombat != 0:
+			ch = append(ch, Change{GUID: o.guid, Kind: ChangeCombat, Old: old & UnitFlagInCombat, New: v & UnitFlagInCombat})
+		}
+	}
+	return ch
+}
+
+func (s *Store) Destroy(g packet.GUID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.objs[g]
+	delete(s.objs, g)
+	return ok
+}
+
+func (s *Store) MoveTo(g packet.GUID, x, y, z, o float32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ob, ok := s.objs[g]; ok {
+		ob.x, ob.y, ob.z, ob.o = x, y, z, o
+	}
+}
+
+// Clear forgets every object (SMSG_NEW_WORLD).
+func (s *Store) Clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.objs = map[packet.GUID]*object{}
+}
+
+func (s *Store) Get(g packet.GUID, ox, oy, oz float32) (Unit, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o, ok := s.objs[g]
+	if !ok {
+		return Unit{}, false
+	}
+	return toUnit(o, ox, oy, oz), true
+}
+
+// Units returns players and creatures matching f, nearest first.
+func (s *Store) Units(f Filter, ox, oy, oz float32) []Unit {
+	s.mu.RLock()
+	var out []Unit
+	for _, o := range s.objs {
+		if !isUnit(o) {
+			continue
+		}
+		u := toUnit(o, ox, oy, oz)
+		if (f.Near > 0 && u.Distance > f.Near) || (f.Entry != 0 && u.Entry != f.Entry) || (f.Hostile != nil && u.Hostile != *f.Hostile) {
+			continue
+		}
+		out = append(out, u)
+	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Distance < out[j].Distance })
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func isUnit(o *object) bool {
+	switch o.typ {
+	case TypeUnit, TypePlayer:
+		return true
+	case 0: // values seen before a create block
+		return o.guid.IsPlayer() || o.guid.IsCreature()
+	}
+	return false
+}
+
+func toUnit(o *object, ox, oy, oz float32) Unit {
+	v := o.values
+	u := Unit{
+		GUID: o.guid, Type: "creature", Entry: v[FieldEntry], X: o.x, Y: o.y, Z: o.z, O: o.o,
+		Health: v[UnitHealth], MaxHealth: v[UnitMaxHealth], PowerType: uint8(v[UnitBytes0] >> 24),
+		Level: v[UnitLevel], Faction: v[UnitFaction], Flags: v[UnitFlags], NPCFlags: v[UnitNPCFlags],
+		Target: packet.GUID(uint64(v[UnitTarget]) | uint64(v[UnitTarget+1])<<32),
+	}
+	if o.typ == TypePlayer || o.guid.IsPlayer() {
+		u.Type = "player"
+	}
+	if u.Entry == 0 && o.guid.IsCreature() {
+		u.Entry = o.guid.Entry()
+	}
+	if u.PowerType < 5 {
+		u.Power, u.MaxPower = v[UnitPower1+uint16(u.PowerType)], v[UnitMaxPower1+uint16(u.PowerType)]
+	}
+	u.InCombat = u.Flags&UnitFlagInCombat != 0
+	u.Dead = u.MaxHealth > 0 && u.Health == 0
+	u.Hostile = u.Type == "creature" && !u.Dead && u.NPCFlags == 0 &&
+		u.Flags&(UnitFlagSpawning|UnitFlagPlayerControlled|UnitFlagImmuneToPlayer|UnitFlagNotSelectable) == 0
+	for i := uint16(0); i < AuraSlots; i++ {
+		if id := v[UnitAura+i]; id != 0 {
+			u.Auras = append(u.Auras, id)
+		}
+	}
+	dx, dy, dz := float64(o.x-ox), float64(o.y-oy), float64(o.z-oz)
+	u.Distance = float32(math.Sqrt(dx*dx + dy*dy + dz*dz))
+	return u
+}

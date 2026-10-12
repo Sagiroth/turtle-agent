@@ -52,7 +52,7 @@ Ctrl-C logs out cleanly. If the server refuses the logout (in combat), the agent
 ## CLI
 
 ```
-turtle-agent login [--config FILE] [--capture FILE] [--stay DURATION] [--rpc ADDR] [<account>] <character>
+turtle-agent login [--config FILE] [--capture FILE] [--stay DURATION] [--rpc ADDR] [--reconnect N] [<account>] <character>
 turtle-agent fleet --config FILE [--settings FILE] [--stagger DURATION] [--wait DURATION]
 turtle-agent scrub-check [--config FILE] <capture>...
 turtle-agent capture-stats <capture>
@@ -74,6 +74,14 @@ turtle-agent version
 `--capture` records every decrypted packet to a file (opened exclusively, mode 0600). The auth session body and
 Warden packets are never written, and any packet holding the account name, password or session key is redacted.
 `scrub-check` proves a capture is clean before you share or commit it.
+
+`--reconnect N` (off by default) logs the character in again after an unplanned disconnect, at most N login
+attempts in all. Attempts wait 5 s, then 10 s, 20 s and so on up to 2 min, and the agent keeps its own realmd logins
+under realmd's per-IP throttle (15 accounts per 300 s; after a "busy" answer it waits the whole 300 s). A rejection
+that cannot change (unknown account, wrong password, ban, build) stops the attempts at once, since failed logins count
+towards realmd's autoban. The RPC address and the event log stay the same across a reconnect, so event cursors stay
+valid; a `session` event with state `reconnected` marks the new session. Out of attempts, the agent behaves as without
+the flag (status stays up for 30 s, then exit 6). `--reconnect` cannot be combined with `--capture`.
 
 ## JSON-RPC API
 

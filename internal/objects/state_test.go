@@ -73,3 +73,32 @@ func TestCasting(t *testing.T) {
 		t.Fatalf("channel: %+v", u.Casting)
 	}
 }
+
+// A duration sent while a slot is empty waits for the spell that fills it, and survives
+// updates to other units and slots. A duration sent while a spell holds its slot is that
+// spell's: the spell that takes the slot after it does not inherit it.
+func TestAuraDurationWaitsForItsSpell(t *testing.T) {
+	s, c := newClockStore()
+	s.Apply([]Block{createBlock(wolf, TypeUnit, 0, 0, map[uint16]uint32{UnitHealth: 50, UnitMaxHealth: 50})})
+	s.AuraDuration(wolf, 2, 30000)
+	s.Apply([]Block{{Type: BlockValues, GUID: wolf, Values: map[uint16]uint32{UnitHealth: 40}}})
+	s.Apply([]Block{{Type: BlockValues, GUID: wolf, Values: map[uint16]uint32{UnitAura + 4: 1243}}})
+	s.AuraDuration(wolf, 5, 30000)
+	s.AuraDuration(wolf, 5, -1) // endless: nothing waits for slot 5
+	c.add(10 * time.Second)
+	s.Apply([]Block{{Type: BlockValues, GUID: wolf, Values: map[uint16]uint32{UnitAura + 2: 433, UnitAura + 5: 1243}}})
+	u, _ := s.Get(wolf, 0, 0, 0)
+	if u.Health != 40 || len(u.Auras) != 3 || u.Auras[0].Slot != 2 || u.Auras[0].RemainingMS == nil || *u.Auras[0].RemainingMS != 20000 ||
+		u.Auras[1].Slot != 4 || u.Auras[1].RemainingMS != nil || u.Auras[2].Slot != 5 || u.Auras[2].RemainingMS != nil {
+		t.Fatalf("%+v", u)
+	}
+	// A refresh while Food holds slot 2 is Food's; Drink taking the slot does not inherit it.
+	s.AuraDuration(wolf, 2, 15000)
+	if u, _ = s.Get(wolf, 0, 0, 0); u.Auras[0].RemainingMS == nil || *u.Auras[0].RemainingMS != 15000 {
+		t.Fatalf("refresh: %+v", u.Auras[0])
+	}
+	s.Apply([]Block{{Type: BlockValues, GUID: wolf, Values: map[uint16]uint32{UnitAura + 2: 430}}})
+	if u, _ = s.Get(wolf, 0, 0, 0); u.Auras[0].SpellID != 430 || u.Auras[0].RemainingMS != nil {
+		t.Fatalf("inherited: %+v", u.Auras[0])
+	}
+}

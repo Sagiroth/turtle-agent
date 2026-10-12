@@ -7,6 +7,8 @@ import (
 	"github.com/pjerra/turtle-agent/internal/packet"
 )
 
+// Core cites in this file are tortoise-wow upstream/1181dev 5784fb0.
+
 // Roll choices are RollVote (Group.h:72-79), the values CMSG_LOOT_ROLL carries.
 const (
 	RollPass  uint8 = 0
@@ -74,7 +76,7 @@ func ParseLootRoll(body []byte) (LootRoll, error) {
 
 // Vote reads the (number, type) pairs the core sends: a vote is need (0, 0), greed
 // (128, 2) or pass (128, 128) (Group.cpp:954-973); the dice at the end are (1..100,
-// ROLL_NEED) or (1..100, ROLL_GREED) (Group.cpp:1150-1153, :1221-1224). rolled says Number
+// ROLL_NEED) or (1..100, ROLL_GREED) (Group.cpp:1160-1163, :1231-1234). rolled says Number
 // is the dice.
 func (l LootRoll) Vote() (choice string, rolled bool) {
 	switch {

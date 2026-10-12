@@ -53,11 +53,17 @@ const (
 	// two words each. The 23 equipment and bag slots run on into the 16 backpack slots,
 	// PLAYER_FIELD_PACK_SLOT_1 (:204) = head + 46. The owner alone gets these fields.
 	PlayerInvSlotHead uint16 = 0x1E6
+	// A bag's slot count and its item guids, two words each (:62-64).
+	ContainerNumSlots uint16 = 0x30
+	ContainerSlot1    uint16 = 0x32
 )
 
-// The backpack is bag INVENTORY_SLOT_BAG_0, slots 23-38 (Objects/Player.h:583, :618-619).
+// The backpack is bag INVENTORY_SLOT_BAG_0, slots 23-38; the four bags sit in inventory
+// slots 19-22 (Objects/Player.h:583, :612-613, :618-619).
 const (
 	BackpackBag   uint8 = 255
 	BackpackFirst uint8 = 23
 	BackpackEnd   uint8 = 39
+	BagFirst      uint8 = 19
+	BagEnd        uint8 = 23
 )

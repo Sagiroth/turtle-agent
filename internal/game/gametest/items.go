@@ -2,7 +2,9 @@ package gametest
 
 import "github.com/pjerra/turtle-agent/internal/packet"
 
-// InventoryChangeFailure is Player::SendEquipError (Player.cpp:13516-13534): u8 result,
+// Core cites in this file are tortoise-wow upstream/1181dev 5784fb0.
+
+// InventoryChangeFailure is Player::SendEquipError (Player.cpp:13561-13579): u8 result,
 // and for a failure the required level (EQUIP_ERR_CANT_EQUIP_LEVEL_I only), both item
 // guids and a zero bag subclass byte.
 func InventoryChangeFailure(result uint8, requiredLevel uint32, item1, item2 packet.GUID) []byte {

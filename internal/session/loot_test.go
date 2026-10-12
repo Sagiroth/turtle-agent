@@ -56,7 +56,7 @@ func TestLootRollsAndVotes(t *testing.T) {
 	if p := h.expect(opcode.CMSGLootRoll); string(p.Body) != string(game.BuildLootRoll(wolfGUID, 1, game.RollGreed)) {
 		t.Fatalf("% X", p.Body)
 	}
-	// The server reports each vote, then the need dice and the winner (Group.cpp:940-987, :1140-1159).
+	// The server reports each vote, then the need dice and the winner (Group.cpp:940-987, :1150-1169).
 	h.send(opcode.SMSGLootRoll, gametest.LootRoll(wolfGUID, 1, me.GUID, 2589, 0, 128, 2))
 	h.send(opcode.SMSGLootRoll, gametest.LootRoll(wolfGUID, 1, gorm.GUID, 2589, 0, 0, 0))
 	h.send(opcode.SMSGLootRoll, gametest.LootRoll(wolfGUID, 1, gorm.GUID, 2589, 0, 57, 1))

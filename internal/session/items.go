@@ -11,6 +11,8 @@ import (
 	"github.com/pjerra/turtle-agent/internal/opcode"
 )
 
+// Core cites in this file are tortoise-wow upstream/1181dev 5784fb0.
+
 func (s *Session) registerItems() {
 	s.handlers[opcode.SMSGInventoryChangeFailure] = s.onInventoryChangeFailure
 }
@@ -51,25 +53,24 @@ func (s *Session) Equip(ctx context.Context, ref EquipRef) (objects.Item, error)
 	return v.(objects.Item), nil
 }
 
-// pickItem finds ref in the backpack; a bag/slot outside it is sent as given.
+// pickItem finds ref: the first backpack item with the entry, or the item at bag/slot.
+// An empty slot is an error, not a CMSG_AUTOEQUIP_ITEM the server would drop.
 func (s *Session) pickItem(ref EquipRef) (objects.Item, error) {
-	pack := s.Inventory()
 	if ref.Slot == nil {
-		for _, it := range pack {
+		for _, it := range s.Inventory() {
 			if it.Entry == ref.Entry {
 				return it, nil
 			}
 		}
 		return objects.Item{}, fmt.Errorf("item %d is not in the backpack", ref.Entry)
 	}
-	it := objects.Item{Bag: objects.BackpackBag, Slot: *ref.Slot}
+	bag := objects.BackpackBag
 	if ref.Bag != nil {
-		it.Bag = *ref.Bag
+		bag = *ref.Bag
 	}
-	for _, p := range pack {
-		if p.Bag == it.Bag && p.Slot == it.Slot {
-			return p, nil
-		}
+	it, ok := s.store.ItemAt(s.selfGUID(), bag, *ref.Slot)
+	if !ok {
+		return objects.Item{}, fmt.Errorf("no item at bag %d slot %d (the backpack is bag 255, slots 23-38; bags are 19-22)", bag, *ref.Slot)
 	}
 	return it, nil
 }

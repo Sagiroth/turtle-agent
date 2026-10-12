@@ -2,6 +2,8 @@ package game
 
 import "github.com/pjerra/turtle-agent/internal/packet"
 
+// Core cites in this file are tortoise-wow upstream/1181dev 5784fb0.
+
 // BuildAutoEquipItem is CMSG_AUTOEQUIP_ITEM: u8 bag, u8 slot of the item to equip, as a
 // right-click in the bags sends it (ItemHandler.cpp:159-163). The server picks the
 // equipment slot and swaps out what is there.
@@ -12,7 +14,7 @@ func BuildAutoEquipItem(bag, slot uint8) []byte { return []byte{bag, slot} }
 const EquipErrCantEquipLevel uint8 = 1
 
 // InventoryChangeFailure is SMSG_INVENTORY_CHANGE_FAILURE: an InventoryResult (Item.h:45)
-// and the items involved (Player.cpp:13516-13534). Result 0 is success, sent without more.
+// and the items involved (Player.cpp:13561-13579). Result 0 is success, sent without more.
 type InventoryChangeFailure struct {
 	Result        uint8
 	RequiredLevel uint32

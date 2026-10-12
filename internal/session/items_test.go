@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/game"
@@ -68,12 +69,15 @@ func TestInventoryAndEquip(t *testing.T) {
 	if p := h.expect(opcode.CMSGAutoequipItem); string(p.Body) != string(game.BuildAutoEquipItem(255, 30)) {
 		t.Fatalf("% X", p.Body)
 	}
-	bag, bagSlot := uint8(19), uint8(0)
-	if _, err := h.s.Equip(ctx, EquipRef{Bag: &bag, Slot: &bagSlot}); err != nil {
-		t.Fatal(err)
+	// Empty slots fail without a packet: a backpack slot, and a bag that is not there.
+	empty, bag, bagSlot := uint8(24), uint8(19), uint8(0)
+	for _, ref := range []EquipRef{{Slot: &empty}, {Bag: &bag, Slot: &bagSlot}} {
+		if it, err := h.s.Equip(ctx, ref); err == nil || !strings.Contains(err.Error(), "no item at bag") {
+			t.Fatalf("empty slot: %+v %v", it, err)
+		}
 	}
-	if p := h.expect(opcode.CMSGAutoequipItem); string(p.Body) != string(game.BuildAutoEquipItem(19, 0)) {
-		t.Fatalf("% X", p.Body)
+	if p, err := h.srv.Expect(opcode.CMSGAutoequipItem, 100*time.Millisecond); err == nil {
+		t.Fatalf("sent % X", p.Body)
 	}
 	if _, err := h.s.Equip(ctx, EquipRef{Entry: 4537}); err == nil || !strings.Contains(err.Error(), "not in the backpack") {
 		t.Fatalf("missing item: %v", err)

@@ -63,7 +63,7 @@ func TestMarkSetsAndClearsAnIcon(t *testing.T) {
 		t.Fatalf("marks %v", m)
 	}
 
-	// Clearing sends the icon the unit holds with a zero guid (Group.cpp:1286-1304).
+	// Clearing sends the icon the unit holds with a zero guid (Group.cpp:1296-1314).
 	done = markAsync(h, wolfGUID, "", "clear")
 	if p := h.expect(opcode.MSGRaidTargetUpdate); string(p.Body) != string(game.BuildRaidTargetUpdate(7, 0)) {
 		t.Fatalf("clear % X", p.Body)
@@ -130,5 +130,69 @@ func TestMarksFromTheServer(t *testing.T) {
 	}
 	if e := ofKind(h.s.Log(), events.KindRaidMark); !e[0].Party || e[0].Data["icon_id"] != uint8(4) {
 		t.Fatalf("first event %+v", e[0])
+	}
+}
+
+// A raid gets no icon list after its group lists (Group.cpp:1385-1403 resends it only to
+// parties), so the session asks once (0xFF) when it joins a raid or its party converts.
+func TestRaidAsksForTheIconListOnce(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	wolfNearby(h)
+	inGroup(h) // a party: no request
+	h.send(opcode.SMSGGroupList, gametest.GroupListAs(game.GroupRaid, 0, me.GUID, gorm))
+	if p := h.expect(opcode.MSGRaidTargetUpdate); string(p.Body) != string(game.BuildRaidTargetRequest()) {
+		t.Fatalf("request % X", p.Body)
+	}
+	h.send(opcode.MSGRaidTargetUpdate, gametest.RaidTargetList([8]packet.GUID{7: wolfGUID}))
+	h.send(opcode.SMSGGroupList, gametest.GroupListAs(game.GroupRaid, 0, me.GUID, gorm)) // no second request
+	waitFor(t, func() bool { return h.s.Party().Marks["skull"] == wolfGUID })
+	if !h.s.Party().Raid {
+		t.Fatal("party.raid")
+	}
+	// The next MSG_RAID_TARGET_UPDATE the client sends is the mark, not another request.
+	done := markAsync(h, wolfGUID, "", "cross")
+	if p := h.expect(opcode.MSGRaidTargetUpdate); string(p.Body) != string(game.BuildRaidTargetUpdate(6, wolfGUID)) {
+		t.Fatalf("mark % X", p.Body)
+	}
+	h.send(opcode.MSGRaidTargetUpdate, gametest.RaidTargetDelta(7, 0))
+	h.send(opcode.MSGRaidTargetUpdate, gametest.RaidTargetDelta(6, wolfGUID))
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Only the leader or an assistant may mark (GroupHandler.cpp:494-496): anyone else fails at
+// once, without a packet; an assistant (own flags 0x80) marks.
+func TestMarkNeedsLeaderOrAssistant(t *testing.T) {
+	h := start(t, Options{MarkWait: 10 * time.Second})
+	h.enterWorld()
+	wolfNearby(h)
+	h.send(opcode.SMSGGroupList, gametest.GroupList(gorm.GUID, gorm))
+	h.expect(opcode.CMSGRequestPartyMemberStats)
+	waitFor(t, func() bool { return h.s.Party().InGroup })
+	began := time.Now()
+	if _, err := h.s.Mark(context.Background(), wolfGUID, "", "skull"); err == nil || !strings.Contains(err.Error(), "leader or an assistant") {
+		t.Fatalf("err = %v", err)
+	}
+	if time.Since(began) > time.Second {
+		t.Fatal("waited for an echo that cannot come")
+	}
+	if p, err := h.srv.Expect(opcode.MSGRaidTargetUpdate, 200*time.Millisecond); err == nil {
+		t.Fatalf("sent % X", p.Body)
+	}
+	// Promoted to assistant in a raid: the list request, then the mark.
+	h.send(opcode.SMSGGroupList, gametest.GroupListAs(game.GroupRaid, 0x80, gorm.GUID, gorm))
+	if p := h.expect(opcode.MSGRaidTargetUpdate); string(p.Body) != string(game.BuildRaidTargetRequest()) {
+		t.Fatalf("request % X", p.Body)
+	}
+	waitFor(t, func() bool { return h.s.Party().Assistant })
+	done := markAsync(h, wolfGUID, "", "skull")
+	if p := h.expect(opcode.MSGRaidTargetUpdate); string(p.Body) != string(game.BuildRaidTargetUpdate(7, wolfGUID)) {
+		t.Fatalf("mark % X", p.Body)
+	}
+	h.send(opcode.MSGRaidTargetUpdate, gametest.RaidTargetDelta(7, wolfGUID))
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

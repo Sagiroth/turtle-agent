@@ -30,6 +30,8 @@ type PartyMember struct {
 // PartyInfo is the group seen from the player; Members never includes the player.
 type PartyInfo struct {
 	InGroup       bool          `json:"in_group"`
+	Raid          bool          `json:"raid,omitempty"`      // a raid group, not a party
+	Assistant     bool          `json:"assistant,omitempty"` // the player is a raid assistant
 	Leader        packet.GUID   `json:"leader,omitempty"`
 	Members       []PartyMember `json:"members"`
 	PendingInvite string        `json:"pending_invite,omitempty"`
@@ -200,7 +202,10 @@ func (s *Session) onGroupList(body []byte) error {
 	for _, m := range s.party.Members {
 		old[m.GUID] = m
 	}
+	wasRaid := s.party.Raid
 	next := PartyInfo{InGroup: len(g.Members) > 0, Leader: g.Leader, PendingInvite: s.party.PendingInvite}
+	next.Raid = next.InGroup && g.Type == game.GroupRaid
+	next.Assistant = next.InGroup && g.OwnFlags&game.GroupAssistant != 0
 	var joined []PartyMember
 	for _, gm := range g.Members {
 		m, known := old[gm.GUID]
@@ -217,6 +222,12 @@ func (s *Session) onGroupList(body []byte) error {
 		s.marks = [game.RaidIconCount]packet.GUID{}
 	}
 	s.mu.Unlock()
+	// A raid's group lists come without the icon list, which the server resends to parties
+	// only (Group.cpp:1385-1403, upstream/1181dev 5784fb0), so ask for it once on joining a
+	// raid or converting to one (GroupHandler.cpp:491-492).
+	if next.Raid && !wasRaid {
+		_ = s.conn.WritePacket(opcode.MSGRaidTargetUpdate, game.BuildRaidTargetRequest())
+	}
 	for _, m := range joined {
 		s.names.setPlayer(m.GUID, m.Name)
 		// Ask at once, so health and level arrive without waiting for a change (GroupHandler.cpp:823-827).

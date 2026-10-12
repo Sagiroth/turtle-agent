@@ -37,7 +37,7 @@ func TestLootStartRollAndEnd(t *testing.T) {
 	if err != nil || w != (game.LootRollWon{Looted: wolf, Slot: 1, Item: 2589, RandomProp: 7, Winner: gorm, Number: 87, Type: 2}) || w.Choice() != "greed" {
 		t.Fatalf("%+v %v", w, err)
 	}
-	// A lone looter wins at once with 100 and need (Group.cpp:1081-1085).
+	// A lone looter wins at once with 100 and need (Group.cpp:1091-1095).
 	if w, _ := game.ParseLootRollWon(gametest.LootRollWon(wolf, 1, 2589, 0, gorm, 100, 1)); w.Choice() != "need" {
 		t.Fatalf("lone looter %+v", w)
 	}
@@ -58,7 +58,7 @@ func TestLootStartRollAndEnd(t *testing.T) {
 }
 
 // The core reports a vote and, when the roll ends, the dice in the same packet
-// (Group.cpp:954-973, :1150-1153, :1221-1224).
+// (Group.cpp:954-973, :1160-1163, :1231-1234).
 func TestLootRollVotesAndDice(t *testing.T) {
 	for _, c := range []struct {
 		number, typ uint8

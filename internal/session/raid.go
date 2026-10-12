@@ -13,6 +13,8 @@ import (
 	"github.com/pjerra/turtle-agent/internal/packet"
 )
 
+// Core cites in this file are tortoise-wow upstream/1181dev 5784fb0.
+
 func (s *Session) registerRaid() {
 	s.handlers[opcode.MSGRaidTargetUpdate] = s.onRaidTargetUpdate
 }
@@ -49,10 +51,13 @@ func (s *Session) Mark(ctx context.Context, g packet.GUID, name, icon string) (M
 			return nil, err
 		}
 		s.mu.Lock()
-		inGroup, marks := s.party.InGroup, s.marks
+		party, marks, self := s.party, s.marks, s.self.GUID
 		s.mu.Unlock()
-		if !inGroup {
+		if !party.InGroup {
 			return nil, errors.New("mark needs a group: the server keeps raid icons per group")
+		}
+		if party.Leader != self && !party.Assistant {
+			return nil, errors.New("mark needs the group leader or an assistant: the server ignores anyone else (GroupHandler.cpp:494-496)")
 		}
 		want := g
 		if clearing {
@@ -110,7 +115,7 @@ func (s *Session) dropMarkWaiter(done chan struct{}) {
 
 // onRaidTargetUpdate applies a delta or a full list and logs what changed: a raid_mark
 // "cleared" for a unit that lost an icon, "set" for one that got it. The full list the
-// server repeats after every group list of a party (Group.cpp:1373-1436) logs nothing new.
+// server repeats after every group list of a party (Group.cpp:1383-1448) logs nothing new.
 func (s *Session) onRaidTargetUpdate(body []byte) error {
 	u, err := game.ParseRaidTargetUpdate(body)
 	if err != nil {

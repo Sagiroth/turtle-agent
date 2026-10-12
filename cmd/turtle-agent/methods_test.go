@@ -569,7 +569,7 @@ func TestInventoryAndEquipMethods(t *testing.T) {
 			t.Fatalf("equip %s: % X %v", params, p.Body, err)
 		}
 	}
-	for _, params := range []string{`{}`, `{"item_entry":1}`, `{"bag":255}`} {
+	for _, params := range []string{`{}`, `{"item_entry":1}`, `{"bag":255}`, `{"slot":24}`, `{"bag":19,"slot":0}`} {
 		if out := r.call("equip", params); errCode(out) != rpc.CodeGame {
 			t.Fatalf("equip %s: %v", params, out)
 		}

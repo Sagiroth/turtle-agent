@@ -64,6 +64,41 @@ func TestBackpackFromOwnFields(t *testing.T) {
 	}
 }
 
+func TestItemAtBackpackAndBags(t *testing.T) {
+	const (
+		me         = packet.GUID(0x2A)
+		bag, stone = packet.GUID(0x4000000000000002), packet.GUID(0x4000000000000006)
+		sword      = packet.GUID(0x4000000000000003)
+	)
+	s := NewStore()
+	if _, ok := s.ItemAt(me, BackpackBag, 23); ok {
+		t.Fatal("unknown player")
+	}
+	bagBlock := itemCreate(bag, TypeContainer, 4500, 1)
+	bagBlock.Values[ContainerNumSlots] = 6
+	bagBlock.Values[ContainerSlot1+2*2], bagBlock.Values[ContainerSlot1+2*2+1] = uint32(stone&0xFFFFFFFF), uint32(stone>>32)
+	s.Apply([]Block{bagBlock, itemCreate(stone, TypeItem, 6948, 1), itemCreate(sword, TypeItem, 2589, 1),
+		createBlock(me, TypePlayer, 0, 0, invSlot(invSlot(map[uint16]uint32{}, 19, bag), 23, sword))})
+	for _, c := range []struct {
+		bag, slot uint8
+		want      Item
+		ok        bool
+	}{
+		{BackpackBag, 23, Item{Bag: BackpackBag, Slot: 23, GUID: sword, Entry: 2589, Count: 1}, true},
+		{BackpackBag, 24, Item{}, false},
+		{BackpackBag, 39, Item{}, false}, // past the backpack: bank slots are not carried
+		{19, 2, Item{Bag: 19, Slot: 2, GUID: stone, Entry: 6948, Count: 1}, true},
+		{19, 1, Item{}, false},
+		{19, 6, Item{}, false}, // past the bag's 6 slots
+		{20, 0, Item{}, false}, // no bag there
+		{7, 0, Item{}, false},  // not a bag slot
+	} {
+		if got, ok := s.ItemAt(me, c.bag, c.slot); ok != c.ok || got != c.want {
+			t.Errorf("(%d, %d): %+v %v", c.bag, c.slot, got, ok)
+		}
+	}
+}
+
 // The m1 login capture: Tagentone carries one item in the backpack, entry 80817 in slot 23,
 // next to three equipped items and four bags.
 func TestCapturedBackpack(t *testing.T) {

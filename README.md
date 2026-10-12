@@ -96,10 +96,10 @@ browser (`Origin` header) and other `Host` names are refused.
 | `face` | `guid` | |
 | `walk_to` | `x`, `y`, `z` (short, straight-line walks: Z is interpolated and terrain is ignored, so keep walks short and on flat ground; after a `teleport` to a Z above the ground the character does not fall) | |
 | `teleport` | `x`, `y`, `z`, `map` (a GM `.go xyz`; needs a GM account) | |
-| `mark` | `guid` or `name`, `icon` (skull, cross, square, moon, triangle, diamond, circle, star, clear) | `icon`, `guid`; waits for the server's echo (group leader or assistant only) |
+| `mark` | `guid` or `name`, `icon` (skull, cross, square, moon, triangle, diamond, circle, star, clear) | `icon`, `guid` once the server echoes the mark. Errors at once outside a group or when the player is neither leader nor assistant; errors after 2 s without an echo |
 | `roll` | `roll_id` or `item_slot` (plus `looted` when two corpses share a slot), `choice` (need, greed, pass) | `roll_id`, `looted`, `item_slot`, `item_entry`, `choice` |
-| `inventory` | | backpack items (bag 255, slots 23-38): `bag`, `slot`, `guid`, `item_entry`, `count` |
-| `equip` | `item_entry`, or `slot` (and `bag`, default 255) | the item sent; a refusal arrives as an `inventory_error` event |
+| `inventory` | | backpack items (bag 255, slots 23-38): `bag`, `slot`, `guid`, `item_entry`, `count`; `item_entry` and `count` are 0 until the item's create block arrives |
+| `equip` | `item_entry`, or `slot` (and `bag`: 255 for the backpack, the default, or 19-22 for a bag) | the item sent; an empty slot is an error; a refusal arrives as an `inventory_error` event |
 | `logout` | | |
 
 Events have `seq`, `time`, `kind`, `source`, `target`, `spell_id`, `amount`, `crit`, `text`, `party` and `data`.
@@ -152,9 +152,9 @@ with the same calls as its real-client backend (`chat`, `gm`, `state`, `tail_cha
 | --- | --- |
 | `internal/auth` | SRP6 and realmd: logon challenge/proof, realm list |
 | `internal/worldconn` | TCP framing, the 1.12 header cipher, auth session with the addon block |
-| `internal/session` | single-owner session loop: login, ping, chat, names, party, world, actions, combat, logout |
-| `internal/game` | packet codecs for chat, queries, groups, actions and the combat log |
-| `internal/objects` | update-object parser and the object store |
+| `internal/session` | single-owner session loop: login, ping, chat, names, party, world, actions, combat, raid icons, loot rolls, inventory and equip, logout |
+| `internal/game` | packet codecs for chat, queries, groups, actions, the combat log, raid icons, loot rolls and items |
+| `internal/objects` | update-object parser and the object store: units, and the items in the backpack and bags |
 | `internal/events` | ordered event log with cursors |
 | `internal/capture` | packet capture files and the secret scan |
 | `internal/rpc`, `internal/netutil` | loopback JSON-RPC server |

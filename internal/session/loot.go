@@ -12,6 +12,8 @@ import (
 	"github.com/pjerra/turtle-agent/internal/packet"
 )
 
+// Core cites in this file are tortoise-wow upstream/1181dev 5784fb0.
+
 func (s *Session) registerLoot() {
 	s.handlers[opcode.SMSGLootStartRoll] = s.onLootStartRoll
 	s.handlers[opcode.SMSGLootRoll] = s.onLootRoll
@@ -92,7 +94,7 @@ func (s *Session) Roll(ctx context.Context, ref RollRef, choice string) (RollInf
 }
 
 // pruneRolls forgets rolls whose countdown ran out without an end packet (the loot was
-// removed, Group.cpp:1094-1101).
+// removed, Group.cpp:1104-1111).
 func (s *Session) pruneRolls(now time.Time) {
 	for k, r := range s.rolls {
 		if now.After(r.expires) {

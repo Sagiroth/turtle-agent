@@ -7,6 +7,16 @@ import (
 	"github.com/pjerra/turtle-agent/internal/packet"
 )
 
+// Core cites in this file are tortoise-wow upstream/1181dev 5784fb0.
+
+// Group types (GroupType, Group.h:100-104) and the assistant bit of SMSG_GROUP_LIST's own
+// flags and member flags (Group.cpp:1414, :1427).
+const (
+	GroupParty     uint8 = 0
+	GroupRaid      uint8 = 1
+	GroupAssistant uint8 = 0x80
+)
+
 // RaidIconCount is TARGET_ICON_COUNT (Group.h:49).
 const RaidIconCount = 8
 
@@ -38,7 +48,7 @@ const raidTargetRequest = 0xFF
 // BuildRaidTargetUpdate is the client's MSG_RAID_TARGET_UPDATE that sets icon on g, or
 // clears the icon when g is 0: u8 icon, u64 guid (GroupHandler.cpp:476-502). The server
 // takes it from the group leader or an assistant only, and moves an icon already on g
-// (Group.cpp:1286-1304).
+// (Group.cpp:1296-1314).
 func BuildRaidTargetUpdate(icon uint8, g packet.GUID) []byte {
 	return packet.NewWriter().U8(icon).GUID(g).Bytes()
 }
@@ -60,8 +70,8 @@ type RaidTargetUpdate struct {
 }
 
 // ParseRaidTargetUpdate decodes the server's MSG_RAID_TARGET_UPDATE: u8 1 then (u8 icon,
-// u64 guid) per set icon (Group.cpp:1354-1371, :1373-1436), or u8 0, u8 icon, u64 guid
-// (Group.cpp:1286-1304).
+// u64 guid) per set icon (Group.cpp:1364-1381, :1383-1448), or u8 0, u8 icon, u64 guid
+// (Group.cpp:1296-1314).
 func ParseRaidTargetUpdate(body []byte) (RaidTargetUpdate, error) {
 	r := packet.NewReader(body)
 	u := RaidTargetUpdate{Full: r.U8() == 1}

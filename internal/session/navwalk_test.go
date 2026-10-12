@@ -209,6 +209,92 @@ func pointAlong(pts [][3]float32, d float32) navmesh.Vec3 {
 	return w.at(time.Time{})
 }
 
+// along is how far along the polyline pts the point nearest p is (3D yards from pts[0]).
+func along(pts [][3]float32, p navmesh.Vec3) float32 {
+	best, at, cum := math.Inf(1), 0.0, 0.0
+	for i := 1; i < len(pts); i++ {
+		a, b := pts[i-1], pts[i]
+		seg := dist3f(a, b)
+		t := 0.0
+		if seg > 1e-9 {
+			for k := range 3 {
+				t += float64(p[k]-a[k]) * float64(b[k]-a[k])
+			}
+			t = min(max(t/(seg*seg), 0), 1)
+		}
+		q := [3]float32{a[0] + (b[0]-a[0])*float32(t), a[1] + (b[1]-a[1])*float32(t), a[2] + (b[2]-a[2])*float32(t)}
+		if d := dist3f(q, p); d < best {
+			best, at = d, cum+t*seg
+		}
+		cum += seg
+	}
+	return float32(at)
+}
+
+// legFacing is the facing of the leg of pts that d yards along the path is on.
+func legFacing(pts [][3]float32, d float32) float32 {
+	var cum float32
+	for i := 1; i < len(pts); i++ {
+		a, b := pts[i-1], pts[i]
+		cum += float32(dist3f(a, b))
+		if d <= cum || i == len(pts)-1 {
+			return game.Facing(a[0], a[1], b[0], b[1])
+		}
+	}
+	return 0
+}
+
+// Turns under minTurn are not sent one by one, but they add up: the facing a heartbeat carries
+// stays within minTurn of the leg it is on, so the walk sends a facing once they reach it.
+func TestWalkPathKeepsTheFacingWithinATurnOfTheLeg(t *testing.T) {
+	// 16 chords of 2 yd, each turning 0.005 rad: 0.075 rad in all, no turn of its own over minTurn
+	arc := func(from, to navmesh.Vec3) navmesh.Path {
+		pts := []navmesh.Vec3{from}
+		x, y := float64(from[0]), float64(from[1])
+		for k := range 16 {
+			a := float64(k) * 0.005
+			x, y = x+2*math.Cos(a), y+2*math.Sin(a)
+			pts = append(pts, navmesh.Vec3{float32(x), float32(y), from[2]})
+		}
+		return navmesh.Path{Status: navmesh.Complete, Engine: "fake", Points: pts, Ground: make([][]navmesh.Vec3, len(pts)-1)}
+	}
+	f := &fakePlanner{replies: []func(from, to navmesh.Vec3) navmesh.Path{arc}}
+	h := walkHarness(t, f) // 20 yd/s
+	mark := len(h.srv.Skipped())
+	goal := navmesh.Vec3{me.X + 30, me.Y + 2, me.Z}
+	done := make(chan WalkReport, 1)
+	go func() { r, _ := h.s.WalkPath(context.Background(), goal[0], goal[1], goal[2]); done <- r }()
+	stop, err := h.srv.Expect(opcode.MSGMoveStop, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := <-done; r.Result != "arrived" || kinds(r) != "plan,walk" {
+		t.Fatalf("%+v", r)
+	}
+	pts := arc(navmesh.Vec3{me.X, me.Y, me.Z}, goal).Points
+	var moves []worldconn.Packet
+	for _, p := range append(h.srv.Skipped()[mark:], stop) {
+		switch p.Op {
+		case opcode.MSGMoveStartForward, opcode.MSGMoveHeartbeat, opcode.MSGMoveSetFacing, opcode.MSGMoveStop:
+			moves = append(moves, p)
+		}
+	}
+	facings := 0
+	for i, p := range moves {
+		mi := moveInfo(p.Body)
+		if p.Op == opcode.MSGMoveSetFacing {
+			facings++
+		}
+		if want := legFacing(pts, along(pts, navmesh.Vec3{mi.X, mi.Y, mi.Z})); math.Abs(float64(mi.O-want)) > minTurn+0.002 {
+			t.Fatalf("packet %d (%s) faces %.3f, its leg faces %.3f", i, opcode.Name(p.Op), mi.O, want)
+		}
+	}
+	if facings == 0 {
+		t.Fatal("no facing sent for 0.075 rad of turns")
+	}
+	h.logout()
+}
+
 // The planner's ground samples set the heartbeat heights between corners.
 func TestWalkPathKeepsToTheGround(t *testing.T) {
 	hill := func(from, to navmesh.Vec3) navmesh.Path {
@@ -478,6 +564,52 @@ func TestWalkPathRootOutlastsTheWait(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("walk_path still waiting")
+	}
+	h.logout()
+}
+
+// A root after the first corner of a two-leg path: walked counts the first leg and the part of
+// the second walked before the root, along the path, not the straight line from the start.
+func TestWalkPathCountsAlongThePathWhenRootedAfterACorner(t *testing.T) {
+	old := rootWait
+	rootWait = 300 * time.Millisecond
+	t.Cleanup(func() { rootWait = old })
+	f := &fakePlanner{replies: []func(from, to navmesh.Vec3) navmesh.Path{via}}
+	h := start(t, Options{Planner: f})
+	h.enterWorld()                                 // 7 yd/s
+	goal := navmesh.Vec3{me.X + 7, me.Y + 8, me.Z} // 7 yd east, then 8 yd north
+	done := make(chan WalkReport, 1)
+	go func() { r, _ := h.s.WalkPath(context.Background(), goal[0], goal[1], goal[2]); done <- r }()
+	h.expect(opcode.MSGMoveStartForward)
+	h.expect(opcode.MSGMoveSetFacing)  // the corner
+	time.Sleep(400 * time.Millisecond) // about 2.8 yd up the second leg
+	h.send(opcode.SMSGForceMoveRoot, packet.NewWriter().PackedGUID(me.GUID).U32(5).Bytes())
+	stop := moveInfo(h.expect(opcode.MSGMoveStop).Body)
+	h.expect(opcode.CMSGForceMoveRootAck)
+	r := <-done
+	e := float64(stop.Y - me.Y) // how far up the second leg the root caught the walk
+	if r.Result != "partial" || !strings.Contains(r.Reason, "still rooted") || kinds(r) != "plan,walk,interrupted" ||
+		stop.X != goal[0] || e < 1 {
+		t.Fatalf("%+v, stopped at %+v", r, stop)
+	}
+	if want := 7 + e; math.Abs(float64(r.Walked)-want) > 0.01 {
+		t.Fatalf("walked %.2f, want %.2f along the path (the straight line is %.2f)", r.Walked, want, math.Hypot(7, e))
+	}
+	h.logout()
+}
+
+// A path that doubles back and ends on its first leg: walked counts the whole way, 10 yd out and
+// 4 back, not the 6 yd from the start to the goal along the first leg.
+func TestWalkPathCountsAPathThatDoublesBack(t *testing.T) {
+	back := func(from, to navmesh.Vec3) navmesh.Path {
+		pts := []navmesh.Vec3{from, {from[0] + 10, from[1], from[2]}, {from[0] + 6, from[1], from[2]}}
+		return navmesh.Path{Status: navmesh.Complete, Engine: "fake", Points: pts, Ground: make([][]navmesh.Vec3, 2)}
+	}
+	f := &fakePlanner{replies: []func(from, to navmesh.Vec3) navmesh.Path{back}}
+	h := walkHarness(t, f) // 20 yd/s
+	r, err := h.s.WalkPath(context.Background(), me.X+6, me.Y, me.Z)
+	if err != nil || r.Result != "arrived" || kinds(r) != "plan,walk" || math.Abs(float64(r.Walked)-14) > 0.01 {
+		t.Fatalf("%+v %v", r, err)
 	}
 	h.logout()
 }

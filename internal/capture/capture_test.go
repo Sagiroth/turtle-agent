@@ -2,8 +2,10 @@ package capture
 
 import (
 	"bytes"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pjerra/turtle-agent/internal/opcode"
@@ -57,7 +59,7 @@ func TestNeverStoresAuthSessionOrWarden(t *testing.T) {
 func TestSecretsRedacted(t *testing.T) {
 	key := bytes.Repeat([]byte{0xAB, 0xCD}, 20)
 	path := filepath.Join(t.TempDir(), "c.twcap")
-	w, _ := Create(path, []byte("HARNESS"), []byte("pw-secret"), key, []byte("x"))
+	w, _ := Create(path, []byte("HARNESS"), []byte("pw-secret"), key)
 	w.Packet(worldconn.ServerToClient, opcode.SMSGMessagechat, []byte("say pw-secret now"))
 	w.Packet(worldconn.ServerToClient, opcode.SMSGMessagechat, append([]byte{1}, key...))
 	w.Packet(worldconn.ServerToClient, opcode.SMSGNameQueryResponse, []byte("Harnessb\x00"))
@@ -69,7 +71,7 @@ func TestSecretsRedacted(t *testing.T) {
 	if !recs[0].Redacted || !recs[1].Redacted || recs[2].Redacted {
 		t.Fatalf("%+v", recs)
 	}
-	if f := Scan(recs, []byte("Harnessb")); len(f) != 1 || f[0].Index != 2 {
+	if f, err := Scan(recs, []byte("Harnessb")); err != nil || len(f) != 1 || f[0].Index != 2 {
 		t.Fatalf("scan %v", f)
 	}
 }
@@ -88,5 +90,94 @@ func TestReadFileRejectsGarbage(t *testing.T) {
 	os.WriteFile(path, []byte("TWCAP1\n\x00\x01"), 0o600)
 	if _, err := ReadFile(path); err == nil {
 		t.Fatal("truncated record accepted")
+	}
+}
+
+func TestCreateRejectsShortSecret(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.twcap")
+	if _, err := Create(path, []byte("ab")); err == nil || !strings.Contains(err.Error(), "secret too short to redact safely") {
+		t.Fatalf("err %v", err)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("file left behind")
+	}
+}
+
+func TestScanRejectsShortNeedle(t *testing.T) {
+	for _, n := range [][]byte{nil, {}, []byte("ab")} {
+		if _, err := Scan([]Record{{Body: []byte("abc")}}, n); err == nil {
+			t.Fatalf("needle %q accepted", n)
+		}
+	}
+}
+
+func TestVariantsDeduplicated(t *testing.T) {
+	v := Variants([]byte("123"))
+	for i := range v {
+		for j := i + 1; j < len(v); j++ {
+			if bytes.Equal(v[i], v[j]) {
+				t.Fatalf("duplicate %q", v[i])
+			}
+		}
+	}
+	if len(v) != 4 { // raw, reversed, hex, hex reversed
+		t.Fatalf("variants %q", v)
+	}
+}
+
+func TestScanFindsEveryForm(t *testing.T) {
+	key := make([]byte, 39)
+	for i := range key {
+		key[i] = byte(i*7 + 1)
+	}
+	rev := make([]byte, len(key))
+	for i, b := range key {
+		rev[len(key)-1-i] = b
+	}
+	key40 := append(append([]byte{}, key...), 0)
+	cases := map[string][]byte{
+		"raw key":       append([]byte{9}, key...),
+		"reversed key":  rev,
+		"lower hex key": []byte(hex.EncodeToString(key)),
+		"upper hex key": []byte(strings.ToUpper(hex.EncodeToString(key))),
+		"39 in 40":      key40,
+		"account lower": []byte("say harness"),
+		"account upper": []byte("HARNESS says"),
+		"password":      []byte("pw: hunter2x"),
+	}
+	needles := [][]byte{key, []byte("Harness"), []byte("hunter2x")}
+	for name, body := range cases {
+		f, err := Scan([]Record{{Body: body}}, needles...)
+		if err != nil || len(f) == 0 {
+			t.Errorf("%s not found: %v %v", name, f, err)
+		}
+	}
+	if f, _ := Scan([]Record{{Body: []byte("Harnessb nothing")}}, []byte("xyzzy")); len(f) != 0 {
+		t.Fatalf("false positive %v", f)
+	}
+}
+
+func TestCreateRedactsHexAndLowerCase(t *testing.T) {
+	key := bytes.Repeat([]byte{0x12, 0xAB}, 20)
+	path := filepath.Join(t.TempDir(), "c.twcap")
+	w, err := Create(path, []byte("HARNESS"), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Packet(worldconn.ServerToClient, opcode.SMSGMessagechat, []byte(hex.EncodeToString(key)))
+	w.Packet(worldconn.ServerToClient, opcode.SMSGMessagechat, []byte("hi harness"))
+	w.Close()
+	recs, _ := ReadFile(path)
+	if !recs[0].Redacted || !recs[1].Redacted {
+		t.Fatalf("%+v", recs)
+	}
+}
+
+func TestPacketAfterCloseIsReported(t *testing.T) {
+	w, _ := Create(filepath.Join(t.TempDir(), "c.twcap"))
+	w.Close()
+	w.Packet(worldconn.ServerToClient, opcode.SMSGCharEnum, []byte{1})
+	if err := w.Close(); err == nil {
+		t.Fatal("packet after Close went unnoticed")
 	}
 }

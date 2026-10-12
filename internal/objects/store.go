@@ -114,6 +114,9 @@ type object struct {
 	track      *track    // the server spline the unit follows, if any
 	cast       *casting
 	auraEnds   map[int]time.Time // aura slot -> when it runs out, the player's own auras only
+	// pendingAura is the time left the server sent for a slot that was empty: the spell that
+	// fills the slot next is the one it was sent for (see AuraDuration).
+	pendingAura map[int]time.Time
 }
 
 type casting struct {
@@ -207,7 +210,17 @@ func (s *Store) moveObject(o *object, m *Movement) {
 func setValues(o *object, vals map[uint16]uint32, ch []Change, report bool) []Change {
 	for k, v := range vals {
 		if k >= UnitAura && k < UnitAura+AuraSlots && v != o.values[k] {
-			delete(o.auraEnds, int(k-UnitAura)) // a new spell in the slot, or none
+			// A new spell in the slot, or none: the time the old spell had goes with it. A time
+			// that waited for the empty slot is the new spell's; it is dropped if the slot empties.
+			slot := int(k - UnitAura)
+			delete(o.auraEnds, slot)
+			if end, waiting := o.pendingAura[slot]; waiting && v != 0 {
+				if o.auraEnds == nil {
+					o.auraEnds = map[int]time.Time{}
+				}
+				o.auraEnds[slot] = end
+			}
+			delete(o.pendingAura, slot)
 		}
 	}
 	idx := make([]int, 0, len(vals))
@@ -338,7 +351,10 @@ func (s *Store) DelayCast(g packet.GUID, ms uint32) {
 }
 
 // AuraDuration records SMSG_UPDATE_AURA_DURATION for g's aura slot: ms left, or a
-// negative value for an aura without end.
+// negative value for an aura without end. The server sends it when it applies or refreshes
+// an aura, before the object update that puts the spell in the slot (SpellAuras.cpp:6896-6909),
+// so the packet can come first. The packet has no spell id: a duration for a slot that holds
+// a spell is that spell's, and one for an empty slot waits for the spell that fills it.
 func (s *Store) AuraDuration(g packet.GUID, slot int, ms int32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -346,14 +362,23 @@ func (s *Store) AuraDuration(g packet.GUID, slot int, ms int32) {
 	if !ok || slot < 0 || slot >= AuraSlots {
 		return
 	}
+	if ms < 0 {
+		delete(o.auraEnds, slot)
+		delete(o.pendingAura, slot)
+		return
+	}
+	end := s.now().Add(time.Duration(ms) * time.Millisecond)
+	if o.values[UnitAura+uint16(slot)] == 0 {
+		if o.pendingAura == nil {
+			o.pendingAura = map[int]time.Time{}
+		}
+		o.pendingAura[slot] = end
+		return
+	}
 	if o.auraEnds == nil {
 		o.auraEnds = map[int]time.Time{}
 	}
-	if ms < 0 {
-		delete(o.auraEnds, slot)
-		return
-	}
-	o.auraEnds[slot] = s.now().Add(time.Duration(ms) * time.Millisecond)
+	o.auraEnds[slot] = end
 }
 
 // Clear forgets every object (SMSG_NEW_WORLD).

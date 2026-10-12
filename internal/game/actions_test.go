@@ -3,6 +3,7 @@ package game
 import (
 	"bytes"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/pjerra/turtle-agent/internal/packet"
@@ -75,5 +76,18 @@ func TestAttackStartStop(t *testing.T) {
 	a, err = ParseAttackStop(packet.NewWriter().PackedGUID(wolfGUID).PackedGUID(0x2A).U32(0).Bytes())
 	if err != nil || a != (AttackPair{wolfGUID, 0x2A}) {
 		t.Fatalf("%+v %v", a, err)
+	}
+}
+
+// A short body names the packet it came from.
+func TestShortActionPacketsNameThePacket(t *testing.T) {
+	if _, err := ParseTransferPending(nil); err == nil || !strings.Contains(err.Error(), "SMSG_TRANSFER_PENDING") {
+		t.Fatalf("transfer pending: %v", err)
+	}
+	if _, err := ParseAttackStart([]byte{1}); err == nil || !strings.Contains(err.Error(), "SMSG_ATTACKSTART") {
+		t.Fatalf("attack start: %v", err)
+	}
+	if _, err := ParseAttackStop([]byte{1}); err == nil || !strings.Contains(err.Error(), "SMSG_ATTACKSTOP") {
+		t.Fatalf("attack stop: %v", err)
 	}
 }

@@ -377,16 +377,17 @@ func (s *Session) emit(e events.Event) {
 		e.Time = time.Now()
 	}
 	s.fillNames(&e)
-	s.names.waiting = append(s.names.waiting, pendingEvent{e: e, until: time.Now().Add(s.opts.NamesWait)})
+	party := s.partyInvolved(e.SourceGUID) || s.partyInvolved(e.TargetGUID)
+	s.names.waiting = append(s.names.waiting, pendingEvent{e: e, until: time.Now().Add(s.opts.NamesWait), party: party})
 	s.flushNames(time.Now())
 }
 
-// appendEvent stores a ready event, flagging it when the player, a party member or one of
+// appendEvent stores a ready event, flagging it (party, decided at emit) when the player, a party member or one of
 // their pets is involved. Secrets are scrubbed here, once the names are final, so nothing
 // the server echoes reaches the log, RPC replies or MCP output (ruling P10).
-func (s *Session) appendEvent(e events.Event) {
+func (s *Session) appendEvent(e events.Event, party bool) {
 	s.redact.scrubEvent(&e)
-	e.Party = s.partyInvolved(e.SourceGUID) || s.partyInvolved(e.TargetGUID)
+	e.Party = party
 	s.log.Append(e)
 }
 

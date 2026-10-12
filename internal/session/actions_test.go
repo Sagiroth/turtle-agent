@@ -338,3 +338,19 @@ func TestStatusLevelFollowsTheStore(t *testing.T) {
 	waitFor(t, func() bool { return h.s.Status().Level == 61 })
 	h.logout()
 }
+
+// A Teleport that gives up leaves no waiter behind.
+func TestTimedOutTeleportDropsItsWaiter(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := h.s.Teleport(ctx, 1, 2, 3, -1); err == nil {
+		t.Fatal("teleport without a server answer succeeded")
+	}
+	n, err := h.s.do(context.Background(), func() (any, error) { return len(h.s.teleportWaiters), nil })
+	if err != nil || n.(int) != 0 {
+		t.Fatalf("waiters left: %v %v", n, err)
+	}
+	h.logout()
+}

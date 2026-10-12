@@ -367,10 +367,27 @@ func (s *Session) Teleport(ctx context.Context, x, y, z float32, mapID int) erro
 	case <-v.(chan struct{}):
 		return nil
 	case <-tctx.Done():
+		s.dropTeleportWaiter(v.(chan struct{}))
 		return fmt.Errorf("teleport: no MSG_MOVE_TELEPORT_ACK or SMSG_NEW_WORLD within 10 s (does the account have GM rights?): %w", tctx.Err())
 	case <-s.done:
 		return ErrClosed
 	}
+}
+
+// dropTeleportWaiter forgets a waiter whose Teleport gave up, so waiters do not pile up
+// until the next teleport. Best effort: the session may be closing.
+func (s *Session) dropTeleportWaiter(ch chan struct{}) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	s.do(ctx, func() (any, error) {
+		for i, w := range s.teleportWaiters {
+			if w == ch {
+				s.teleportWaiters = append(s.teleportWaiters[:i], s.teleportWaiters[i+1:]...)
+				break
+			}
+		}
+		return nil, nil
+	})
 }
 
 func (s *Session) teleported() {

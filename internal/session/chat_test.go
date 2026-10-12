@@ -105,8 +105,8 @@ func TestNameWaitKeepsOrder(t *testing.T) {
 	h.send(opcode.SMSGMessagechat, chatBody(game.ChatWhisper, 0x77, "first"))
 	h.send(opcode.SMSGMessagechat, chatBody(game.ChatSystem, 0, "second"))
 	h.expect(opcode.CMSGNameQuery) // never answered
-	time.Sleep(400 * time.Millisecond)
 	// The wait ran out on a tick, not at logout: both are already logged, in order.
+	waitFor(t, func() bool { return len(h.s.Log().Read(events.Query{Kinds: events.ChatKinds}).Events) == 2 })
 	if p := h.s.Log().Read(events.Query{Kinds: events.ChatKinds}); len(p.Events) != 2 ||
 		p.Events[0].Text != "first" || p.Events[0].Source != "" || p.Events[1].Text != "second" {
 		t.Fatalf("before logout: %+v", p.Events)

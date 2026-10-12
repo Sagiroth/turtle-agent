@@ -77,13 +77,16 @@ func readEvents(ctx context.Context, log *events.Log, q events.Query, waitMS int
 	}
 	wctx, cancel := context.WithTimeout(ctx, time.Duration(waitMS)*time.Millisecond)
 	defer cancel()
+	// A gap seen on the first read stays reported: the later reads start past it.
+	dropped := p.Dropped
 	for len(p.Events) == 0 {
 		if err := log.Wait(wctx, p.Next); err != nil {
-			return p
+			break
 		}
 		q.Since = p.Next
 		p = log.Read(q)
 	}
+	p.Dropped = p.Dropped || dropped
 	return p
 }
 
@@ -95,7 +98,8 @@ func rpcErr(err error) error {
 		return nil
 	case errors.Is(err, session.ErrNotInWorld):
 		return &rpc.Error{Code: rpc.CodeNotInWorld, Message: err.Error()}
-	case errors.Is(err, session.ErrDisconnected), errors.Is(err, session.ErrClosed):
+	case errors.Is(err, session.ErrDisconnected), errors.Is(err, session.ErrClosed), errors.Is(err, context.Canceled):
+		// context.Canceled: the client went away or the agent is shutting down.
 		return &rpc.Error{Code: rpc.CodeDisconnected, Message: err.Error()}
 	case errors.Is(err, context.DeadlineExceeded):
 		return &rpc.Error{Code: rpc.CodeTimeout, Message: err.Error()}

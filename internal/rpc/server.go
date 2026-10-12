@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/pjerra/turtle-agent/internal/netutil"
 )
 
 const (
@@ -85,30 +87,13 @@ func (s *Server) Methods() []string {
 	return out
 }
 
-// IsLoopback reports whether host (no port) is "localhost" or a loopback IP literal. It
-// is the one loopback check: the settings file, Listen and the request Host use it.
-func IsLoopback(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
-// Listen accepts numeric loopback addresses (or localhost as 127.0.0.1) only.
+// Listen binds a loopback address only (localhost means 127.0.0.1); the port may be 0.
 func Listen(ctx context.Context, address string) (net.Listener, error) {
-	host, port, err := net.SplitHostPort(address)
+	host, port, err := netutil.CheckLoopbackAddr(address)
 	if err != nil {
-		return nil, errors.New("RPC listen address must be a loopback host:port")
+		return nil, errors.New("RPC listen address " + err.Error())
 	}
-	if host == "localhost" {
-		host = "127.0.0.1"
-	}
-	n, err := strconv.Atoi(port)
-	if !IsLoopback(host) || err != nil || n < 0 || n > 65535 {
-		return nil, errors.New("RPC listen address must be a loopback IP and a port between 0 and 65535")
-	}
-	return (&net.ListenConfig{}).Listen(ctx, "tcp", net.JoinHostPort(net.ParseIP(host).String(), strconv.Itoa(n)))
+	return (&net.ListenConfig{}).Listen(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 }
 
 // shutdownGrace is how long calls in flight run on after Serve's ctx ends before their
@@ -156,6 +141,8 @@ type response struct {
 }
 
 // Handler serves POST /rpc for local processes; browser-origin requests are refused.
+// One request object per POST: JSON-RPC batches (arrays) are not supported and get
+// Invalid Request.
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/rpc" {
@@ -173,7 +160,7 @@ func (s *Server) Handler() http.Handler {
 		if err != nil {
 			host = r.Host
 		}
-		if origin || fetch || !IsLoopback(host) {
+		if origin || fetch || !netutil.IsLoopback(host) {
 			http.Error(w, "local process requests only", http.StatusForbidden)
 			return
 		}

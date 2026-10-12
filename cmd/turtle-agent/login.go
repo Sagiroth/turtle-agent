@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"strings"
 	"time"
@@ -84,15 +83,18 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return exitUsage
 	}
 
-	// Loopback only, checked before realmd so a bad --rpc never costs a login attempt.
+	// The RPC port is bound before realmd, so a bad, non-loopback or busy address never
+	// costs a login attempt; the server starts on it once the character is in world.
 	addrRPC := st.RPC
 	if *rpcAddr != "" {
 		addrRPC = *rpcAddr
 	}
-	if host, _, err := net.SplitHostPort(addrRPC); err != nil || !rpc.IsLoopback(host) {
-		fmt.Fprintln(stderr, "rpc: --rpc must be a loopback host:port (127.0.0.1, ::1 or localhost)")
+	ln, err := rpc.Listen(ctx, addrRPC)
+	if err != nil {
+		fmt.Fprintln(stderr, "rpc:", err)
 		return exitUsage
 	}
+	defer ln.Close() // every early return; Serve closes it too once it runs
 
 	if *capPath != "" {
 		if err := checkCapture(*capPath, account, password); err != nil {
@@ -167,30 +169,37 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return exitWorld
 	}
 
-	ln, err := rpc.Listen(ctx, addrRPC)
-	if err != nil {
-		fmt.Fprintln(stderr, "rpc:", err)
-		return logoutAndWait(s, runErr, stderr)
-	}
 	srv := rpc.NewServer()
 	registerMethods(srv, s)
 	rctx, stopRPC := context.WithCancel(context.Background())
 	served := make(chan error, 1)
 	go func() { served <- rpc.Serve(rctx, ln, srv.Handler()) }()
-	defer func() { stopRPC(); <-served }()
+	defer func() {
+		stopRPC()
+		if served != nil {
+			<-served
+		}
+	}()
 	fmt.Fprintf(stderr, "rpc: listening on http://%s/rpc\n", ln.Addr())
 
 	var stayC <-chan time.Time
 	if *stay > 0 {
 		stayC = time.After(*stay)
 	}
-	select {
-	case <-stayC:
-		return logoutAndWait(s, runErr, stderr)
-	case <-ctx.Done():
-		return logoutAndWait(s, runErr, stderr)
-	case err := <-runErr:
-		return sessionExit(err, stderr)
+	for {
+		select {
+		case <-stayC:
+			return logoutAndWait(s, runErr, stderr)
+		case <-ctx.Done():
+			return logoutAndWait(s, runErr, stderr)
+		case err := <-runErr:
+			return sessionExit(err, stderr)
+		case err := <-served:
+			// The character stays in world (--stay and Ctrl-C still log out); only the
+			// RPC is gone. The error names the listener address, never a secret.
+			fmt.Fprintln(stderr, "rpc: server stopped:", err)
+			served = nil
+		}
 	}
 }
 

@@ -101,15 +101,7 @@ func TestListenLoopbackOnly(t *testing.T) {
 	ln.Close()
 }
 
-func TestIsLoopback(t *testing.T) {
-	for host, want := range map[string]bool{
-		"127.0.0.1": true, "127.1.2.3": true, "::1": true, "localhost": true,
-		"0.0.0.0": false, "::": false, "192.168.1.10": false, "example.com": false, "": false,
-	} {
-		if got := IsLoopback(host); got != want {
-			t.Errorf("IsLoopback(%q) = %v, want %v", host, got, want)
-		}
-	}
+func TestListenRefusals(t *testing.T) {
 	for _, addr := range []string{"192.168.1.10:0", "example.com:0", "[::]:0", "127.0.0.1", "127.0.0.1:99999"} {
 		if ln, err := Listen(context.Background(), addr); err == nil {
 			ln.Close()

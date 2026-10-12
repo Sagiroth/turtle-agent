@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/pjerra/turtle-agent/internal/rpc"
+	"github.com/pjerra/turtle-agent/internal/netutil"
 )
 
 // Spot is a place near hostile mobs used by the live checks (map id and world coordinates).
@@ -84,12 +84,8 @@ func (s Settings) validate() error {
 			return errors.New(`"world_addr" must be host:port`)
 		}
 	}
-	h, _, err := net.SplitHostPort(s.RPC)
-	if err != nil {
-		return errors.New(`"rpc" must be host:port`)
-	}
-	if !rpc.IsLoopback(h) {
-		return errors.New(`"rpc" must be a loopback address (127.0.0.1 or ::1)`)
+	if _, _, err := netutil.CheckLoopbackAddr(s.RPC); err != nil {
+		return fmt.Errorf(`"rpc" %w`, err)
 	}
 	if len(s.Accounts) == 0 {
 		return errors.New(`"accounts" must map at least one account name to its password`)

@@ -179,6 +179,24 @@ func TestReadEventsWaitBoundsAndFilters(t *testing.T) {
 	}
 }
 
+// A gap before the cursor, seen on the first read, is still reported when the wait
+// returns a later page (the follow-up reads start past the gap).
+func TestReadEventsKeepsDroppedAcrossWait(t *testing.T) {
+	log := events.New(10)
+	for i := 0; i < 11; i++ { // the 11th append drops the oldest tenth (seq 1)
+		log.Append(events.Event{Kind: events.KindSystem})
+	}
+	got := make(chan events.Page, 1)
+	go func() {
+		got <- readEvents(context.Background(), log, events.Query{Kinds: []string{events.KindWhisper}}, 3000)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	log.Append(events.Event{Kind: events.KindWhisper, Text: "match"})
+	if p := <-got; len(p.Events) != 1 || !p.Dropped {
+		t.Fatalf("%+v", p)
+	}
+}
+
 func TestRPCErrMapping(t *testing.T) {
 	for _, c := range []struct {
 		err  error
@@ -188,6 +206,7 @@ func TestRPCErrMapping(t *testing.T) {
 		{session.ErrDisconnected, rpc.CodeDisconnected},
 		{session.ErrClosed, rpc.CodeDisconnected},
 		{context.DeadlineExceeded, rpc.CodeTimeout},
+		{context.Canceled, rpc.CodeDisconnected},
 		{&session.LogoutError{Reason: 1}, rpc.CodeGame},
 	} {
 		var re *rpc.Error

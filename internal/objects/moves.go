@@ -127,7 +127,11 @@ func ParseMonsterMove(body []byte) (MonsterMove, error) {
 	if err := checkInWorld(m.Dest); err != nil {
 		return m, fmt.Errorf("SMSG_MONSTER_MOVE: destination: %w", err)
 	}
-	m.Path = linearPath(r, m.Start, m.Dest, count)
+	path, err := linearPath(r, m.Start, m.Dest, count)
+	if err != nil {
+		return m, fmt.Errorf("SMSG_MONSTER_MOVE: %w", err)
+	}
+	m.Path = path
 	return m, nil
 }
 
@@ -142,7 +146,7 @@ func ParseMonsterMove(body []byte) (MonsterMove, error) {
 // bytes that are there.
 // An offset only spans 512 yards across (256 up and down) and wraps beyond that, so each
 // axis takes the wrap that puts the point nearest the one before it.
-func linearPath(r *packet.Reader, start, dest [3]float32, count uint32) [][3]float32 {
+func linearPath(r *packet.Reader, start, dest [3]float32, count uint32) ([][3]float32, error) {
 	path := [][3]float32{start}
 	for i := uint32(1); i < count && r.Remaining() >= 4; i++ {
 		v := r.U32()
@@ -154,9 +158,12 @@ func linearPath(r *packet.Reader, start, dest [3]float32, count uint32) [][3]flo
 			// One step, not a loop: dest and prev are in range, so this is a few wraps at most.
 			p[k] -= span * float32(math.Round(float64((p[k]-prev[k])/span)))
 		}
+		if err := checkInWorld(p); err != nil { // each point may sit 256 yd from the one before
+			return nil, fmt.Errorf("path point %d: %w", len(path), err)
+		}
 		path = append(path, p)
 	}
-	return append(path, dest)
+	return append(path, dest), nil
 }
 
 func dist3(a, b [3]float32) float64 {

@@ -11,31 +11,11 @@ import (
 	"github.com/pjerra/turtle-agent/internal/packet"
 )
 
-// living writes BuildMovementUpdate for a living unit (Object.cpp:415-449).
-func living(w *packet.Writer, flags uint8, mi game.MoveInfo, spline func(*packet.Writer)) {
-	w.U8(flags)
-	game.WriteMoveInfo(w, mi)
-	for i := 0; i < 6; i++ {
-		w.F32(float32(i + 1))
-	}
-	if spline != nil {
-		spline(w)
-	}
-	if flags&0x08 != 0 {
-		w.U32(0)
-	}
-	if flags&0x10 != 0 {
-		w.U32(1)
-	}
-}
-
-func header(count uint32) *packet.Writer { return packet.NewWriter().U32(count).U8(0) }
-
 const wolf = packet.GUID(0xF13000012B000001)
 
 func TestCreateLivingUnitBlock(t *testing.T) {
-	w := header(1).U8(uint8(BlockCreate2)).PackedGUID(wolf).U8(3)
-	living(w, 0x20|0x10, game.MoveInfo{X: 10, Y: 20, Z: 30, O: 1}, nil)
+	w := objtest.Header(1).U8(uint8(BlockCreate2)).PackedGUID(wolf).U8(3)
+	objtest.Living(w, 0x20|0x10, game.MoveInfo{X: 10, Y: 20, Z: 30, O: 1}, nil)
 	objtest.Values(w, 188, map[uint16]uint32{UnitHealth: 100, UnitMaxHealth: 120, UnitLevel: 5, FieldEntry: 299})
 	blocks, err := ParseUpdate(w.Bytes())
 	if err != nil || len(blocks) != 1 {
@@ -50,10 +30,10 @@ func TestCreateLivingUnitBlock(t *testing.T) {
 
 // Review Focus 2: several blocks inside one compressed packet.
 func TestCompressedUpdateMultiBlock(t *testing.T) {
-	w := header(3)
+	w := objtest.Header(3)
 	w.U8(uint8(BlockOutOfRange)).U32(2).PackedGUID(0xF130000000000009).PackedGUID(0x31)
 	w.U8(uint8(BlockCreate)).PackedGUID(0x2A).U8(4)
-	living(w, 0x01|0x20|0x10, game.MoveInfo{X: -8913, Y: -136, Z: 82}, nil)
+	objtest.Living(w, 0x01|0x20|0x10, game.MoveInfo{X: -8913, Y: -136, Z: 82}, nil)
 	objtest.Values(w, 1300, map[uint16]uint32{UnitHealth: 1000, UnitMaxHealth: 1000})
 	w.U8(uint8(BlockValues)).PackedGUID(wolf)
 	objtest.Values(w, 188, map[uint16]uint32{UnitHealth: 40})
@@ -71,8 +51,8 @@ func TestCompressedUpdateMultiBlock(t *testing.T) {
 
 // Review Focus 2: a moving creature's create block carries spline data before its values.
 func TestSplineEnabledLivingBlock(t *testing.T) {
-	w := header(1).U8(uint8(BlockCreate)).PackedGUID(wolf).U8(3)
-	living(w, 0x20, game.MoveInfo{Flags: game.MoveForward | game.MoveSplineEnabled, X: 1}, func(w *packet.Writer) {
+	w := objtest.Header(1).U8(uint8(BlockCreate)).PackedGUID(wolf).U8(3)
+	objtest.Living(w, 0x20, game.MoveInfo{Flags: game.MoveForward | game.MoveSplineEnabled, X: 1}, func(w *packet.Writer) {
 		w.U32(splineFinalTarget).U64(0x2A)                 // final target (packet_builder.cpp:166-167)
 		w.U32(500).U32(2000).U32(77)                       // time passed, duration, id
 		w.U32(2).F32(1).F32(1).F32(1).F32(2).F32(2).F32(2) // two nodes
@@ -107,8 +87,8 @@ func TestSplineFinalFacingForms(t *testing.T) {
 			func(s *Spline) bool { return s.Flags == splineFlying }},
 	}
 	for _, c := range cases {
-		w := header(1).U8(uint8(BlockCreate)).PackedGUID(wolf).U8(3)
-		living(w, 0x20, game.MoveInfo{Flags: game.MoveSplineEnabled}, func(w *packet.Writer) {
+		w := objtest.Header(1).U8(uint8(BlockCreate)).PackedGUID(wolf).U8(3)
+		objtest.Living(w, 0x20, game.MoveInfo{Flags: game.MoveSplineEnabled}, func(w *packet.Writer) {
 			c.facing(w)
 			w.U32(0).U32(1000).U32(3).U32(1).F32(1).F32(2).F32(3).F32(4).F32(5).F32(6)
 		})
@@ -124,18 +104,59 @@ func TestSplineFinalFacingForms(t *testing.T) {
 	}
 }
 
+// A node count is bounded by the bytes left, so a lying count fails before any loop.
 func TestSplineNodeCountBounded(t *testing.T) {
-	w := header(1).U8(uint8(BlockCreate)).PackedGUID(wolf).U8(3)
-	living(w, 0x20, game.MoveInfo{Flags: game.MoveSplineEnabled}, func(w *packet.Writer) {
-		w.U32(0).U32(0).U32(0).U32(0).U32(maxNodes + 1)
+	w := objtest.Header(1).U8(uint8(BlockCreate)).PackedGUID(wolf).U8(3)
+	objtest.Living(w, 0x20, game.MoveInfo{Flags: game.MoveSplineEnabled}, func(w *packet.Writer) {
+		w.U32(0).U32(0).U32(0).U32(0).U32(1 << 30)
 	})
 	if _, err := ParseUpdate(w.Bytes()); err == nil {
-		t.Fatal("spline with too many nodes accepted")
+		t.Fatal("spline with more nodes than bytes accepted")
+	}
+}
+
+// Taxi flights create long Catmull-Rom splines (WaypointMovementGenerator.cpp:364-372);
+// a create block carrying one must parse, here with 2000 nodes inside a compressed update.
+func TestLongTaxiSpline(t *testing.T) {
+	const nodes = 2000
+	w := objtest.Header(2).U8(uint8(BlockCreate2)).PackedGUID(0x2A).U8(TypePlayer)
+	objtest.Living(w, 0x01|0x20|0x10, game.MoveInfo{Flags: game.MoveForward | game.MoveSplineEnabled}, func(w *packet.Writer) {
+		w.U32(splineFlying).U32(0).U32(600000).U32(12).U32(nodes)
+		for i := 0; i < nodes; i++ {
+			w.F32(float32(i)).F32(float32(-i)).F32(100)
+		}
+		w.F32(1999).F32(-1999).F32(100)
+	})
+	objtest.Values(w, 1300, map[uint16]uint32{UnitHealth: 60})
+	w.U8(uint8(BlockValues)).PackedGUID(wolf)
+	objtest.Values(w, 188, map[uint16]uint32{UnitHealth: 1})
+	blocks, err := ParseCompressedUpdate(objtest.Compress(w.Bytes()))
+	if err != nil || len(blocks) != 2 {
+		t.Fatalf("%d blocks, %v", len(blocks), err)
+	}
+	s := blocks[0].Move.Spline
+	if s == nil || len(s.Points) != nodes || s.Points[nodes-1] != [3]float32{1999, -1999, 100} || s.Duration != 600000 ||
+		blocks[0].Values[UnitHealth] != 60 || blocks[1].Values[UnitHealth] != 1 {
+		t.Fatalf("%+v", blocks)
+	}
+}
+
+// parseUpdate reports the bytes left after the last block, which the capture test
+// requires to be zero for every captured packet.
+func TestParseUpdateReportsLeftover(t *testing.T) {
+	w := objtest.Header(1).U8(uint8(BlockValues)).PackedGUID(wolf)
+	objtest.Values(w, 188, map[uint16]uint32{UnitHealth: 3})
+	if blocks, left, err := parseUpdate(w.Bytes()); err != nil || left != 0 || len(blocks) != 1 {
+		t.Fatalf("%+v %d %v", blocks, left, err)
+	}
+	w.U8(0xEE).U8(0xFF)
+	if blocks, left, err := parseUpdate(w.Bytes()); err != nil || left != 2 || len(blocks) != 1 {
+		t.Fatalf("%+v %d %v", blocks, left, err)
 	}
 }
 
 func TestTruncatedCompressedUpdate(t *testing.T) {
-	good := objtest.Compress(header(0).Bytes())
+	good := objtest.Compress(objtest.Header(0).Bytes())
 	if _, err := ParseCompressedUpdate(good[:len(good)-3]); err == nil {
 		t.Fatal("truncated zlib accepted")
 	}
@@ -150,7 +171,7 @@ func TestTruncatedCompressedUpdate(t *testing.T) {
 
 // Ruling P3: the stream must end exactly at the declared size with a good checksum.
 func TestInflateRejectsSizeMismatchAndBadChecksum(t *testing.T) {
-	plain := header(0).Bytes()
+	plain := objtest.Header(0).Bytes()
 	good := objtest.Compress(plain)
 	if out, err := Inflate(good); err != nil || !bytes.Equal(out, plain) {
 		t.Fatalf("%x %v", out, err)
@@ -178,7 +199,7 @@ func TestInflateRejectsSizeMismatchAndBadChecksum(t *testing.T) {
 // A real compressed update holds many blocks; inflate copes with sizes past one zlib window.
 func TestCompressedUpdateManyBlocks(t *testing.T) {
 	const n = 300
-	w := header(n)
+	w := objtest.Header(n)
 	for i := 0; i < n; i++ {
 		w.U8(uint8(BlockValues)).PackedGUID(packet.GUID(0xF130000000000000 | uint64(i+1)))
 		objtest.Values(w, 188, map[uint16]uint32{UnitHealth: uint32(i), UnitFlags: UnitFlagInCombat})
@@ -196,7 +217,7 @@ func TestCompressedUpdateManyBlocks(t *testing.T) {
 
 // Review Focus 3: mask bits past every known field are read and kept, not misparsed.
 func TestValuesBeyondKnownFields(t *testing.T) {
-	w := header(1).U8(uint8(BlockValues)).PackedGUID(0x2A)
+	w := objtest.Header(1).U8(uint8(BlockValues)).PackedGUID(0x2A)
 	objtest.Values(w, 1500, map[uint16]uint32{UnitHealth: 7, 1490: 0xABCD})
 	blocks, err := ParseUpdate(w.Bytes())
 	if err != nil || blocks[0].Values[1490] != 0xABCD || blocks[0].Values[UnitHealth] != 7 {
@@ -207,7 +228,7 @@ func TestValuesBeyondKnownFields(t *testing.T) {
 // Partial masks: a values block carries only the bits that changed, so the map holds
 // exactly those indices, and an empty mask is a valid block with no values.
 func TestPartialValueMasks(t *testing.T) {
-	w := header(3)
+	w := objtest.Header(3)
 	w.U8(uint8(BlockValues)).PackedGUID(wolf)
 	objtest.Values(w, 188, map[uint16]uint32{UnitTarget: 0x2A, UnitTarget + 1: 0, UnitAura + AuraSlots - 1: 133, UnitNPCFlags: 2})
 	w.U8(uint8(BlockValues)).PackedGUID(wolf)
@@ -232,7 +253,7 @@ func TestPartialValueMasks(t *testing.T) {
 // A mask that promises more values than the packet holds is an error, and the blocks
 // before it are still returned.
 func TestTruncatedValuesKeepEarlierBlocks(t *testing.T) {
-	w := header(2)
+	w := objtest.Header(2)
 	w.U8(uint8(BlockValues)).PackedGUID(wolf)
 	objtest.Values(w, 188, map[uint16]uint32{UnitHealth: 1})
 	w.U8(uint8(BlockValues)).PackedGUID(0x2A)
@@ -245,8 +266,8 @@ func TestTruncatedValuesKeepEarlierBlocks(t *testing.T) {
 }
 
 func TestMovementBlockAndGameObjectPosition(t *testing.T) {
-	w := header(2).U8(uint8(BlockMovement)).GUID(wolf) // full guid (Object.cpp:268-269)
-	living(w, 0x20, game.MoveInfo{X: 3}, nil)
+	w := objtest.Header(2).U8(uint8(BlockMovement)).GUID(wolf) // full guid (Object.cpp:268-269)
+	objtest.Living(w, 0x20, game.MoveInfo{X: 3}, nil)
 	w.U8(uint8(BlockCreate)).PackedGUID(0xF110000000000042).U8(5)
 	w.U8(0x40 | 0x08 | 0x10).F32(1).F32(2).F32(3).F32(4).U32(0).U32(1) // has position, high guid, all
 	objtest.Values(w, 26, map[uint16]uint32{FieldEntry: 1731})
@@ -259,7 +280,7 @@ func TestMovementBlockAndGameObjectPosition(t *testing.T) {
 // The trailing optional parts of BuildMovementUpdate in the core's order
 // (Object.cpp:474-512): high guid, all, melee victim packed guid, transport time.
 func TestMovementTrailingParts(t *testing.T) {
-	w := header(2)
+	w := objtest.Header(2)
 	w.U8(uint8(BlockCreate)).PackedGUID(wolf).U8(3)
 	w.U8(0x20 | 0x10 | 0x04) // living, all, melee attacking
 	game.WriteMoveInfo(w, game.MoveInfo{X: 1})
@@ -287,7 +308,7 @@ func TestMovementTrailingParts(t *testing.T) {
 // Out-of-range blocks: an update packet that holds only one (UpdateData::Send with no
 // other data, UpdateData.cpp:146-153), a near-objects block, and a bad guid count.
 func TestOutOfRangeBlocks(t *testing.T) {
-	w := header(2).U8(uint8(BlockOutOfRange)).U32(3).PackedGUID(wolf).PackedGUID(0x2A).PackedGUID(0)
+	w := objtest.Header(2).U8(uint8(BlockOutOfRange)).U32(3).PackedGUID(wolf).PackedGUID(0x2A).PackedGUID(0)
 	w.U8(uint8(BlockNear)).U32(1).PackedGUID(0x31)
 	blocks, err := ParseUpdate(w.Bytes())
 	if err != nil || len(blocks) != 2 {
@@ -299,15 +320,15 @@ func TestOutOfRangeBlocks(t *testing.T) {
 	if blocks[1].Type != BlockNear || len(blocks[1].GUIDs) != 1 || blocks[1].GUIDs[0] != 0x31 {
 		t.Fatalf("%+v", blocks[1])
 	}
-	empty := header(1).U8(uint8(BlockOutOfRange)).U32(0).Bytes()
+	empty := objtest.Header(1).U8(uint8(BlockOutOfRange)).U32(0).Bytes()
 	if blocks, err := ParseUpdate(empty); err != nil || len(blocks) != 1 || len(blocks[0].GUIDs) != 0 {
 		t.Fatalf("%+v %v", blocks, err)
 	}
-	short := header(1).U8(uint8(BlockOutOfRange)).U32(3).PackedGUID(wolf).Bytes()
+	short := objtest.Header(1).U8(uint8(BlockOutOfRange)).U32(3).PackedGUID(wolf).Bytes()
 	if _, err := ParseUpdate(short); err == nil {
 		t.Fatal("guid list shorter than its count accepted")
 	}
-	huge := header(1).U8(uint8(BlockOutOfRange)).U32(maxBlocks + 1).Bytes()
+	huge := objtest.Header(1).U8(uint8(BlockOutOfRange)).U32(1 << 30).PackedGUID(wolf).Bytes()
 	if _, err := ParseUpdate(huge); err == nil {
 		t.Fatal("huge guid count accepted")
 	}
@@ -317,10 +338,10 @@ func TestUpdateHeaderErrors(t *testing.T) {
 	if _, err := ParseUpdate([]byte{1, 0, 0}); err == nil {
 		t.Fatal("short header accepted")
 	}
-	if _, err := ParseUpdate(header(maxBlocks + 1).Bytes()); err == nil {
+	if _, err := ParseUpdate(objtest.Header(1 << 30).U8(uint8(BlockOutOfRange)).U32(0).Bytes()); err == nil {
 		t.Fatal("huge block count accepted")
 	}
-	if _, err := ParseUpdate(header(2).U8(uint8(BlockOutOfRange)).U32(0).Bytes()); err == nil {
+	if _, err := ParseUpdate(objtest.Header(2).U8(uint8(BlockOutOfRange)).U32(0).Bytes()); err == nil {
 		t.Fatal("missing second block accepted")
 	}
 	if blocks, err := ParseUpdate(packet.NewWriter().U32(0).U8(1).Bytes()); err != nil || len(blocks) != 0 {
@@ -329,7 +350,7 @@ func TestUpdateHeaderErrors(t *testing.T) {
 }
 
 func TestUnknownBlockTypeFails(t *testing.T) {
-	if _, err := ParseUpdate(header(1).U8(9).Bytes()); err == nil {
+	if _, err := ParseUpdate(objtest.Header(1).U8(9).Bytes()); err == nil {
 		t.Fatal("block type 9 accepted")
 	}
 }

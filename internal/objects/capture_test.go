@@ -16,16 +16,20 @@ func TestCapturedUpdatesParse(t *testing.T) {
 	for _, name := range []string{"m1-login.twcap"} {
 		recs := testfixture.Load(t, name)
 		for _, body := range capture.Bodies(recs, opcode.SMSGUpdateObject) {
-			b, err := ParseUpdate(body)
-			if err != nil {
-				t.Fatalf("%s SMSG_UPDATE_OBJECT: %v\n%x", name, err, body)
+			b, left, err := parseUpdate(body)
+			if err != nil || left != 0 {
+				t.Fatalf("%s SMSG_UPDATE_OBJECT: %v, %d bytes left after %d blocks\n%x", name, err, left, len(b), body)
 			}
 			blocks += len(b)
 		}
 		for _, body := range capture.Bodies(recs, opcode.SMSGCompressedUpdateObject) {
-			b, err := ParseCompressedUpdate(body)
+			plain, err := Inflate(body)
 			if err != nil {
 				t.Fatalf("%s SMSG_COMPRESSED_UPDATE_OBJECT: %v\n%x", name, err, body)
+			}
+			b, left, err := parseUpdate(plain)
+			if err != nil || left != 0 {
+				t.Fatalf("%s SMSG_COMPRESSED_UPDATE_OBJECT: %v, %d bytes left after %d blocks\n%x", name, err, left, len(b), plain)
 			}
 			compressed++
 			blocks += len(b)

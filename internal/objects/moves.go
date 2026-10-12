@@ -77,12 +77,9 @@ func ParseMonsterMove(body []byte) (MonsterMove, error) {
 	flags := r.U32()
 	m.Duration = r.U32()
 	count := r.U32()
-	if count > maxNodes {
-		return m, fmt.Errorf("SMSG_MONSTER_MOVE: %d points", count)
-	}
-	if flags&splineFlying != 0 { // smooth path: count points, the last is the destination (:115-127)
-		if count == 0 && r.Err() == nil {
-			return m, fmt.Errorf("SMSG_MONSTER_MOVE: smooth path without points")
+	if flags&splineFlying != 0 && r.Err() == nil { // smooth path: count points, the last is the destination (:115-127)
+		if count == 0 || uint64(count)*12 > uint64(r.Remaining()) {
+			return m, fmt.Errorf("SMSG_MONSTER_MOVE: smooth path of %d points in %d bytes", count, r.Remaining())
 		}
 		r.Skip(int(count-1) * 12)
 	}

@@ -66,9 +66,23 @@ func TestMonsterMoveErrors(t *testing.T) {
 		t.Fatal("smooth path without points accepted")
 	}
 	tooMany := packet.NewWriter().PackedGUID(wolf).F32(1).F32(2).F32(3).U32(9).U8(0).
-		U32(0x100).U32(800).U32(maxNodes + 1).Bytes()
+		U32(splineFlying).U32(800).U32(1 << 30).F32(4).F32(4).F32(4).Bytes()
 	if _, err := ParseMonsterMove(tooMany); err == nil {
-		t.Fatal("huge point count accepted")
+		t.Fatal("smooth path with more points than bytes accepted")
+	}
+	// A linear path's count is not used to parse (destination first, packed offsets
+	// after it, packet_builder.cpp:78-112), so a large count is no reason to drop it.
+	linear := packet.NewWriter().PackedGUID(wolf).F32(1).F32(2).F32(3).U32(9).U8(0).
+		U32(0x100).U32(800).U32(5000).F32(4).F32(5).F32(6).Bytes()
+	if m, err := ParseMonsterMove(linear); err != nil || m.Dest != [3]float32{4, 5, 6} {
+		t.Fatalf("linear path with a large count: %+v %v", m, err)
+	}
+	long := packet.NewWriter().PackedGUID(wolf).F32(1).F32(2).F32(3).U32(9).U8(0).U32(splineFlying).U32(800).U32(2000)
+	for i := 0; i < 2000; i++ {
+		long.F32(float32(i)).F32(0).F32(50)
+	}
+	if m, err := ParseMonsterMove(long.Bytes()); err != nil || m.Dest != [3]float32{1999, 0, 50} {
+		t.Fatalf("long smooth path: %+v %v", m, err)
 	}
 	shortSmooth := packet.NewWriter().PackedGUID(wolf).F32(1).F32(2).F32(3).U32(9).U8(0).
 		U32(splineFlying).U32(800).U32(3).F32(4).F32(4).F32(4).Bytes()

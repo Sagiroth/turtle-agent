@@ -42,11 +42,9 @@ const (
 	splineFinalAngle  = 0x00040000
 )
 
-const (
-	maxInflated = 8 << 20
-	maxBlocks   = 10000
-	maxNodes    = 1000
-)
+// maxInflated bounds the declared size; the core splits update packets near 32 KB
+// (MAX_UNCOMPRESSED_PACKET_SIZE, UpdateData.cpp:33 and :54-68).
+const maxInflated = 8 << 20
 
 // Spline is PacketBuilder::WriteCreate's spline (packet_builder.cpp:154-180).
 type Spline struct {
@@ -83,7 +81,8 @@ type Block struct {
 
 // Inflate reads a u32 uncompressed size and a zlib stream (UpdateData.cpp:121-135, the
 // core compresses with libdeflate_zlib_compress at :76-80). The stream must inflate to
-// exactly the declared size and end with a good checksum.
+// exactly the declared size and end with a good checksum. Memory follows the data
+// actually inflated, never the declared size.
 func Inflate(body []byte) ([]byte, error) {
 	r := packet.NewReader(body)
 	size := r.U32()
@@ -98,20 +97,17 @@ func Inflate(body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("inflate: %w", err)
 	}
 	defer zr.Close()
-	out := make([]byte, size)
-	if _, err := io.ReadFull(zr, out); err != nil {
-		return nil, fmt.Errorf("inflate: %w", err)
-	}
-	// Ruling P3: one more read must hit a clean end of stream, which is also where
-	// the zlib reader checks the adler32 checksum.
-	extra, err := io.Copy(io.Discard, io.LimitReader(zr, 1))
+	// Ruling P3: reading one byte past the declared size must hit a clean end of
+	// stream, which is also where the zlib reader checks the adler32 checksum.
+	var out bytes.Buffer
+	n, err := io.Copy(&out, io.LimitReader(zr, int64(size)+1))
 	if err != nil {
 		return nil, fmt.Errorf("inflate: %w", err)
 	}
-	if extra != 0 {
-		return nil, fmt.Errorf("inflate: more data than the declared %d bytes", size)
+	if n != int64(size) {
+		return nil, fmt.Errorf("inflate: stream holds %d bytes, declared %d", n, size)
 	}
-	return out, nil
+	return out.Bytes(), nil
 }
 
 // ParseCompressedUpdate decodes SMSG_COMPRESSED_UPDATE_OBJECT (UpdateData.cpp:121-136).
@@ -126,24 +122,30 @@ func ParseCompressedUpdate(body []byte) ([]Block, error) {
 // ParseUpdate decodes SMSG_UPDATE_OBJECT: u32 block count, u8 has transport, blocks
 // (UpdateData.cpp:97-117). On error it returns the blocks parsed so far.
 func ParseUpdate(body []byte) ([]Block, error) {
+	blocks, _, err := parseUpdate(body)
+	return blocks, err
+}
+
+// parseUpdate is ParseUpdate that also reports how many bytes follow the last block.
+func parseUpdate(body []byte) ([]Block, int, error) {
 	r := packet.NewReader(body)
 	count := r.U32()
 	r.U8() // has transport
 	if err := r.Err(); err != nil {
-		return nil, fmt.Errorf("update header: %w", err)
+		return nil, r.Remaining(), fmt.Errorf("update header: %w", err)
 	}
-	if count > maxBlocks {
-		return nil, fmt.Errorf("update header: %d blocks", count)
+	if count > uint32(r.Remaining()) { // every block is at least one byte
+		return nil, r.Remaining(), fmt.Errorf("update header: %d blocks in %d bytes", count, r.Remaining())
 	}
 	blocks := make([]Block, 0, count)
 	for i := uint32(0); i < count; i++ {
 		b, err := readBlock(r)
 		if err != nil {
-			return blocks, fmt.Errorf("update block %d of %d (type %d): %w", i+1, count, b.Type, err)
+			return blocks, r.Remaining(), fmt.Errorf("update block %d of %d (type %d): %w", i+1, count, b.Type, err)
 		}
 		blocks = append(blocks, b)
 	}
-	return blocks, nil
+	return blocks, r.Remaining(), nil
 }
 
 func readBlock(r *packet.Reader) (Block, error) {
@@ -162,9 +164,9 @@ func readBlock(r *packet.Reader) (Block, error) {
 			b.Values, err = readValues(r)
 		}
 	case BlockOutOfRange, BlockNear:
-		n := r.U32() // UpdateData.cpp:109-114
-		if n > maxBlocks {
-			return b, fmt.Errorf("%d guids", n)
+		n := r.U32()                   // UpdateData.cpp:109-114
+		if n > uint32(r.Remaining()) { // a packed guid is at least one byte
+			return b, fmt.Errorf("%d guids in %d bytes", n, r.Remaining())
 		}
 		for j := uint32(0); j < n && r.Err() == nil; j++ {
 			b.GUIDs = append(b.GUIDs, r.PackedGUID())
@@ -230,9 +232,11 @@ func readSpline(r *packet.Reader) (*Spline, error) {
 		s.FinalPoint = [3]float32{r.F32(), r.F32(), r.F32()}
 	}
 	s.TimePassed, s.Duration, s.ID = r.U32(), r.U32(), r.U32()
+	// Taxi flights send long Catmull-Rom paths (WaypointMovementGenerator.cpp:364-372), so
+	// the count is bounded by the bytes left, not by a constant.
 	n := r.U32()
-	if n > maxNodes {
-		return s, fmt.Errorf("spline with %d nodes", n)
+	if uint64(n)*12 > uint64(r.Remaining()) {
+		return s, fmt.Errorf("spline with %d nodes in %d bytes", n, r.Remaining())
 	}
 	for i := uint32(0); i < n && r.Err() == nil; i++ {
 		s.Points = append(s.Points, [3]float32{r.F32(), r.F32(), r.F32()})

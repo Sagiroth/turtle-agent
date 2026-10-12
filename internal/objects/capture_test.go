@@ -9,11 +9,11 @@ import (
 )
 
 // Review Focus 2 and 3, pinned by captures: every update packet the server sent parses
-// completely, compressed ones included, and so do the compressed moves. Task 22 adds the
-// milestone 4 fixture to the list.
+// completely, compressed ones included, and so do the compressed moves. The fixtures are
+// the login (milestone 1) and the units around the player with two bots (milestone 4).
 func TestCapturedUpdatesParse(t *testing.T) {
 	compressed, blocks := 0, 0
-	for _, name := range []string{"m1-login.twcap"} {
+	for _, name := range []string{"m1-login.twcap", "m4-world.twcap"} {
 		recs := testfixture.Load(t, name)
 		for _, body := range capture.Bodies(recs, opcode.SMSGUpdateObject) {
 			b, left, err := parseUpdate(body)

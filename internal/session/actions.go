@@ -599,14 +599,18 @@ func (s *Session) setRunSpeed(speed float32, now time.Time) {
 	}
 }
 
-// seedRunSpeed takes the run speed from the player's own create block (Speeds[1],
-// Object.cpp:436-441), so a walk right after login or a far teleport uses the speed the
-// server already has, mounts and auras included.
+// toggleFlags are the movement flags the water-walk, hover and feather-fall orders switch.
+const toggleFlags = game.MoveWaterWalking | game.MoveHover | game.MoveSafeFall
+
+// seedRunSpeed takes the run speed (Speeds[1]) and the water-walk, hover and feather-fall
+// flags from the player's own create block (Object.cpp:436-441), so movement right after
+// login or a far teleport matches what the server already has, mounts and auras included.
 func (s *Session) seedRunSpeed(blocks []objects.Block) {
 	self := s.selfGUID()
 	for _, b := range blocks {
 		if (b.Type == objects.BlockCreate || b.Type == objects.BlockCreate2) && b.GUID == self && b.Move != nil && b.Move.Living {
 			s.setRunSpeed(b.Move.Speeds[1], time.Now())
+			s.toggles = b.Move.Info.Flags & toggleFlags
 		}
 	}
 }

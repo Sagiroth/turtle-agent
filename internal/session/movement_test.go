@@ -376,3 +376,22 @@ func TestFeatherFallMidFlight(t *testing.T) {
 	}
 	h.logout()
 }
+
+// Review fix 3: an aura already on at login (or after a far teleport) shows only as a flag in
+// the player's create block (Object.cpp:436-441); the toggles are seeded from it, as the run
+// speed is, so later movement carries them before any order arrives.
+func TestTogglesSeededFromCreateBlock(t *testing.T) {
+	ctx := context.Background()
+	h := start(t, Options{})
+	h.enterWorld()
+	h.send(opcode.SMSGUpdateObject, selfCreateFlags(7, game.MoveSafeFall|game.MoveHover|game.MoveWalkMode))
+	waitFor(t, func() bool { return h.s.Status().MaxHealth == 100 })
+	if err := h.s.WalkTo(ctx, me.X+1, me.Y, me.Z); err != nil {
+		t.Fatal(err)
+	}
+	if mi := readMove(h.expect(opcode.MSGMoveStartForward).Body); mi.Flags != game.MoveForward|game.MoveSafeFall|game.MoveHover {
+		t.Fatalf("walk flags %#x", mi.Flags)
+	}
+	h.expect(opcode.MSGMoveStop)
+	h.logout()
+}

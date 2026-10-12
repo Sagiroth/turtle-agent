@@ -312,3 +312,24 @@ func (c *Conn) Close() error {
 	c.closeOnce.Do(func() { err = c.nc.Close() })
 	return err
 }
+
+// NewOffline returns a Conn that has no server: writes are accepted and dropped, reads
+// report EOF. A replay of a capture uses it to run the session's handlers, which answer
+// packets, without a socket.
+func NewOffline() *Conn { return &Conn{nc: offlineConn{}} }
+
+type offlineConn struct{}
+
+func (offlineConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (offlineConn) Write(b []byte) (int, error)      { return len(b), nil }
+func (offlineConn) Close() error                     { return nil }
+func (offlineConn) LocalAddr() net.Addr              { return offlineAddr{} }
+func (offlineConn) RemoteAddr() net.Addr             { return offlineAddr{} }
+func (offlineConn) SetDeadline(time.Time) error      { return nil }
+func (offlineConn) SetReadDeadline(time.Time) error  { return nil }
+func (offlineConn) SetWriteDeadline(time.Time) error { return nil }
+
+type offlineAddr struct{}
+
+func (offlineAddr) Network() string { return "offline" }
+func (offlineAddr) String() string  { return "offline" }

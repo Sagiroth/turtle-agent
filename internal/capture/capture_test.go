@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pjerra/turtle-agent/internal/opcode"
+	"github.com/pjerra/turtle-agent/internal/packet"
 	"github.com/pjerra/turtle-agent/internal/worldconn"
 )
 
@@ -179,5 +181,68 @@ func TestPacketAfterCloseIsReported(t *testing.T) {
 	w.Packet(worldconn.ServerToClient, opcode.SMSGCharEnum, []byte{1})
 	if err := w.Close(); err == nil {
 		t.Fatal("packet after Close went unnoticed")
+	}
+}
+
+// A capture whose writer died mid-record: ReadFile refuses it, ReadFilePartial returns what
+// came before the cut together with the error.
+func TestReadFilePartialKeepsRecordsBeforeTheCut(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.twcap")
+	w, err := Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Packet(worldconn.ServerToClient, opcode.SMSGCharEnum, []byte{1, 2, 3})
+	w.Packet(worldconn.ServerToClient, opcode.SMSGPong, []byte{4, 5, 6, 7})
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if err := os.WriteFile(path, raw[:len(raw)-2], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if recs, err := ReadFile(path); err == nil || recs != nil {
+		t.Fatalf("ReadFile: %v %v", recs, err)
+	}
+	recs, err := ReadFilePartial(path)
+	if err == nil || len(recs) != 1 || recs[0].Op != opcode.SMSGCharEnum {
+		t.Fatalf("%+v %v", recs, err)
+	}
+}
+
+// A record the writer cannot have written is corruption, not a cut: the records before it are
+// kept and the error says where.
+func TestReadFilePartialRejectsCorruptRecords(t *testing.T) {
+	rec := func(flags uint8, ts int64, op uint16) []byte {
+		return packet.NewWriter().U8(flags).U64(uint64(ts)).U16(op).U32(1).U8(9).Bytes()
+	}
+	base := time.Date(2026, 10, 12, 20, 0, 0, 0, time.UTC).UnixNano()
+	good := rec(0, base, opcode.SMSGPong)
+	for _, tc := range []struct {
+		name string
+		bad  []byte
+	}{
+		{"direction", rec(2, base, opcode.SMSGPong)},
+		{"opcode", rec(0, base, opcode.NumMsgTypes)},
+		{"time runs back", rec(0, base-int64(2*time.Minute), opcode.SMSGPong)},
+	} {
+		path := filepath.Join(t.TempDir(), "c.twcap")
+		raw := append(append(append([]byte(magic), good...), tc.bad...), good...)
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		recs, err := ReadFilePartial(path)
+		if len(recs) != 1 || err == nil || !strings.Contains(err.Error(), "corrupt at record 1") {
+			t.Errorf("%s: %d records, %v", tc.name, len(recs), err)
+		}
+	}
+	// A redacted record (bit 0x80 over a valid direction) and a small step back are fine.
+	path := filepath.Join(t.TempDir(), "c.twcap")
+	raw := append(append(append([]byte(magic), good...), rec(0x81, base-int64(time.Second), opcode.CMSGPing)...), good...)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if recs, err := ReadFilePartial(path); err != nil || len(recs) != 3 || !recs[1].Redacted {
+		t.Fatalf("%d records, %v", len(recs), err)
 	}
 }

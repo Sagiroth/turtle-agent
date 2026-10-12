@@ -62,6 +62,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return fleetCmd(ctx, args[1:], stdout, stderr)
 	case "scrub-check":
 		return scrubCmd(args[1:], stdout, stderr)
+	case "capture":
+		return captureCmd(args[1:], stdout, stderr)
 	case "capture-stats":
 		return statsCmd(args[1:], stdout, stderr)
 	case "version":
@@ -79,5 +81,6 @@ func usage(w io.Writer) {
   turtle-agent fleet --config FILE [--settings FILE] [--stagger DURATION] [--wait DURATION]
   turtle-agent scrub-check [--config FILE] <capture>...
   turtle-agent capture-stats <capture>
+  turtle-agent capture events [--from RFC3339] [--to RFC3339] [--kinds a,b] [--out FILE [--force]] <capture>
   turtle-agent version`)
 }

@@ -109,8 +109,7 @@ func (s *Session) QuestAccept(ctx context.Context, npc packet.GUID, quest uint32
 		if _, ok := s.questSlot(quest); ok {
 			return nil, fmt.Errorf("quest %d is already in the quest log", quest)
 		}
-		s.prunePending(time.Now())
-		s.npc.accepts = append(s.npc.accepts, pendingQuest{npc: npc, quest: quest, expires: time.Now().Add(npcWait)})
+		s.noteAccept(npc, quest)
 		return nil, s.conn.WritePacket(opcode.CMSGQuestgiverAcceptQuest, game.BuildQuestgiverAcceptQuest(npc, quest))
 	})
 	return err
@@ -129,7 +128,7 @@ func (s *Session) QuestComplete(ctx context.Context, npc packet.GUID, quest uint
 		if err := s.inWorld(); err != nil {
 			return nil, err
 		}
-		s.npc.completes[questKey{npc, quest}] = time.Now().Add(npcWait)
+		s.noteComplete(npc, quest)
 		return nil, s.conn.WritePacket(opcode.CMSGQuestgiverCompleteQuest, game.BuildQuestgiverCompleteQuest(npc, quest))
 	})
 	return err
@@ -163,7 +162,7 @@ func (s *Session) QuestReward(ctx context.Context, npc packet.GUID, quest uint32
 				return nil, fmt.Errorf("quest_reward: the offer has %d reward choices; choice %d is out of range", n, pick)
 			}
 		}
-		s.npc.rewarding[quest] = rewardAsk{npc, time.Now().Add(npcWait)}
+		s.noteReward(npc, quest)
 		return nil, s.conn.WritePacket(opcode.CMSGQuestgiverChooseReward, game.BuildQuestgiverChooseReward(npc, quest, pick))
 	})
 	return err
@@ -184,11 +183,28 @@ func (s *Session) QuestAbandon(ctx context.Context, quest uint32) error {
 		if !ok {
 			return nil, fmt.Errorf("quest %d is not in the quest log (see quest_log)", quest)
 		}
-		s.prunePending(time.Now())
-		s.npc.abandons = append(s.npc.abandons, pendingQuest{quest: quest, expires: time.Now().Add(npcWait)})
+		s.noteAbandon(quest)
 		return nil, s.conn.WritePacket(opcode.CMSGQuestlogRemoveQuest, game.BuildQuestlogRemoveQuest(q.Slot))
 	})
 	return err
+}
+
+func (s *Session) noteAccept(npc packet.GUID, quest uint32) {
+	s.prunePending(s.now())
+	s.npc.accepts = append(s.npc.accepts, pendingQuest{npc: npc, quest: quest, expires: s.now().Add(npcWait)})
+}
+
+func (s *Session) noteComplete(npc packet.GUID, quest uint32) {
+	s.npc.completes[questKey{npc, quest}] = s.now().Add(npcWait)
+}
+
+func (s *Session) noteReward(npc packet.GUID, quest uint32) {
+	s.npc.rewarding[quest] = rewardAsk{npc, s.now().Add(npcWait)}
+}
+
+func (s *Session) noteAbandon(quest uint32) {
+	s.prunePending(s.now())
+	s.npc.abandons = append(s.npc.abandons, pendingQuest{quest: quest, expires: s.now().Add(npcWait)})
 }
 
 // checkQuestLog turns the log changes the pending accepts and abandons wait for into events.
@@ -265,7 +281,7 @@ func (s *Session) onQuestRequestItems(body []byte) error {
 	k := questKey{q.NPC, q.Quest}
 	if until, ok := s.npc.completes[k]; ok {
 		delete(s.npc.completes, k)
-		if q.Completable && time.Now().Before(until) {
+		if q.Completable && s.now().Before(until) {
 			return s.conn.WritePacket(opcode.CMSGQuestgiverRequestReward, game.BuildQuestgiverRequestReward(q.NPC, q.Quest))
 		}
 	}
@@ -279,7 +295,7 @@ func (s *Session) onQuestOfferReward(body []byte) error {
 	}
 	k := questKey{q.NPC, q.Quest}
 	delete(s.npc.completes, k)
-	s.npc.offers[k] = offer{len(q.Choices), time.Now().Add(offerKeep)}
+	s.npc.offers[k] = offer{len(q.Choices), s.now().Add(offerKeep)}
 	s.emit(events.Event{Kind: events.KindQuestOfferReward, SourceGUID: q.NPC, Data: map[string]any{
 		"quest_id": q.Quest, "title": q.Title, "text": q.Text, "choices": questItems(q.Choices), "rewards": questItems(q.Rewards),
 		"money": q.Money, "reward_spell": q.RewardSpell}})

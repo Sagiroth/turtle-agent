@@ -80,6 +80,7 @@ turtle-agent login [--config FILE] [--capture FILE] [--stay DURATION] [--rpc ADD
 turtle-agent fleet --config FILE [--settings FILE] [--stagger DURATION] [--wait DURATION]
 turtle-agent scrub-check [--config FILE] <capture>...
 turtle-agent capture-stats <capture>
+turtle-agent capture events [--from RFC3339] [--to RFC3339] [--kinds a,b] [--out FILE [--force]] <capture>
 turtle-agent version
 ```
 
@@ -99,6 +100,25 @@ turtle-agent version
 `--capture` records every decrypted packet to a file (opened exclusively, mode 0600). The auth session body and
 Warden packets are never written, and any packet holding the account name, password or session key is redacted.
 `scrub-check` proves a capture is clean before you share or commit it.
+
+`capture events` decodes a finished run: it replays the capture's server packets through the same session handlers
+that built the live event log (no socket, no login) and prints the events the `events` RPC returned while the capture
+was recorded, one JSON object per line (the `events` entries as they are, so `jq`, `wow-play-harness` and the like read
+them unchanged). Every event of the run is there, not one 500-event page, so a run can always be analysed afterwards.
+`seq` counts from 1 as it did live, `time` is the time of the capture record that produced the event, and `mono_ms` counts
+milliseconds from the capture's first record (live it counts from the agent's start). The character
+is the one the capture logged in. `--from` and `--to` (RFC 3339, both inclusive) keep a time window and `--kinds` the
+listed event kinds; `seq` stays the run's own. Events go to stdout, or to `--out FILE` (mode 0600; an existing file is
+refused unless `--force`, and a capture file, the input included, is never overwritten). A summary and the count per kind go to stderr. A capture cut off in its last record (the agent was killed), or corrupt
+from some record on (a bad direction byte, an opcode past `NUM_MSG_TYPES`, time running back by over a minute), is
+decoded up to that record, with a warning.
+
+The decode equals the live log except where the capture lacks the input: packets stored redacted (they held a secret),
+events whose text the live run redacted (the replay does not know the account names, so such a name can show), the final
+`disconnected` event (a capture does not record how the socket ended), and flights the agent simulated after walking by
+RPC or over navmesh floors (a replay has neither, so `knocked_back` starts from the last position the replay knows and a
+flight lands at its starting height). Events inferred from the agent's own requests (`vendor_sell`, `quest_accepted`,
+`quest_abandoned`) come back because the capture holds those requests.
 
 `--reconnect N` (off by default) logs the character in again after an unplanned disconnect, at most N login
 attempts in all. Attempts wait 5 s, then 10 s, 20 s and so on up to 2 min, and the agent keeps its own realmd logins
@@ -518,7 +538,7 @@ with the same calls as its real-client backend (`chat`, `gm`, `state`, `tail_cha
 | --- | --- |
 | `internal/auth` | SRP6 and realmd: logon challenge/proof, realm list |
 | `internal/worldconn` | TCP framing, the 1.12 header cipher, auth session with the addon block |
-| `internal/session` | single-owner session loop: login, ping, chat, addon messages, channels, gossip, names, party, world, actions, combat, raid icons, loot rolls, inventory, equip and use, vendors, trainers and quests, corpse loot, mounts, logout |
+| `internal/session` | single-owner session loop: login, ping, chat, addon messages, channels, gossip, names, party, world, actions, combat, raid icons, loot rolls, inventory, equip and use, vendors, trainers and quests, corpse loot, mounts, logout, and `Replay`, which runs a capture's packets through the handlers offline |
 | `internal/game` | packet codecs for chat, addon messages, channels, gossip, queries, groups, actions, the combat log, raid icons, loot rolls, the loot window, items, mounts, vendors, trainers and quests |
 | `internal/objects` | update-object parser and the object store: units (positions, splines, auras, casts), the items in the backpack and bags, and the quest log |
 | `internal/spells` | spell names by id, from the core's `spell_template` (`tools/spellnamegen`) |
@@ -528,7 +548,7 @@ with the same calls as its real-client backend (`chat`, `gm`, `state`, `tail_cha
 | `tools/tbmlines`, `tools/tbmcontract` | extract `TBM:` lines from an events file; replay them through the real TBM addon (Lua) |
 | `internal/capture` | packet capture files and the secret scan |
 | `internal/rpc`, `internal/netutil` | loopback JSON-RPC server |
-| `cmd/turtle-agent` | the CLI (`login`, `fleet`, capture tools) |
+| `cmd/turtle-agent` | the CLI (`login`, `fleet`, capture tools including `capture events`) |
 
 Design and implementation plan: `docs/superpowers/`.
 

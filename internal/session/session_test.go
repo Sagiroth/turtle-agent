@@ -47,6 +47,13 @@ func startKeyed(t *testing.T, opts Options, clientKey, serverKey []byte) *harnes
 // startWrapped is startKeyed with the client's end of the pipe wrapped (nil: as is).
 func startWrapped(t *testing.T, opts Options, clientKey, serverKey []byte, wrap func(net.Conn) net.Conn) *harness {
 	t.Helper()
+	return startTapped(t, opts, clientKey, serverKey, wrap, nil)
+}
+
+// startTapped is startWrapped with a tap on the client's connection (nil: none), the way
+// --capture records one.
+func startTapped(t *testing.T, opts Options, clientKey, serverKey []byte, wrap func(net.Conn) net.Conn, tap worldconn.Tap) *harness {
+	t.Helper()
 	cli, srvConn := net.Pipe()
 	t.Cleanup(func() { cli.Close(); srvConn.Close() })
 	ch := make(chan *worldtest.Server, 1)
@@ -61,7 +68,7 @@ func startWrapped(t *testing.T, opts Options, clientKey, serverKey []byte, wrap 
 	if wrap != nil {
 		nc = wrap(cli)
 	}
-	conn, err := worldconn.Client(nc, "TESTACC", clientKey, nil)
+	conn, err := worldconn.Client(nc, "TESTACC", clientKey, tap)
 	if err != nil {
 		<-ch // the server goroutine reports through t; let it finish before the test does
 		t.Fatal(err)

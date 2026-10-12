@@ -47,6 +47,7 @@ type walkState struct {
 	start    time.Time // when base yards had been walked
 	base     float64
 	speed    float32
+	sent     float64 // walked when the last walk packet was sent: where an aborted walk stops
 	nextBeat time.Time
 	done     chan error
 	onMesh   bool  // the end is a navmesh floor point: arriving there settles z
@@ -487,12 +488,14 @@ func (s *Session) tickWalk() error {
 		} else {
 			s.zUnknown = s.zUnknown || math.Abs(float64(w.to[2]-w.pts[0][2])) > 0.5
 		}
-		s.walkDist = w.walked(now) // the whole path, as walk_path counts an arrival
 		mi := s.moveInfoAt(s.currentFlags(), now)
 		s.mu.Unlock()
 		if err := s.checkStep(mi); err != nil {
 			return s.abortWalk(w, err)
 		}
+		s.mu.Lock()
+		s.walkDist = w.walked(now) // the whole path, as walk_path counts an arrival, once checkStep passes the stop
+		s.mu.Unlock()
 		err := s.sendMove(opcode.MSGMoveStop, mi, game.BuildMovement(mi))
 		w.done <- err
 		return err
@@ -509,14 +512,16 @@ func (s *Session) tickWalk() error {
 		s.walk = nil
 		return s.abortWalk(w, err)
 	}
-	return s.sendMove(opcode.MSGMoveHeartbeat, mi, game.BuildMovement(mi))
+	return s.sendWalkMove(opcode.MSGMoveHeartbeat, mi, game.BuildMovement(mi), now)
 }
 
 // abortWalk ends a walk whose next step would break the anticheat's bound: it stops where
-// the server last had the player, a step of zero length, and reports why. s.walk is nil.
+// the server last had the player, a step of zero length, and reports why. walkDist is how far
+// along the path that was: the refused step and the rest of the path are not counted. s.walk is nil.
 func (s *Session) abortWalk(w *walkState, reason error) error {
 	s.mu.Lock()
 	s.pos[0], s.pos[1], s.pos[2] = s.last.pos[0], s.last.pos[1], s.last.pos[2]
+	s.walkDist = w.sent
 	mi := s.moveInfoAt(s.currentFlags(), s.now())
 	s.mu.Unlock()
 	err := s.sendMove(opcode.MSGMoveStop, mi, game.BuildMovement(mi))
@@ -703,7 +708,7 @@ func (s *Session) speedHandler(op, ack uint16) handler {
 		mi := s.moveInfoAt(s.currentFlags(), now)
 		s.mu.Unlock()
 		speed := c.Speed
-		return s.sendMove(ack, mi, game.BuildMovementChangeAck(self, c.Counter, mi, &speed))
+		return s.sendWalkMove(ack, mi, game.BuildMovementChangeAck(self, c.Counter, mi, &speed), now)
 	}
 }
 

@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -18,6 +19,9 @@ func (s *Session) registerChat() {
 	s.handlers[opcode.SMSGCreatureQueryResponse] = s.onCreatureQueryResponse
 }
 
+// chatKind maps a chat type to its event kind. For whisper_inform the server puts the
+// recipient's GUID in the sender field (MasterPlayerChat.cpp:58), so such an event's
+// Source is the recipient, as the client shows it and headless.py expects.
 func chatKind(t game.ChatType) string {
 	switch t {
 	case game.ChatWhisper, game.ChatWhisperInform, game.ChatMonsterWhisper, game.ChatRaidBossWhisper:
@@ -77,12 +81,21 @@ func (s *Session) Chat(ctx context.Context, typ, text, to string) error {
 	return s.send(ctx, opcode.CMSGMessagechat, body)
 }
 
-// GM sends a GM or .bot command as say chat; the server runs "."-prefixed chat as a
-// command and never broadcasts it (ChatHandler.cpp:83-96).
+// GM sends a GM or .bot command as say chat, adding the leading "." when it is missing.
+// The server runs "."-prefixed say as a command instead of broadcasting it
+// (ChatHandler.cpp:83-96), but says aloud a lone "." and anything starting with ".."
+// (Chat.cpp:1769-1779), so GM refuses those. An account below GM level without
+// PlayerCommands also says it aloud (Chat.cpp:1773-1774); that is server configuration.
 func (s *Session) GM(ctx context.Context, text string) error {
 	text = strings.TrimSpace(text)
 	if !strings.HasPrefix(text, ".") {
 		text = "." + text
+	}
+	if strings.TrimSpace(text[1:]) == "" {
+		return errors.New("gm: empty command")
+	}
+	if strings.HasPrefix(text, "..") {
+		return fmt.Errorf("gm: %q starts with \"..\", which the server says aloud instead of running", text)
 	}
 	return s.Chat(ctx, "say", text, "")
 }

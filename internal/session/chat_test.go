@@ -51,7 +51,18 @@ func TestChatAndGMSendMessagechat(t *testing.T) {
 	if p := h.expect(opcode.CMSGMessagechat); !bytes.Equal(p.Body, packet.NewWriter().U32(0).U32(0).CString(".gm visible on").Bytes()) {
 		t.Fatalf("% X", p.Body)
 	}
+	// The server says these aloud instead of running them (Chat.cpp:1769-1779).
+	for _, bad := range []string{"", "  ", ".", " . ", "..gm on"} {
+		if err := h.s.GM(context.Background(), bad); err == nil {
+			t.Errorf("GM(%q) accepted", bad)
+		}
+	}
 	h.logout()
+	for _, p := range h.srv.Skipped() { // packets Expect passed over: a refused GM line would be one
+		if p.Op == opcode.CMSGMessagechat {
+			t.Fatalf("refused GM text was sent: % X", p.Body)
+		}
+	}
 }
 
 func TestChatBeforeWorldFails(t *testing.T) {
@@ -90,6 +101,11 @@ func TestNameWaitKeepsOrder(t *testing.T) {
 	h.send(opcode.SMSGMessagechat, chatBody(game.ChatSystem, 0, "second"))
 	h.expect(opcode.CMSGNameQuery) // never answered
 	time.Sleep(400 * time.Millisecond)
+	// The wait ran out on a tick, not at logout: both are already logged, in order.
+	if p := h.s.Log().Read(events.Query{Kinds: events.ChatKinds}); len(p.Events) != 2 ||
+		p.Events[0].Text != "first" || p.Events[0].Source != "" || p.Events[1].Text != "second" {
+		t.Fatalf("before logout: %+v", p.Events)
+	}
 	h.send(opcode.SMSGChatPlayerNotFound, []byte("Nobody\x00"))
 	h.logout()
 	p := h.s.Log().Read(events.Query{Kinds: events.ChatKinds})
@@ -151,4 +167,37 @@ func TestCreatureTargetNameComesFromQuery(t *testing.T) {
 		c[2].Target != "creature 300" || c[0].Data["type"] != "monster_emote" {
 		t.Fatalf("%+v", c)
 	}
+}
+
+// waitText polls the log until an event with text appears or within runs out.
+func waitText(h *harness, text string, within time.Duration) (events.Event, bool) {
+	deadline := time.Now().Add(within)
+	for {
+		for _, e := range h.s.Log().Read(events.Query{Kinds: events.ChatKinds, Limit: events.MaxLimit}).Events {
+			if e.Text == text {
+				return e, true
+			}
+		}
+		if time.Now().After(deadline) {
+			return events.Event{}, false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A name query that went unanswered for a whole wait does not stall the next event
+// from that GUID again until the query may be repeated.
+func TestUnansweredNameDoesNotStallAgain(t *testing.T) {
+	h := start(t, Options{NamesWait: time.Second})
+	h.enterWorld()
+	h.send(opcode.SMSGMessagechat, chatBody(game.ChatWhisper, 0x77, "a"))
+	h.expect(opcode.CMSGNameQuery) // never answered
+	if _, ok := waitText(h, "a", 3*time.Second); !ok {
+		t.Fatal(`"a" never logged`)
+	}
+	h.send(opcode.SMSGMessagechat, chatBody(game.ChatWhisper, 0x77, "b"))
+	if e, ok := waitText(h, "b", 500*time.Millisecond); !ok || e.Source != "" {
+		t.Fatalf(`"b" stalled behind the unanswered name: %+v %v`, e, ok)
+	}
+	h.logout()
 }

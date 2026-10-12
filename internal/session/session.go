@@ -336,7 +336,7 @@ func (s *Session) emit(e events.Event) {
 		e.Time = time.Now()
 	}
 	s.fillNames(&e)
-	s.names.waiting = append(s.names.waiting, pendingEvent{e: e, until: e.Time.Add(s.opts.NamesWait)})
+	s.names.waiting = append(s.names.waiting, pendingEvent{e: e, until: time.Now().Add(s.opts.NamesWait)})
 	s.flushNames(time.Now())
 }
 

@@ -58,6 +58,26 @@ const (
 	KindMount       = "mount"        // UNIT_FIELD_MOUNTDISPLAYID went to or from 0: data.mounted
 	KindMountResult = "mount_result" // SMSG_MOUNTRESULT and SMSG_DISMOUNTRESULT: data.result
 	KindStandState  = "stand_state"  // the stand state changed (sit while eating or drinking): data.state
+	// Vendors: a list, and the result of each buy and sell.
+	KindVendorList       = "vendor_list"        // SMSG_LIST_INVENTORY
+	KindVendorBuy        = "vendor_buy"         // SMSG_BUY_ITEM: the purchase went through
+	KindVendorBuyFailed  = "vendor_buy_failed"  // SMSG_BUY_FAILED
+	KindVendorSell       = "vendor_sell"        // the sold item left the bags (the core sends no packet for a sale)
+	KindVendorSellFailed = "vendor_sell_failed" // SMSG_SELL_ITEM
+	// Trainers: a list, and the result of each training.
+	KindTrainerList    = "trainer_list"    // SMSG_TRAINER_LIST
+	KindTrainerTrained = "trainer_trained" // SMSG_TRAINER_BUY_SUCCEEDED
+	KindTrainerFailed  = "trainer_failed"  // SMSG_TRAINER_BUY_FAILED
+	// Quests: the panels an NPC opens, and the result of each accept, hand-in and abandon.
+	KindQuestList         = "quest_list"          // SMSG_QUESTGIVER_QUEST_LIST
+	KindQuestDetails      = "quest_details"       // SMSG_QUESTGIVER_QUEST_DETAILS
+	KindQuestRequestItems = "quest_request_items" // SMSG_QUESTGIVER_REQUEST_ITEMS
+	KindQuestOfferReward  = "quest_offer_reward"  // SMSG_QUESTGIVER_OFFER_REWARD
+	KindQuestAccepted     = "quest_accepted"      // the quest appeared in the quest log
+	KindQuestRewarded     = "quest_rewarded"      // SMSG_QUESTGIVER_QUEST_COMPLETE
+	KindQuestAbandoned    = "quest_abandoned"     // the quest left the quest log
+	KindQuestError        = "quest_error"         // SMSG_QUESTGIVER_QUEST_INVALID, _FAILED or SMSG_QUESTLOG_FULL
+	KindQuestUpdate       = "quest_update"        // SMSG_QUESTUPDATE_*: progress, completion or failure
 )
 
 // ChatKinds is what the chat_log method returns.

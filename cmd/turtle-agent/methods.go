@@ -228,6 +228,7 @@ func registerMethodsFor(srv *rpc.Server, cur func() *session.Session) {
 	registerSocialMethods(srv, cur)
 	registerGroupMethods(srv, cur)
 	registerItemMethods(srv, cur)
+	registerNPCMethods(srv, cur)
 }
 
 // readEvents long-polls up to waitMS (at most 25 s) until a matching event exists. A

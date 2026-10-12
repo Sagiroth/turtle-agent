@@ -29,9 +29,9 @@ import (
 // addonStepMS is how often the real clock ticks the addon (OnUpdate) and feeds it new events.
 const addonStepMS = 100
 
+// addonStartParams: the interpreter (lua5.1 from PATH) and the addon checkout (settings
+// tbm_addon_dir, or the pinned cache) are not the caller's to choose.
 type addonStartParams struct {
-	Dir   string `json:"dir,omitempty"`   // the addon checkout; default $TBM_ADDON_DIR, then the pinned .cache copy
-	Lua   string `json:"lua,omitempty"`   // the interpreter; default lua5.1
 	Clock string `json:"clock,omitempty"` // real (default): ticks with the wall clock; manual: only addon_tick advances it
 }
 
@@ -90,7 +90,8 @@ type addonTickResult struct {
 
 // addonRunner is the one addon host of an agent.
 type addonRunner struct {
-	cur func() *session.Session
+	cur      func() *session.Session
+	addonDir string // from the settings; empty: the pinned cache
 
 	mu       sync.Mutex
 	h        *addonhost.Host
@@ -103,6 +104,7 @@ type addonRunner struct {
 	stopPump context.CancelFunc
 	pumpDone chan struct{}
 	err      error // why the host stopped on its own
+	dropped  int   // times the log had already dropped events the addon had not seen
 	// during a click: the sends and lines since it
 	collect     bool
 	clickSent   []addonSent
@@ -113,8 +115,9 @@ type addonRunner struct {
 
 const maxAddonSent = 50
 
-func registerAddonHost(srv *rpc.Server, cur func() *session.Session) {
-	r := &addonRunner{cur: cur}
+// registerAddonHost registers the addon_* methods and returns the func that stops the host.
+func registerAddonHost(srv *rpc.Server, cur func() *session.Session, dir string) func() {
+	r := &addonRunner{cur: cur, addonDir: dir}
 	srv.Register("addon_start", rpc.Typed(func(ctx context.Context, p addonStartParams) (addonStartResult, error) {
 		return r.start(p)
 	}))
@@ -130,18 +133,16 @@ func registerAddonHost(srv *rpc.Server, cur func() *session.Session) {
 	srv.Register("addon_click", rpc.Typed(func(ctx context.Context, p addonClickParams) (addonClickResult, error) {
 		return r.click(ctx, p)
 	}))
+	return func() { r.stop() }
 }
 
-// addonDir picks the addon checkout: the argument, $TBM_ADDON_DIR, or the copy
+// addonDir is the addon checkout: the settings' tbm_addon_dir, else the copy
 // tools/tbmcontract/fetch.sh keeps of the commit the button table was made from.
 func addonDir(dir string) (string, error) {
 	if dir == "" {
-		dir = os.Getenv("TBM_ADDON_DIR")
-	}
-	if dir == "" {
 		dir = filepath.Join(".cache", "tbmcontract", "addon-"+tbm.AddonCommit)
 		if _, err := os.Stat(filepath.Join(dir, "TortoiseBotsManager.toc")); err != nil {
-			return "", fmt.Errorf("no addon: pass dir, set TBM_ADDON_DIR, or run tools/tbmcontract/fetch.sh in the agent's working directory (looked for %s)", dir)
+			return "", fmt.Errorf("no addon: set tbm_addon_dir in the settings, or run tools/tbmcontract/fetch.sh in the agent's working directory (looked for %s)", dir)
 		}
 	}
 	return filepath.Abs(dir)
@@ -161,17 +162,17 @@ func (r *addonRunner) start(p addonStartParams) (addonStartResult, error) {
 	default:
 		return addonStartResult{}, fmt.Errorf("clock %q: use real or manual", p.Clock)
 	}
-	dir, err := addonDir(p.Dir)
+	dir, err := addonDir(r.addonDir)
 	if err != nil {
 		return addonStartResult{}, err
 	}
-	h, err := addonhost.Start(p.Lua, dir, r.perform)
+	h, err := addonhost.Start(dir, r.perform)
 	if err != nil {
 		return addonStartResult{}, err
 	}
 	s := r.cur()
 	log := s.Log()
-	r.h, r.dir, r.manual, r.err = h, dir, manual, nil
+	r.h, r.dir, r.manual, r.err, r.dropped = h, dir, manual, nil, 0
 	r.cursor, r.sent, r.lastTick = log.Last(), nil, time.Now()
 	w := r.worldJSON(s)
 	r.world = w
@@ -205,7 +206,7 @@ func (r *addonRunner) stop() error {
 	if h == nil {
 		return errors.New("the addon host is not running")
 	}
-	if cancel != nil {
+	if cancel != nil && done != nil {
 		cancel()
 		<-done
 	}
@@ -340,16 +341,24 @@ func (r *addonRunner) step(ms int) error {
 	s := r.cur()
 	log := s.Log()
 	var batch []addonhost.Event
+	var batchEnd uint64 // the seq of the last event in batch
+	// flush feeds the batch; the cursor moves past it only once the addon has it.
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
 		}
-		_, err := r.call("events", map[string]any{"events": batch})
+		if _, err := r.call("events", map[string]any{"events": batch}); err != nil {
+			return err
+		}
 		batch = nil
-		return err
+		r.cursor = batchEnd
+		return nil
 	}
 	for {
 		p := log.Read(events.Query{Since: r.cursor, Limit: events.MaxLimit})
+		if p.Dropped {
+			r.dropped++
+		}
 		for _, e := range p.Events {
 			if addonhost.GroupChanged(e) {
 				if err := flush(); err != nil {
@@ -358,13 +367,14 @@ func (r *addonRunner) step(ms int) error {
 				if err := r.pushWorld(s, true); err != nil {
 					return err
 				}
+				r.cursor = e.Seq
 				continue
 			}
 			ev, ok := addonhost.GameEvent(e)
 			if !ok {
 				continue
 			}
-			batch = append(batch, ev)
+			batch, batchEnd = append(batch, ev), e.Seq
 			if r.collect && (ev.Event == "CHAT_MSG_SYSTEM" || ev.Event == "CHAT_MSG_ADDON") {
 				line := ev.Args[0]
 				if ev.Event == "CHAT_MSG_ADDON" {
@@ -374,13 +384,13 @@ func (r *addonRunner) step(ms int) error {
 				r.lastLineAt = time.Now()
 			}
 		}
-		r.cursor = p.Next
+		if err := flush(); err != nil {
+			return err
+		}
+		r.cursor = p.Next // the events after the last fed one were none of the addon's
 		if !p.More {
 			break
 		}
-	}
-	if err := flush(); err != nil {
-		return err
 	}
 	if err := r.pushWorld(s, false); err != nil {
 		return err
@@ -500,7 +510,9 @@ func (r *addonRunner) stateLocked() (json.RawMessage, error) {
 	if r.manual {
 		clock = "manual"
 	}
-	m["host"], _ = json.Marshal(map[string]any{"dir": r.dir, "clock": clock, "cursor": r.cursor})
+	// dropped: how often the event log had already dropped events the addon never got (the
+	// log is a bounded ring); the addon's view may then miss lines.
+	m["host"], _ = json.Marshal(map[string]any{"dir": r.dir, "clock": clock, "cursor": r.cursor, "dropped": r.dropped})
 	sent := r.sent
 	if sent == nil {
 		sent = []addonSent{}

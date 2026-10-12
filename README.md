@@ -49,7 +49,8 @@ Only `realmd` and `accounts` are required. `rpc` must be a loopback address. `re
 realm list returns; `rpc_token` and `rpc_auth` set the [RPC authentication](#rpc-authentication); `bots`, `spot` and `test_spell` are optional hints for scripts. `mmaps_dir` is a folder holding
 copies of the server's navmesh files, for `path_to` and `walk_path` (see [Navmesh walking](#navmesh-walking)), and to
 land falls and knockbacks on the ground (see [Falling](#falling-and-knockbacks)). `addons` replaces the addon list sent
-at world login (see [What the server sees](#what-the-server-sees)).
+at world login (see [What the server sees](#what-the-server-sees)). `tbm_addon_dir` is the TortoiseBotsManager checkout
+the [addon host](#addon-host) runs (default: the pinned copy `tools/tbmcontract/fetch.sh` keeps in `.cache/`).
 
 Log a character in and keep it online with the RPC server running:
 
@@ -257,10 +258,10 @@ Python (`urllib`): read the token file, strip it, and add `"Authorization": "Bea
 | `tbm_buttons` | `tab` (Fight, Camp, Party, Roster, Guild, Raid, BotPanel; default all) | `addon_commit`, `send_delay_ms`, `poll_after_cmd_ms`, `action_timeout_ms`, `buttons[]` (`name`, `label`, `tab`, `command`, `bot_command`, `args`, `optional`, `scope`, `toggle`, `needs_enemy`, `pull_seconds`, `reply`, `intent`, `ok`, `fail`, `follow_up`, `mini_bar`, `requires_cap`, `multi`, `source`) |
 | `tbm_click` | `button` (`Fight.AoE`), `args` (`state`, `bot`, `name`, `mark`, `seconds`, `bag`, `slot`, …), `transport` (auto, chat, addon), `wait_ms` (default 8000), `force`, `follow_up` | `since`, `next`, `button`, `scope`, `sent` (`transport`, `text`, `channel`, `prefix`), `transport_reason`, `refreshed`, `reply` (`kind` ack, err, text, inventory, snapshot or timeout; `ok`, `line`, `ack`, `acks`, `err`, `lines`), `follow_up` (the roster response) |
 | `tbm_send` | `command` (with or without `.bot`), `transport`, `wait_ms` | like `tbm_click` without `button` and `scope`: the reply is the first ACK/ERR or roster response |
-| `addon_start` | `dir` (the addon checkout; default `$TBM_ADDON_DIR`, then `.cache/tbmcontract/addon-<pinned commit>`), `lua` (default lua5.1), `clock` (real, the default, or manual) | `dir`, `version` (the .toc version), `files`, `clock`, `sent` (what the addon sent while loading) |
+| `addon_start` | `clock` (real, the default, or manual); the addon is the settings' `tbm_addon_dir`, else `.cache/tbmcontract/addon-<pinned commit>` under the working directory, run by `lua5.1` from PATH | `dir`, `version` (the .toc version), `files`, `clock`, `sent` (what the addon sent while loading) |
 | `addon_stop` | | |
 | `addon_click` | `button` (a `tbm_buttons` name or label), or `tab` + `label` for any widget; `bot` (BotPanel; the Party row), `name`/`names` (Roster and Guild rows to tick), `mark` (CC marks row), `row`, `view` (BotPanel Gear, Bags, Behaviour), `bag` + `slot` (BotPanel items), `before`, `force`, `wait_ms` (real clock; default 8000, 0 = no wait) | `clicked` (each widget pressed and `/tbm` typed), `sent[]` (`mono_ms`, `kind` addon, chat or target, `channel`, `prefix`, `text`, `to`, `error`), `reply` (server lines the addon got), `timed_out`, `state` (as `addon_state`) |
-| `addon_state` | | `server` (`version`, `caps`, `transport` PARTY or null for chat), `window` (`shown`, `mode`, `tab`, `scope`), `status`, `switches[]` (`key`, `text`, `lamp` green, grey or gold, `state` on, off, mixed or unknown, `enabled`), `bots` (BOTSTATE by name), `roster[]`, `roster_shown[]` (Roster tab open), `claimed[]`, `cc_marks`, `party_rows[]` (Party tab open), `bot_panel` (open: `bot`, `view`, `title`, `sub`, `money`, `state`, `inventory`, `behaviour[]`), `raid` (Raid tab open), `last_ack`, `last_error`, `chat[]` (what reached the chat frame), `lua_errors[]`, `clock`, `sent[]` (last 50), `host` |
+| `addon_state` | | `server` (`version`, `caps`, `transport` PARTY or null for chat), `window` (`shown`, `mode`, `tab`, `scope`), `status`, `switches[]` (`key`, `text`, `lamp` green, grey or gold, `state` on, off, mixed or unknown, `enabled`), `bots` (BOTSTATE by name), `roster[]`, `roster_shown[]` (Roster tab open), `claimed[]`, `cc_marks`, `party_rows[]` (Party tab open), `bot_panel` (open: `bot`, `view`, `title`, `sub`, `money`, `state`, `inventory`, `behaviour[]`), `raid` (Raid tab open), `last_ack`, `last_error`, `chat[]` (what reached the chat frame), `lua_errors[]`, `clock`, `sent[]` (last 50), `host` (`dir`, `clock`, `cursor`, `dropped`: how often the event log had already dropped events before the addon got them) |
 | `addon_tick` | `ms` (1-120000) | `clock` (the addon's `GetTime()`), `sent[]` |
 | `join_channel` / `leave_channel` | `name`, `password` / `name` | |
 | `gossip_hello` | `guid`, `wait_ms` | `since`, `event`: the first answer within `wait_ms`: the menu (`gossip`), `gossip_complete`, or what the NPC opens at once (`quest_list`, `quest_details`, `quest_request_items`, `quest_offer_reward`, `vendor_list`, `trainer_list`) |
@@ -675,19 +676,29 @@ still need the real client; everything the addon decides (transport, toggles, la
 panel, the ACK/ERR it keeps) runs from the addon's own code.
 
 ```sh
-tools/tbmcontract/fetch.sh            # once: the addon at the pinned commit, into .cache/ (or set TBM_ADDON_DIR)
+tools/tbmcontract/fetch.sh            # once: the addon at the pinned commit, into .cache/ (or set tbm_addon_dir)
 r addon_start '{}'                    # loads the addon; it sends its handshake (".bot help") as on login
 r addon_click '{"button":"Fight.AoE"}' # /tbm, the Fight tab, then the switch's own OnClick; waits for the ACK
 r addon_state '{}' | jq '.switches'   # [{"key":"aoe","text":"AoE Off","lamp":"grey","state":"off",...}, ...]
 ```
 
 - How it runs: `addon_start` extracts `internal/addonhost/lua/` (the host, a small JSON codec and the 1.12 widget
-  mock shared with the TBM contract test) to a temp directory and starts `lua5.1 host.lua <addon dir>`, which loads
-  the `.toc` files in order and fires `ADDON_LOADED`, `PLAYER_LOGIN` and `PLAYER_ENTERING_WORLD`. The agent and the
-  sidecar speak one JSON object per line over stdin/stdout. A sidecar rather than a Go Lua VM: the addon runs on the
-  C Lua 5.1 the contract test uses, the module keeps no dependencies, and an addon error or endless loop cannot take
-  the agent down (a call that does not answer in 10 s kills the sidecar; `addon_stop`, then `addon_start` again).
-  The sidecar exits with the agent. Saved variables start empty, like a fresh install.
+  mock shared with the TBM contract test) to a temp directory, starts `lua5.1 host.lua <addon dir>` and removes the
+  directory once the host has read it. The host loads the `.toc` files in order and fires `ADDON_LOADED`,
+  `PLAYER_LOGIN` and `PLAYER_ENTERING_WORLD`. Requests go in on stdin; replies come back on file descriptor 3, one
+  JSON object per line, so nothing printed to stdout can pass for a reply (a line that is not JSON kills the
+  sidecar). The RPC caller cannot pick the interpreter or the checkout: `lua5.1` from PATH, the addon from the
+  settings or the pinned cache. A sidecar rather than a Go Lua VM: the addon runs on the C Lua 5.1 the contract test
+  uses, the module keeps no dependencies, and an addon error or endless loop cannot take the agent down (a call that
+  does not answer in 10 s of the addon's own time, sending excluded, kills the sidecar; `addon_stop`, then
+  `addon_start` again). Saved variables start empty, like a fresh install.
+- Sandbox: each addon file runs with `setfenv` in an environment holding only the mocked WoW API, the 1.12 short
+  names (`getn`, `strfind`, `format`, …), `string` (without `dump`), `table`, `math`, a formatting-only `date`, and
+  `print`, which writes to the chat frame. `os`, `io`, `loadfile`, `dofile`, `loadstring`, `require`, `package`,
+  `debug`, `getfenv`/`setfenv` are not there, and the `.toc` may not name files outside the addon. It keeps an addon
+  from reaching the agent's machine by accident or by a hostile checkout; it is not a limit on CPU or memory.
+- Lifetime: the sidecar ends with `addon_stop`, when the agent logs out or exits (the agent stops it after its last
+  RPC call), when its stdin closes, and on Linux also when the agent is killed (`PR_SET_PDEATHSIG`).
 - Into the addon: every `system` event as `CHAT_MSG_SYSTEM` (the raw text), `addon` events as `CHAT_MSG_ADDON`
   (prefix, text, the channel upper-cased, sender), whispers to the player as `CHAT_MSG_WHISPER`, and `in_world` or
   `new_world` as `PLAYER_ENTERING_WORLD`. The player, target, party1-4 and raid1-40 units come from `status`,

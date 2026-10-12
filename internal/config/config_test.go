@@ -115,6 +115,15 @@ func TestMmapsDir(t *testing.T) {
 	}
 }
 
+func TestTBMAddonDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s, err := Load(writeSettings(t, 0o600, `{"realmd":"h:1","accounts":{"a":"b"},"tbm_addon_dir":"~/tbm"}`))
+	if err != nil || s.TBMAddonDir != filepath.Join(home, "tbm") {
+		t.Fatalf("%q %v", s.TBMAddonDir, err)
+	}
+}
+
 func TestRPCAuthSettings(t *testing.T) {
 	for body, want := range map[string]bool{
 		`{"realmd":"h:1","accounts":{"a":"b"}}`:                                true,

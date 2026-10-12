@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/pjerra/turtle-agent/internal/opcode"
+	"github.com/pjerra/turtle-agent/internal/session"
 	"github.com/pjerra/turtle-agent/internal/tbm"
 )
 
@@ -75,11 +76,14 @@ func switchOf(st map[string]any, key string) map[string]any {
 	return nil
 }
 
-func addonStart(r *agentRig, dir, clock string) map[string]any {
-	b, _ := json.Marshal(map[string]string{"dir": dir, "clock": clock})
-	res := r.ok("addon_start", string(b))
-	r.t.Cleanup(func() { r.call("addon_stop", `{}`) })
-	return res
+// addonRig is a rig whose settings point addon_start at the addon checkout dir.
+func addonRig(t *testing.T, dir string) *agentRig {
+	return newRigWith(t, session.Options{}, [3]float32{1, 2, 3}, methodOptions{AddonDir: dir})
+}
+
+func addonStart(r *agentRig, clock string) map[string]any {
+	b, _ := json.Marshal(map[string]string{"clock": clock})
+	return r.ok("addon_start", string(b))
 }
 
 // The issue's done-criterion, offline: hire a bot (the server groups it and reports it in
@@ -88,8 +92,8 @@ func addonStart(r *agentRig, dir, clock string) map[string]any {
 // roster agrees.
 func TestAddonHostHireAndToggleAoE(t *testing.T) {
 	dir := testAddonDir(t)
-	r := newRig(t)
-	start := addonStart(r, dir, "manual")
+	r := addonRig(t, dir)
+	start := addonStart(r, "manual")
 	if sent := start["sent"].([]any); len(sent) != 1 || sent[0].(map[string]any)["text"] != ".bot help" {
 		t.Fatalf("handshake %v", start)
 	}
@@ -171,8 +175,8 @@ func TestAddonHostHireAndToggleAoE(t *testing.T) {
 // The real clock: the pump ticks the addon, and a click waits for its reply.
 func TestAddonHostRealClockClickWaitsForReply(t *testing.T) {
 	dir := testAddonDir(t)
-	r := newRig(t)
-	addonStart(r, dir, "")
+	r := addonRig(t, dir)
+	addonStart(r, "")
 	r.expectBody(opcode.CMSGMessagechat, say(".bot help"))
 	ch := r.callAsync("addon_click", `{"button":"Camp.Rest","wait_ms":5000}`)
 	r.expectBody(opcode.CMSGMessagechat, say(".bot roster")) // the window opens
@@ -193,11 +197,17 @@ func TestAddonHostRealClockClickWaitsForReply(t *testing.T) {
 
 func TestAddonHostClickErrors(t *testing.T) {
 	dir := testAddonDir(t)
-	r := newRig(t)
+	r := addonRig(t, dir)
 	if out := r.call("addon_state", `{}`); out["error"] == nil {
 		t.Fatalf("state before start: %v", out)
 	}
-	addonStart(r, dir, "manual")
+	// The caller cannot choose the interpreter or the checkout.
+	for _, p := range []string{`{"lua":"/bin/sh"}`, `{"dir":"/tmp"}`} {
+		if out := r.call("addon_start", p); out["error"] == nil {
+			t.Fatalf("addon_start %s: %v", p, out)
+		}
+	}
+	addonStart(r, "manual")
 	if out := r.call("addon_start", `{"clock":"manual"}`); out["error"] == nil {
 		t.Fatal("second start")
 	}

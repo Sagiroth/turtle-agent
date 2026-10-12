@@ -79,6 +79,16 @@ spin:SetScript("OnUpdate", function() if TB.spin then while true do end end end)
 
 func startFake(t *testing.T, sink Sink) *Host {
 	t.Helper()
+	h, err := loadFake(t, fakeAddon, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// loadFake starts the host on an addon of one file holding src and loads it.
+func loadFake(t *testing.T, src string, sink Sink) (*Host, error) {
+	t.Helper()
 	if _, err := exec.LookPath(DefaultLua); err != nil {
 		if os.Getenv("TBM_ADDON_HOST_STRICT") == "1" {
 			t.Fatal("lua5.1 not installed")
@@ -87,16 +97,14 @@ func startFake(t *testing.T, sink Sink) *Host {
 	}
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "TortoiseBotsManager.toc"), []byte("## Version: fake\nFake.lua\n"), 0o600)
-	os.WriteFile(filepath.Join(dir, "Fake.lua"), []byte(fakeAddon), 0o600)
-	h, err := Start("", dir, sink)
+	os.WriteFile(filepath.Join(dir, "Fake.lua"), []byte(src), 0o600)
+	h, err := Start(dir, sink)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { h.Close() })
-	if _, _, err := h.Call("load", map[string]any{"in_world": true}); err != nil {
-		t.Fatal(err)
-	}
-	return h
+	_, _, err = h.Call("load", map[string]any{"in_world": true})
+	return h, err
 }
 
 func TestHostEventsOutsAndClicks(t *testing.T) {
@@ -157,5 +165,54 @@ func TestHostKillsAStuckAddon(t *testing.T) {
 	}
 	if _, _, err := h.Call("state", nil); !errors.Is(err, ErrStopped) {
 		t.Fatalf("after: %v", err)
+	}
+}
+
+// The addon runs in a sandbox: nothing outside the WoW API and safe Lua reaches the host.
+func TestHostSandbox(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "pwned")
+	for name, src := range map[string]string{
+		"os.execute":  `os.execute("touch ` + marker + `")`,
+		"io.open":     `io.open("` + marker + `", "w"):write("x")`,
+		"loadfile":    `loadfile("/etc/hostname")()`,
+		"require":     `require("os")`,
+		"dofile":      `dofile("/etc/hostname")`,
+		"loadstring":  `loadstring("return 1")()`,
+		"getfenv":     `getfenv(0).os.execute("touch ` + marker + `")`,
+		"string.dump": `string.dump(print)`,
+		"_G escape":   `_G.os.execute("touch ` + marker + `")`,
+	} {
+		_, err := loadFake(t, "TortoiseBots = {}\n"+src, nil)
+		if err == nil || !strings.Contains(err.Error(), "raised while loading") {
+			t.Errorf("%s: %v, want a load error", name, err)
+		}
+		if _, statErr := os.Stat(marker); statErr == nil {
+			t.Fatalf("%s: the addon wrote %s", name, marker)
+		}
+	}
+	// What the addon may use works: the WoW short names, date, and print (to the chat frame).
+	h, err := loadFake(t, `TortoiseBots = { stamp = date("%H:%M"), n = getn({1, 2}), at = strfind("abc", "b") }
+print("hello", 1)
+io = nil`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.Call("tick", map[string]any{"ms": 10}); err != nil {
+		t.Fatalf("host after print: %v", err)
+	}
+}
+
+// Lua writing to stdout cannot pass for a frame: the protocol is on its own descriptor.
+func TestHostStdoutIsNotTheProtocol(t *testing.T) {
+	h, err := loadFake(t, `TortoiseBots = {}
+local f = CreateFrame("Frame", "Out")
+f:RegisterEvent("CHAT_MSG_SYSTEM")
+f:SetScript("OnEvent", function() print('{"id":99,"result":{}}'); SendAddonMessage("TBM", arg1, "PARTY") end)`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, outs, err := h.Call("events", map[string]any{"events": []Event{{"CHAT_MSG_SYSTEM", []string{"x"}}}})
+	if err != nil || len(outs) != 1 || outs[0].Text != "x" {
+		t.Fatalf("%v %+v", err, outs)
 	}
 }

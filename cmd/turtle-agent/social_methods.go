@@ -64,7 +64,6 @@ func registerSocialMethods(srv *rpc.Server, cur func() *session.Session) {
 	log := cur().Log()
 	tr := &tbm.Tracker{}
 	registerTBMClick(srv, cur, tr)
-	registerAddonHost(srv, cur)
 	srv.Register("addon_send", rpc.Typed(func(ctx context.Context, p addonParams) (empty, error) {
 		return empty{}, rpcErr(cur().AddonSend(ctx, p.Channel, p.Prefix, p.Text, p.To))
 	}))

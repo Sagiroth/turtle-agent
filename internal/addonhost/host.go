@@ -67,19 +67,17 @@ type Host struct {
 	waitMu   sync.Mutex
 	err      error // why the process ended
 	stderr   *tail
-	dir      string // the extracted Lua files
 	sink     Sink
 	next     int
 }
 
-// Start extracts the host scripts and runs lua with them on the addon in addonDir.
-func Start(lua, addonDir string, sink Sink) (*Host, error) {
-	if lua == "" {
-		lua = DefaultLua
-	}
-	path, err := exec.LookPath(lua)
+// Start runs lua5.1 (from PATH) on the extracted host scripts and the addon in addonDir.
+// The scripts' temp directory is removed as soon as the host has read them. Replies come on
+// the child's file descriptor 3; its stdout and stderr only feed Stderr.
+func Start(addonDir string, sink Sink) (*Host, error) {
+	path, err := exec.LookPath(DefaultLua)
 	if err != nil {
-		return nil, fmt.Errorf("%s not found (apt install lua5.1): %w", lua, err)
+		return nil, fmt.Errorf("%s not found (apt install lua5.1): %w", DefaultLua, err)
 	}
 	if _, err := os.Stat(filepath.Join(addonDir, "TortoiseBotsManager.toc")); err != nil {
 		return nil, fmt.Errorf("no TortoiseBotsManager.toc in %s", addonDir)
@@ -88,34 +86,38 @@ func Start(lua, addonDir string, sink Sink) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer os.RemoveAll(dir) // read by the time hello answers (or the start failed)
 	for _, name := range []string{"host.lua", "json.lua", "mock.lua"} {
 		b, err := luaFiles.ReadFile("lua/" + name)
 		if err == nil {
 			err = os.WriteFile(filepath.Join(dir, name), b, 0o600)
 		}
 		if err != nil {
-			os.RemoveAll(dir)
 			return nil, err
 		}
 	}
-	h := &Host{lines: make(chan []byte, 64), exited: make(chan struct{}), quit: make(chan struct{}), stderr: &tail{max: 4096}, dir: dir, sink: sink}
-	h.cmd = exec.Command(path, filepath.Join(dir, "host.lua"), addonDir)
-	h.cmd.Stderr = h.stderr
-	if h.stdin, err = h.cmd.StdinPipe(); err != nil {
-		os.RemoveAll(dir)
-		return nil, err
-	}
-	stdout, err := h.cmd.StdoutPipe()
+	protoR, protoW, err := os.Pipe()
 	if err != nil {
-		os.RemoveAll(dir)
 		return nil, err
 	}
-	if err := h.cmd.Start(); err != nil {
-		os.RemoveAll(dir)
+	h := &Host{lines: make(chan []byte, 64), exited: make(chan struct{}), quit: make(chan struct{}), stderr: &tail{max: 4096}, sink: sink}
+	h.cmd = exec.Command(path, filepath.Join(dir, "host.lua"), addonDir)
+	h.cmd.Stdout, h.cmd.Stderr = h.stderr, h.stderr
+	h.cmd.ExtraFiles = []*os.File{protoW} // fd 3 in the child
+	setDeathSignal(h.cmd)
+	if h.stdin, err = h.cmd.StdinPipe(); err != nil {
+		protoR.Close()
+		protoW.Close()
+		return nil, err
+	}
+	err = h.cmd.Start()
+	protoW.Close() // the child holds its copy; EOF on protoR once it exits
+	if err != nil {
+		protoR.Close()
 		return nil, err
 	}
 	go func() {
-		sc := bufio.NewScanner(stdout)
+		sc := bufio.NewScanner(protoR)
 		sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
 		for sc.Scan() {
 			select {
@@ -123,6 +125,7 @@ func Start(lua, addonDir string, sink Sink) (*Host, error) {
 			case <-h.quit:
 			}
 		}
+		protoR.Close()
 		err := h.cmd.Wait()
 		h.waitMu.Lock()
 		if err == nil {
@@ -132,6 +135,10 @@ func Start(lua, addonDir string, sink Sink) (*Host, error) {
 		h.waitMu.Unlock()
 		close(h.exited)
 	}()
+	if _, _, err := h.Call("hello", nil); err != nil {
+		h.Close()
+		return nil, err
+	}
 	return h, nil
 }
 
@@ -163,6 +170,8 @@ func (h *Host) Call(op string, params any) (json.RawMessage, []Out, error) {
 		return nil, nil, h.stopped()
 	}
 	var outs []Out
+	// The budget is the addon's own time: what the sink spends sending is added back.
+	deadline := time.Now().Add(CallTimeout)
 	timer := time.NewTimer(CallTimeout)
 	defer timer.Stop()
 	for {
@@ -175,15 +184,23 @@ func (h *Host) Call(op string, params any) (json.RawMessage, []Out, error) {
 				Error  string          `json:"error"`
 			}
 			if err := json.Unmarshal(line, &m); err != nil {
-				return nil, outs, fmt.Errorf("addon host wrote %q: %w", truncate(string(line), 200), err)
+				// The protocol has lost its framing: nothing later on it can be trusted.
+				h.kill()
+				return nil, outs, fmt.Errorf("%w: it wrote %q, not a JSON frame: %v", ErrStopped, truncate(string(line), 200), err)
 			}
 			if m.Out != "" {
 				var o Out
 				json.Unmarshal(line, &o)
 				if h.sink != nil {
+					began := time.Now()
 					if err := h.sink(o); err != nil {
 						o.Error = err.Error()
 					}
+					deadline = deadline.Add(time.Since(began))
+					if !timer.Stop() {
+						<-timer.C
+					}
+					timer.Reset(time.Until(deadline))
 				}
 				outs = append(outs, o)
 				continue
@@ -235,7 +252,7 @@ func (h *Host) Close() error {
 		h.kill()
 		<-h.exited
 	}
-	return os.RemoveAll(h.dir)
+	return nil
 }
 
 // Stderr is the tail of what the sidecar wrote to stderr.

@@ -113,16 +113,19 @@ type logoutResult struct {
 	Outcome string `json:"outcome"`
 }
 
-// registerMethods wires the spec's JSON-RPC methods (v1) to the session; later
-// milestones add their methods at the end of registerMethodsFor.
-func registerMethods(srv *rpc.Server, s *session.Session) {
-	registerMethodsFor(srv, func() *session.Session { return s })
+// methodOptions are the settings some methods need.
+type methodOptions struct {
+	// AddonDir is the TortoiseBotsManager checkout addon_start loads (settings tbm_addon_dir);
+	// empty means the pinned copy tools/tbmcontract/fetch.sh keeps under the working directory.
+	AddonDir string
 }
 
-// registerMethodsFor wires the methods to whatever session cur returns at each call, so
+// registerMethodsFor wires the spec's JSON-RPC methods, and every later milestone's, to whatever
+// session cur returns at each call, so
 // --reconnect can swap a new session in behind the same address. The sessions share one
-// event log, so event cursors stay valid across a reconnect.
-func registerMethodsFor(srv *rpc.Server, cur func() *session.Session) {
+// event log, so event cursors stay valid across a reconnect. The returned func stops what
+// the methods started (the addon host); call it before the process ends.
+func registerMethodsFor(srv *rpc.Server, cur func() *session.Session, opts methodOptions) func() {
 	log := cur().Log()
 	srv.Register("status", rpc.Typed(func(ctx context.Context, _ empty) (session.StatusInfo, error) {
 		return cur().Status(), nil
@@ -229,6 +232,7 @@ func registerMethodsFor(srv *rpc.Server, cur func() *session.Session) {
 	registerGroupMethods(srv, cur)
 	registerItemMethods(srv, cur)
 	registerNPCMethods(srv, cur)
+	return registerAddonHost(srv, cur, opts.AddonDir)
 }
 
 // readEvents long-polls up to waitMS (at most 25 s) until a matching event exists. A

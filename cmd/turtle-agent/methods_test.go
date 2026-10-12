@@ -44,6 +44,12 @@ func newRig(t *testing.T) *agentRig {
 // newRigAt is newRig with session options and the position the character enters map 0 at.
 func newRigAt(t *testing.T, opts session.Options, pos [3]float32) *agentRig {
 	t.Helper()
+	return newRigWith(t, opts, pos, methodOptions{})
+}
+
+// newRigWith is newRigAt with the method options (the addon checkout).
+func newRigWith(t *testing.T, opts session.Options, pos [3]float32, mopts methodOptions) *agentRig {
+	t.Helper()
 	key := bytes.Repeat([]byte{7}, 40)
 	cli, srvConn := net.Pipe()
 	t.Cleanup(func() { cli.Close(); srvConn.Close() })
@@ -59,8 +65,9 @@ func newRigAt(t *testing.T, opts session.Options, pos [3]float32) *agentRig {
 	go func() { r.run <- r.s.Run(context.Background()) }()
 	srv := rpc.NewServer()
 	srv.DisableAuth() // the method tests are about the methods; login tests cover the token
-	registerMethods(srv, r.s)
+	closeMethods := registerMethodsFor(srv, func() *session.Session { return r.s }, mopts)
 	r.ts = httptest.NewServer(srv.Handler())
+	t.Cleanup(closeMethods) // runs after the server closes (cleanups run last-in first-out)
 	t.Cleanup(r.ts.Close)
 	r.expect(opcode.CMSGCharEnum)
 	enum := packet.NewWriter().U8(1).GUID(0x2A).CString("Harnessb").Append(make([]byte, session.CharEnumTailLen)).Bytes()

@@ -3,11 +3,16 @@
 --
 --   lua5.1 host.lua <addon dir>
 --
--- stdin: one JSON request per line, {"id":n,"op":"...",...}. stdout: one JSON line per reply,
+-- stdin: one JSON request per line, {"id":n,"op":"...",...}. File descriptor 3 (never stdout,
+-- so nothing the addon or Lua prints can pass for a frame): one JSON line per reply,
 -- {"id":n,"result":...} or {"id":n,"error":"..."}, and before it, while the request runs, one
 -- {"out":"addon"|"chat"|"target",...} line per thing the addon asked the client to do
 -- (SendAddonMessage, SendChatMessage, TargetUnit, TargetByName). The agent performs those through
 -- its session. The host exits at the end of stdin.
+--
+-- The addon runs sandboxed: each of its files gets an environment (setfenv) holding only the
+-- mocked WoW API and safe parts of the Lua library (string, table, math, date). os, io,
+-- loadfile, dofile, require, package, debug and the like stay local to the host.
 --
 -- Ops:
 --   load    {world, in_world}  load the .toc files, fire ADDON_LOADED, then PLAYER_LOGIN and
@@ -19,6 +24,7 @@
 --   tick    {ms}               advance GetTime() and run OnUpdate of every visible frame once
 --   click   {...}              click a widget the way a player does (see ops.click)
 --   state   {}                 what the addon shows
+--   hello   {}                 answers {}: the host has read its scripts and is ready
 
 local here = (arg[0]:match("^(.*)/[^/]*$")) or "."
 local json = dofile(here .. "/json.lua")
@@ -28,15 +34,21 @@ if not addonDir then
     os.exit(2)
 end
 
+local proto = io.open("/dev/fd/3", "w")
+if not proto then
+    io.stderr:write("host.lua: file descriptor 3 (the protocol) is not open\n")
+    os.exit(2)
+end
 local function emit(t)
-    io.stdout:write(json.encode(t), "\n")
-    io.stdout:flush()
+    proto:write(json.encode(t), "\n")
+    proto:flush()
 end
 
-local H = dofile(here .. "/mock.lua")
--- The mock seeds a legacy saved-variables shape for the addon's own migration test; the host
--- starts like a fresh install instead.
-TortoiseBotsDB = nil
+dofile(here .. "/mock.lua")
+
+-- E is the addon's environment (built below, after the API it holds). The event globals of
+-- the 1.12 handlers (this, event, arg1..arg9) live there.
+local E = {}
 
 -- ── bounded logs ────────────────────────────────────────────────────────────
 local function pushBounded(list, item, max)
@@ -67,7 +79,7 @@ DEFAULT_CHAT_FRAME = {
 -- The chat frame's own handler: what reaches it is what the player reads in chat. The addon
 -- hooks this global (1.12 has no message filters) to hide protocol lines.
 function ChatFrame_OnEvent()
-    pushBounded(chatLog, { at = clock, source = event, text = strip(arg1) }, 40)
+    pushBounded(chatLog, { at = clock, source = E.event, text = strip(E.arg1) }, 40)
 end
 
 function SendAddonMessage(prefix, text, channel, target)
@@ -169,8 +181,8 @@ end
 
 local function setEventArgs(ev, args)
     args = args or {}
-    event = ev
-    arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9 = args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9]
+    E.event = ev
+    for i = 1, 9 do E["arg" .. i] = args[i] end
 end
 
 local CHAT_FRAME_EVENTS = { CHAT_MSG_SYSTEM = true, CHAT_MSG_WHISPER = true }
@@ -178,14 +190,14 @@ local CHAT_FRAME_EVENTS = { CHAT_MSG_SYSTEM = true, CHAT_MSG_WHISPER = true }
 local function fireEvent(ev, args)
     if CHAT_FRAME_EVENTS[ev] then
         -- the chat frame is created by FrameXML before any addon, so it sees the event first
-        this = DEFAULT_CHAT_FRAME
+        E.this = DEFAULT_CHAT_FRAME
         setEventArgs(ev, args)
-        local ok, err = pcall(ChatFrame_OnEvent, ev)
+        local ok, err = pcall(E.ChatFrame_OnEvent, ev)
         if not ok then recordError(ev .. " (chat frame)", err) end
     end
     for _, f in ipairs(frames) do
         if f.events and f.events[ev] and f.scripts.OnEvent then
-            this = f
+            E.this = f
             setEventArgs(ev, args)
             local ok, err = pcall(f.scripts.OnEvent, f)
             if not ok then recordError(ev, err) end
@@ -211,6 +223,44 @@ function TargetByName(name)
         end
     end
 end
+
+-- ── the addon's environment ─────────────────────────────────────────────────
+-- Only what a 1.12 addon sees that the mock provides, and the safe part of the Lua library.
+local WOW_API = { "CreateFrame", "UIParent", "Minimap", "UISpecialFrames", "SlashCmdList", "DEFAULT_CHAT_FRAME",
+    "ChatFrame_OnEvent", "GameTooltip", "GetTime", "time", "SendChatMessage", "SendAddonMessage", "GetCursorPosition",
+    "UnitExists", "UnitName", "UnitIsPlayer", "UnitIsDead", "UnitIsGhost", "UnitIsConnected", "UnitCanAttack",
+    "UnitIsEnemy", "UnitLevel", "UnitClass", "GetNumPartyMembers", "GetNumRaidMembers", "GetItemInfo",
+    "FauxScrollFrame_Update", "FauxScrollFrame_GetOffset", "FauxScrollFrame_OnVerticalScroll", "TargetUnit",
+    "TargetByName", "IsShiftKeyDown" }
+local LUA_SAFE = { "assert", "error", "ipairs", "next", "pairs", "pcall", "xpcall", "select", "tonumber", "tostring",
+    "type", "unpack", "rawequal", "rawget", "rawset", "setmetatable", "getmetatable" }
+local function copyTable(t)
+    local out = {}
+    for k, v in pairs(t) do out[k] = v end
+    return out
+end
+for _, name in ipairs(WOW_API) do E[name] = _G[name] end
+for _, name in ipairs(LUA_SAFE) do E[name] = _G[name] end
+E.string, E.table, E.math = copyTable(string), copyTable(table), copyTable(math)
+E.string.dump = nil
+-- The 1.12 client's short names for the same functions.
+E.getn, E.tinsert, E.tremove = table.getn, table.insert, table.remove
+E.strfind, E.strsub, E.strlen, E.strlower, E.strupper, E.strrep = string.find, string.sub, string.len, string.lower, string.upper, string.rep
+E.format, E.gsub, E.gfind = string.format, string.gsub, string.gfind or string.gmatch
+E.floor, E.ceil, E.abs, E.min, E.max, E.mod, E.random = math.floor, math.ceil, math.abs, math.min, math.max, math.mod or math.fmod, math.random
+-- date as the client has it (Core.lua stamps its log with it): only formatting, no os.
+function E.date(fmt, t)
+    if fmt ~= nil and type(fmt) ~= "string" then error("bad argument #1 to 'date' (string expected)", 2) end
+    if t ~= nil and type(t) ~= "number" then error("bad argument #2 to 'date' (number expected)", 2) end
+    return os.date(fmt, t)
+end
+-- print goes to the chat frame, never to the protocol.
+function E.print(...)
+    local parts = {}
+    for i = 1, select("#", ...) do parts[#parts + 1] = tostring((select(i, ...))) end
+    DEFAULT_CHAT_FRAME:AddMessage(table.concat(parts, " "))
+end
+E._G = E
 
 -- ── helpers for clicks and state ────────────────────────────────────────────
 local function textOf(w)
@@ -318,7 +368,7 @@ local function press(w, force)
     end
     if w.kind == "CheckButton" then w:SetChecked(not w:GetChecked()) end
     clicked[#clicked + 1] = textOf(w)
-    this, arg1 = w, "LeftButton"
+    E.this, E.arg1 = w, "LeftButton"
     local ok, err = pcall(w.scripts.OnClick, w)
     if not ok then
         recordError("OnClick " .. textOf(w), err)
@@ -328,7 +378,7 @@ end
 
 local TB
 local SLASH = function(msg)
-    local f = SlashCmdList and SlashCmdList["TORTOISEBOTSMANAGER"]
+    local f = E.SlashCmdList and E.SlashCmdList["TORTOISEBOTSMANAGER"]
     if not f then error("the addon registered no /tbm command", 0) end
     clicked[#clicked + 1] = "/tbm " .. msg
     f(msg)
@@ -359,6 +409,8 @@ end
 
 -- ── ops ─────────────────────────────────────────────────────────────────────
 local ops = {}
+
+function ops.hello() return {} end
 
 local function tbl(v)
     if type(v) == "table" and v ~= json.null then return v end
@@ -432,12 +484,17 @@ function ops.load(p)
     end
     toc:close()
     for _, file in ipairs(files) do
+        file = string.gsub(file, "\\", "/")
+        if string.find(file, "^/") or string.find(file, "%.%.") then
+            error("the .toc names a file outside the addon: " .. file, 0)
+        end
         local chunk, err = loadfile(addonDir .. "/" .. file)
         if not chunk then error("cannot load " .. file .. ": " .. tostring(err), 0) end
+        setfenv(chunk, E)
         local ok, rerr = pcall(chunk)
         if not ok then error(file .. " raised while loading: " .. tostring(rerr), 0) end
     end
-    TB = TortoiseBots
+    TB = E.TortoiseBots
     if not TB then error("the addon did not create TortoiseBots", 0) end
     setWorld(p.world)
     fireEvent("ADDON_LOADED", { "TortoiseBotsManager" })
@@ -463,7 +520,7 @@ function ops.tick(p)
     for _, f in ipairs(frames) do
         local cb = f.scripts.OnUpdate
         if cb and visible(f) then
-            this, arg1 = f, dt
+            E.this, E.arg1 = f, dt
             local ok, err = pcall(cb, f)
             if not ok then recordError("OnUpdate " .. tostring(f.name or f.kind), err) end
         end
@@ -587,7 +644,7 @@ function ops.state()
     s.window = {
         shown = TB.frame and TB.frame:IsVisible() or false,
         mode = TB.GetMode and TB.GetMode() or nil,
-        tab = TortoiseBotsDB and TortoiseBotsDB.activeTab or nil,
+        tab = E.TortoiseBotsDB and E.TortoiseBotsDB.activeTab or nil,
         scope = textOf(TB.scopeHint),
     }
     s.status = textOf(TB.statusText)

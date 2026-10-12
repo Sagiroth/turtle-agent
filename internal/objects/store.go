@@ -114,10 +114,28 @@ type object struct {
 	track      *track    // the server spline the unit follows, if any
 	cast       *casting
 	auraEnds   map[int]time.Time // aura slot -> when it runs out, the player's own auras only
-	// pendingAura is the time left the server sent for a slot that was empty: the spell that
-	// fills the slot next is the one it was sent for (see AuraDuration).
-	pendingAura map[int]time.Time
+	// pendingAura holds a duration the server sent for a slot, until the slot's spell changes or
+	// the slot empties (see AuraDuration).
+	pendingAura map[int]pendingDuration
 }
+
+// pendingDuration is an aura duration that waits for the spell it belongs to.
+type pendingDuration struct {
+	end     time.Time // when the aura runs out
+	arrived time.Time // when the duration came, for pendingAuraWindow
+}
+
+// pendingAuraWindow is how long a duration waits for the spell that takes its slot. The server
+// sends the duration at once, straight to the player (SpellAuras.cpp:6909, 7576-7588), but the
+// object update that puts the spell in the slot goes out at the end of the map tick (Map.cpp:903).
+// Past MapUpdate.ObjectsUpdate.Timeout (default 100 ms, Map.cpp:2797) the rest of that update waits
+// for a later tick, so under load the spell can trail its duration by more than a second (inferred
+// from the code, not measured). The window is 5 s to cover that. A duration older than it is dropped.
+// Residual: a slot that changes to a spell with no duration packet of its own takes a pending time,
+// which may be a refresh of the spell it replaced. The core sends a packet for every non-passive
+// aura it puts in a slot, so this is narrow, and the packet has no spell id to tell it apart from a
+// rank swap.
+const pendingAuraWindow = 5 * time.Second
 
 type casting struct {
 	spell uint32
@@ -157,6 +175,7 @@ func (s *Store) Apply(blocks []Block) []Change {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var ch []Change
+	now := s.now()
 	for _, b := range blocks {
 		switch b.Type {
 		case BlockCreate, BlockCreate2:
@@ -166,10 +185,10 @@ func (s *Store) Apply(blocks []Block) []Change {
 			s.objs[b.GUID] = o
 			ch = append(ch, Change{GUID: b.GUID, Kind: ChangeCreated})
 			s.moveObject(o, b.Move)
-			ch = setValues(o, b.Values, ch, false)
+			ch = setValues(o, b.Values, ch, false, now)
 		case BlockValues:
 			o, existed := s.get(b.GUID) // values before a create we missed are kept
-			ch = setValues(o, b.Values, ch, existed)
+			ch = setValues(o, b.Values, ch, existed, now)
 		case BlockMovement:
 			if o, ok := s.objs[b.GUID]; ok {
 				s.moveObject(o, b.Move)
@@ -207,18 +226,20 @@ func (s *Store) moveObject(o *object, m *Movement) {
 	}
 }
 
-func setValues(o *object, vals map[uint16]uint32, ch []Change, report bool) []Change {
+// setValues applies vals to o at now, and returns ch with the changes it reports when report is set.
+func setValues(o *object, vals map[uint16]uint32, ch []Change, report bool, now time.Time) []Change {
 	for k, v := range vals {
 		if k >= UnitAura && k < UnitAura+AuraSlots && v != o.values[k] {
-			// A new spell in the slot, or none: the time the old spell had goes with it. A time
-			// that waited for the empty slot is the new spell's; it is dropped if the slot empties.
+			// A new spell in the slot, or none: the time the old spell had goes with it. A duration
+			// still pending is the new spell's if the spell comes within pendingAuraWindow of it; it
+			// is dropped if the slot empties, and once older than the window.
 			slot := int(k - UnitAura)
 			delete(o.auraEnds, slot)
-			if end, waiting := o.pendingAura[slot]; waiting && v != 0 {
+			if p, waiting := o.pendingAura[slot]; waiting && v != 0 && now.Sub(p.arrived) <= pendingAuraWindow {
 				if o.auraEnds == nil {
 					o.auraEnds = map[int]time.Time{}
 				}
-				o.auraEnds[slot] = end
+				o.auraEnds[slot] = p.end
 			}
 			delete(o.pendingAura, slot)
 		}
@@ -354,7 +375,9 @@ func (s *Store) DelayCast(g packet.GUID, ms uint32) {
 // negative value for an aura without end. The server sends it when it applies or refreshes
 // an aura, before the object update that puts the spell in the slot (SpellAuras.cpp:6896-6909),
 // so the packet can come first. The packet has no spell id: a duration for a slot that holds
-// a spell is that spell's, and one for an empty slot waits for the spell that fills it.
+// a spell is that spell's, and one for an empty slot waits for the spell that fills it. Either
+// way it stays pending for pendingAuraWindow: a different spell that takes the slot in that
+// time (a rank swap, whose duration the server sends ahead of the object update) takes it.
 func (s *Store) AuraDuration(g packet.GUID, slot int, ms int32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -367,12 +390,13 @@ func (s *Store) AuraDuration(g packet.GUID, slot int, ms int32) {
 		delete(o.pendingAura, slot)
 		return
 	}
-	end := s.now().Add(time.Duration(ms) * time.Millisecond)
+	now := s.now()
+	end := now.Add(time.Duration(ms) * time.Millisecond)
+	if o.pendingAura == nil {
+		o.pendingAura = map[int]pendingDuration{}
+	}
+	o.pendingAura[slot] = pendingDuration{end: end, arrived: now}
 	if o.values[UnitAura+uint16(slot)] == 0 {
-		if o.pendingAura == nil {
-			o.pendingAura = map[int]time.Time{}
-		}
-		o.pendingAura[slot] = end
 		return
 	}
 	if o.auraEnds == nil {

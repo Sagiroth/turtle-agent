@@ -171,6 +171,9 @@ browser (`Origin` header) and other `Host` names are refused.
 | `addon_send` | `prefix`, `text`, `channel` (party, raid, guild, officer, raid_leader, raid_warning, battleground, battleground_leader, channel), `to` (channel name) | |
 | `tbm` | `command` (a `.bot` command without `.bot`), `via` (chat, the default, or addon) | `since` |
 | `tbm_handshake` | `via`, `wait_ms` (default 5000) | `since`, `next`, `version`, `caps`, `transport`, `roster[]`, `bot_state`, `errors`, `lines`, `complete` |
+| `tbm_buttons` | `tab` (Fight, Camp, Party, Roster, Guild, Raid, BotPanel; default all) | `addon_commit`, `send_delay_ms`, `poll_after_cmd_ms`, `action_timeout_ms`, `buttons[]` (`name`, `label`, `tab`, `command`, `bot_command`, `args`, `optional`, `scope`, `toggle`, `needs_enemy`, `pull_seconds`, `reply`, `intent`, `ok`, `fail`, `follow_up`, `mini_bar`, `requires_cap`, `multi`, `source`) |
+| `tbm_click` | `button` (`Fight.AoE`), `args` (`state`, `bot`, `name`, `mark`, `seconds`, `bag`, `slot`, …), `transport` (auto, chat, addon), `wait_ms` (default 8000), `force`, `follow_up` | `since`, `next`, `button`, `scope`, `sent` (`transport`, `text`, `channel`, `prefix`), `transport_reason`, `refreshed`, `reply` (`kind` ack, err, text, inventory, snapshot or timeout; `ok`, `line`, `ack`, `acks`, `err`, `lines`), `follow_up` (the roster response) |
+| `tbm_send` | `command` (with or without `.bot`), `transport`, `wait_ms` | like `tbm_click` without `button` and `scope`: the reply is the first ACK/ERR or roster response |
 | `join_channel` / `leave_channel` | `name`, `password` / `name` | |
 | `gossip_hello` | `guid`, `wait_ms` | `since`, `event`: the first answer within `wait_ms`: the menu (`gossip`), `gossip_complete`, or what the NPC opens at once (`quest_list`, `quest_details`, `quest_request_items`, `quest_offer_reward`, `vendor_list`, `trainer_list`) |
 | `gossip_select` | `guid`, `option`, `code` (coded options only), `wait_ms` | `since`, `event` (next menu, `gossip_complete`, or the list or quest panel the option opens) |
@@ -214,6 +217,45 @@ Addons, channels and NPCs:
   the payload after the tab, `data.prefix` and `data.type` (guild for replies the server sends you, party, raid, …).
   The core accepts addon messages on the channels `addon_send` lists; it drops addon whispers, so `addon_send`
   refuses them. A server with the addon channel switched off drops them all without an answer.
+- `tbm_click` sends exactly what a TortoiseBotsManager button sends, from a table generated from the addon source
+  (`internal/tbm/buttons_gen.go`, written by `tools/tbmbuttongen` from a pinned addon commit, `addon_commit` in
+  `tbm_buttons`). Regenerate with `git clone https://github.com/Sagiroth/TortoiseBotsManager /tmp/tbm`, check out
+  the commit, then `go run ./tools/tbmbuttongen -in /tmp/tbm -out internal/tbm/buttons_gen.go`; the generator fails
+  when a command it lists, or an entry it should have read, is not in the addon source. `go test ./tools/tbmbuttongen`
+  fetches the pinned addon (`tools/tbmcontract/fetch.sh`, cached in `.cache/`) and checks the committed table against
+  it; it skips only when the addon cannot be downloaded.
+  - Transport (`Core.lua SendBotCommand`, `Comms.lua AddonCommandChannel`): the addon channel (`TBM` message on
+    PARTY, text without `.bot`) while the module's last roster response said `TBM:TRANSPORT|party` for the group
+    you are in now, else `.bot <command>` as say chat. A battleground group (the module says `none`), no group,
+    no verdict yet, or a group that changed since the verdict (the addon drops its verdict on every group event)
+    all mean chat. `transport: auto` (default) polls the roster first when the verdict is missing or stale,
+    over chat (`refreshed: true`); `chat` or `addon` forces one. `tbm_handshake` and every click feed the same
+    verdict. Sends are spaced by the addon's `SEND_DELAY` (350 ms), and the pre-click roster poll waits out the addon's
+    5 s roster throttle (the cached verdict and states are used, and `transport_reason` says so); the follow-up poll
+    after a command is forced, as in the addon.
+  - Scope: the addon sends no scope. Action buttons carry the same text for the party and for one bot, and the
+    server resolves the scope from your target, so `scope` in the result is the one the addon would show: `bot:<name>`
+    while you target one of your online bots (a roster row or a `BOTSTATE` entry), else `party`. Formation pills
+    are narrowed in the text (`formation <bot> <id>`); per-bot buttons (`BotPanel.*`, `Fight.CCAssign`) take `bot`.
+  - Switches (`Fight.AoE`, `Fight.AutoCC`, `Fight.Loot`, `BotPanel.Behavior.*`) send the opposite of what the bots
+    report in `BOTSTATE` (the addon's rule); `args.state` `on` or `off` overrides. `Fight.Pull` and `Fight.Pullback`
+    append their timer (10 s and 3 s, or `args.seconds`) only when the module advertised `pull-seconds`.
+    Buttons the addon greys out without an enemy target (`needs_enemy`, from the addon's `targetOnly` list), or
+    without a capability in `TBM:CAPS` (`requires_cap`: Flee needs `flee`), are refused unless `force` is set. A
+    switch ACK sets the state the next click flips from.
+  - Reply: the matching `TBM:ACTION_ACK` or `TBM:ACTION_ERR` (same intent), a text line for roster verbs, the
+    `TBM:INV_END` of the bot, or the roster trailer, read only from the transport that carried the request (system
+    messages for chat, `TBM` addon messages for the addon channel). Other lines are kept in `reply.lines`. After a
+    roster verb, formation, role or CC click the addon polls the roster 1.4 s later; `follow_up` does that
+    and returns the response (`follow_up: false` skips it). A click that gets no answer in `wait_ms` returns `reply.kind` `timeout`. Raid
+    "Check bots" and "Check" (`multi`) are answered by one ACK per bot with no end marker: the reply keeps every ACK in
+    `reply.acks` and closes after 600 ms without a new one.
+  - Request matching has no request id (the protocol has none). One click or send runs at a time per agent, the
+    replies that arrived since the last request are drained first, and text replies are anchored and name the bot
+    (case-insensitive). A late ACK of a click that timed out is passed over within 30 s of the timeout, by intent. What
+    this cannot separate: a reply to something else on the same intent sent by another client (the TBM addon in a
+    real client, a `tbm` or `addon_send` call), and two identical text replies.
+  - `tbm_send` is the same transport rule for any command text.
 - `tbm_handshake` sends what the TortoiseBotsManager addon sends on login (`.bot help`, then `.bot roster`) and
   collects the module's `TBM:` reply, from system lines or `TBM` addon lines, up to the `TBM:TRANSPORT` trailer.
   `via: addon` sends over the party addon channel instead, which the module only reads while you are grouped.
@@ -544,7 +586,7 @@ with the same calls as its real-client backend (`chat`, `gm`, `state`, `tail_cha
 | `internal/spells` | spell names by id, from the core's `spell_template` (`tools/spellnamegen`) |
 | `internal/navmesh` | tile loading and path planning over the core's Detour (cgo); `navfixture` builds synthetic tiles |
 | `internal/events` | ordered event log with cursors |
-| `internal/tbm` | the TortoiseBots addon (TBM) protocol: handshake commands and the `TBM:` reply lines |
+| `internal/tbm` | the TortoiseBots addon (TBM) protocol: handshake commands, the `TBM:` reply lines, the generated button table, the transport rule and reply matching (`tools/tbmbuttongen` writes the table) |
 | `tools/tbmlines`, `tools/tbmcontract` | extract `TBM:` lines from an events file; replay them through the real TBM addon (Lua) |
 | `internal/capture` | packet capture files and the secret scan |
 | `internal/rpc`, `internal/netutil` | loopback JSON-RPC server |

@@ -247,6 +247,12 @@ func (s *Session) Cast(ctx context.Context, spell uint32, target packet.GUID) er
 	return err
 }
 
+// CancelCast cancels the cast, channel or auto-repeat of spell, or of any spell when spell
+// is 0 (CMSG_CANCEL_CAST, SpellHandler.cpp:411-426, Object.cpp:5428-5440).
+func (s *Session) CancelCast(ctx context.Context, spell uint32) error {
+	return s.send(ctx, opcode.CMSGCancelCast, game.BuildCancelCast(spell))
+}
+
 // Face turns the player towards a known unit (MSG_MOVE_SET_FACING).
 func (s *Session) Face(ctx context.Context, g packet.GUID) error {
 	x, y, z, _ := s.selfPos()

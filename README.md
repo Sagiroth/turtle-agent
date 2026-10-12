@@ -93,6 +93,7 @@ browser (`Origin` header) and other `Host` names are refused.
 | `target` | `guid` or `name` (prefers living units) | |
 | `attack` / `stop_attack` | | |
 | `cast` | `spell_id`, `target` | |
+| `cancel_cast` | `spell_id` (optional; none cancels whatever is being cast) | |
 | `face` | `guid` | |
 | `walk_to` | `x`, `y`, `z` (short, straight-line walks: Z is interpolated and terrain is ignored, so keep walks short and on flat ground; after a `teleport` to a Z above the ground the character does not fall) | |
 | `teleport` | `x`, `y`, `z`, `map` (a GM `.go xyz`; needs a GM account) | |

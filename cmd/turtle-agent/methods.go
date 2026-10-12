@@ -61,6 +61,10 @@ type castParams struct {
 	Target  packet.GUID `json:"target,omitempty"`
 }
 
+type cancelCastParams struct {
+	SpellID uint32 `json:"spell_id,omitempty"` // 0: whatever is being cast
+}
+
 type guidParams struct {
 	GUID packet.GUID `json:"guid"`
 }
@@ -147,6 +151,9 @@ func registerMethods(srv *rpc.Server, s *session.Session) {
 	srv.Register("stop_attack", rpc.Typed(func(ctx context.Context, _ empty) (empty, error) { return empty{}, rpcErr(s.StopAttack(ctx)) }))
 	srv.Register("cast", rpc.Typed(func(ctx context.Context, p castParams) (empty, error) {
 		return empty{}, rpcErr(s.Cast(ctx, p.SpellID, p.Target))
+	}))
+	srv.Register("cancel_cast", rpc.Typed(func(ctx context.Context, p cancelCastParams) (empty, error) {
+		return empty{}, rpcErr(s.CancelCast(ctx, p.SpellID))
 	}))
 	srv.Register("face", rpc.Typed(func(ctx context.Context, p guidParams) (empty, error) { return empty{}, rpcErr(s.Face(ctx, p.GUID)) }))
 	srv.Register("walk_to", rpc.Typed(func(ctx context.Context, p walkParams) (empty, error) {

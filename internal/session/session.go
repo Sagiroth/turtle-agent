@@ -271,6 +271,9 @@ func (s *Session) Status() StatusInfo {
 	// The player's own values from the store (zero until its create block arrives).
 	if u, ok := s.store.Get(s.self.GUID, s.pos[0], s.pos[1], s.pos[2]); ok {
 		info.Health, info.MaxHealth, info.Power, info.MaxPower = u.Health, u.MaxHealth, u.Power, u.MaxPower
+		if u.Level > 0 { // the live level, not the one from the character list
+			info.Level = uint8(min(u.Level, 255))
+		}
 	}
 	return info
 }

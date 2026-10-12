@@ -1,6 +1,8 @@
 package session
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,6 +100,9 @@ func TestBuffIsNotHarmful(t *testing.T) {
 
 func TestUnitsBeforeWorldIsEmpty(t *testing.T) {
 	h := start(t, Options{})
+	if _, err := h.s.Unit(me.GUID, ""); !errors.Is(err, ErrNotInWorld) {
+		t.Fatalf("unit before the world: %v", err)
+	}
 	if us := h.s.Units(objects.Filter{}); len(us) != 0 {
 		t.Fatalf("%+v", us)
 	}
@@ -211,4 +216,55 @@ func TestPetNameUsesEntryField(t *testing.T) {
 	if m := ofKind(h.s.Log(), events.KindMelee); len(m) != 1 || m[0].Source != "Voidwalker Minion" || m[0].Target != "Young Wolf" {
 		t.Fatalf("melee %+v", m)
 	}
+}
+
+// A unit's cast follows SMSG_SPELL_START until its SMSG_SPELL_GO or SMSG_SPELL_FAILED_OTHER;
+// its stand state and auras follow the values updates; the player's own aura times follow
+// SMSG_UPDATE_AURA_DURATION; Unit finds a unit by guid or name, the player included.
+func TestUnitStateAndLookup(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	wolfName(h)
+	h.send(opcode.SMSGUpdateObject, unitCreate(wolfGUID, objects.TypeUnit, me.X+5, me.Y, me.Z, map[uint16]uint32{objects.UnitHealth: 50, objects.UnitMaxHealth: 50}))
+	// The player's own create block, somewhere it no longer is: Unit gives the session's position.
+	h.send(opcode.SMSGUpdateObject, unitCreate(me.GUID, objects.TypePlayer, me.X-30, me.Y, me.Z, map[uint16]uint32{objects.UnitHealth: 1, objects.UnitMaxHealth: 1}))
+	h.send(opcode.SMSGSpellStart, gametest.SpellStart(wolfGUID, 116, 3000, me.GUID))
+	casting := func(want uint32) func() bool {
+		return func() bool {
+			u, err := h.s.Unit(wolfGUID, "")
+			return err == nil && ((want == 0 && u.Casting == nil) || (u.Casting != nil && u.Casting.SpellID == want))
+		}
+	}
+	waitFor(t, casting(116))
+	h.send(opcode.SMSGSpellGo, gametest.SpellGo(wolfGUID, 116, []packet.GUID{me.GUID}, nil, nil, me.GUID))
+	waitFor(t, casting(0))
+	h.send(opcode.SMSGSpellStart, gametest.SpellStart(wolfGUID, 133, 3000, me.GUID))
+	waitFor(t, casting(133))
+	h.send(opcode.SMSGSpellFailedOther, packet.NewWriter().GUID(wolfGUID).U32(133).Bytes())
+	waitFor(t, casting(0))
+
+	// The player sits down to eat; the server also says how long the food lasts.
+	h.send(opcode.SMSGUpdateObject, valuesUpdate(me.GUID, map[uint16]uint32{objects.UnitBytes1: 1, objects.UnitAura + 2: 433}))
+	h.send(opcode.SMSGUpdateAuraDuration, packet.NewWriter().U8(2).U32(30000).Bytes())
+	waitFor(t, func() bool {
+		u, err := h.s.Unit(0, strings.ToLower(me.Name))
+		return err == nil && u.GUID == me.GUID && u.StandState == "sit" && len(u.Auras) == 1 && u.Auras[0].RemainingMS != nil
+	})
+	u, _ := h.s.Unit(me.GUID, "")
+	if a := u.Auras[0]; a.Name != "Food" || a.Slot != 2 || *a.RemainingMS > 30000 || *a.RemainingMS < 25000 || u.Name != me.Name || u.Distance != 0 || u.X != me.X {
+		t.Fatalf("%+v", u)
+	}
+	if u, err := h.s.Unit(0, "wolf"); err != nil || u.GUID != wolfGUID || u.Name != "Young Wolf" || u.Distance != 5 {
+		t.Fatalf("by name: %+v %v", u, err)
+	}
+	if _, err := h.s.Unit(0, "bear"); err == nil {
+		t.Fatal("no bear in view")
+	}
+	if _, err := h.s.Unit(0x99, ""); err == nil {
+		t.Fatal("unknown guid")
+	}
+	if _, err := h.s.Unit(0, ""); err == nil {
+		t.Fatal("neither guid nor name")
+	}
+	h.logout()
 }

@@ -121,7 +121,8 @@ browser (`Origin` header) and other `Host` names are refused.
 | `raid_move` | `guid` or `name`, `subgroup` (1-8), `swap_with` (name) | Leader or assistant of a raid: puts the member in the subgroup; with `swap_with` trades places with that member of the target subgroup, which also works when it is full (five) |
 | `disband` | | Leader only: removes every other member, which ends the group. `leave_group` only takes the player out and the group lives on |
 | `party` | | `in_group`, `raid`, `leader`, `assistant` and `subgroup` (the player's own), `members[]` with health, online state, `assistant` and `subgroup`, `marks` (raid icon name to guid) |
-| `units` | `within` (yards, 3D; `near` is its older name), `entry`, `hostile`, `name`, `limit` | nearby units, nearest first: guid, name, level, health, dead, hostile, in_party, `x`/`y`/`z`/`o`, `pos_age_ms`, `moving`, `distance` (3D) and `distance_2d` from the player (see [Unit positions](#unit-positions)); `hostile` means an attackable-looking creature (no NPC flags, not player-controlled), not a faction check: it counts neutral critters and never an enemy-faction player |
+| `units` | `within` (yards, 3D; `near` is its older name), `entry`, `hostile`, `name`, `limit` | nearby units, nearest first: guid, name, level, health, dead, hostile, in_party, `x`/`y`/`z`/`o`, `pos_age_ms`, `moving`, `distance` (3D) and `distance_2d` from the player (see [Unit positions](#unit-positions)), `in_combat`, `target`, `stand_state`, `auras[]`, `casting` (see [Unit state](#unit-state)); `hostile` means an attackable-looking creature (no NPC flags, not player-controlled), not a faction check: it counts neutral critters and never an enemy-faction player |
+| `unit` | `guid` or `name` (prefers living units; the player's own name or guid gives the player, at the `status` position) | one unit, as a `units` row; an error when none is in view |
 | `target` | `guid` or `name` (prefers living units) | |
 | `attack` / `stop_attack` | | |
 | `cast` | `spell_id`, `target` | |
@@ -239,6 +240,27 @@ Every `units` row carries where the unit is, as far as the server has said:
 In the captured runs, a spline that the server cut short started its next one within 0.75 yd of the point the
 agent had (90 % of about 100 cases). Wandering and pathing mobs in those runs reached their ends 1-1.7 s before
 the duration the server sent; until it runs out the agent still has them that far short of the end.
+
+## Unit state
+
+Each `units` row (and `unit`) also says what the unit is doing:
+
+- `in_combat` (`UNIT_FLAG_IN_COMBAT`) and `target`, the guid it has selected (absent when none).
+- `stand_state`: `stand`, `sit`, `sit_chair` (any chair height), `sleep`, `dead` or `kneel`, from the low byte of
+  `UNIT_FIELD_BYTES_1`, named as the `stand_state` event names them. Eating and drinking sit the unit down.
+- `auras[]` in slot order (never null): `slot`, `spell_id`, `name`, `stacks` (proc charges times stacks for an aura with charges, as the core counts
+  them), `harmful` (slots 32-47), and
+  `remaining_ms` for the player's own auras only: the server sends aura times to their owner alone
+  (`SMSG_UPDATE_AURA_DURATION`), and `unit` is the way to see the player's own row. A unit eating shows the
+  `Food` aura, one drinking `Drink`.
+- `casting`, null when idle: `spell_id`, `name`, `channel`, and `ends_in_ms` for a cast with a cast time, from its
+  `spell_start` until its `spell_go` or a failure (pushback on the player's own cast moves the end). A cast whose
+  `spell_go` never came stops showing 2 s after its end. A channel (`UNIT_CHANNEL_SPELL`) has no end: the server
+  sends its duration to the caster alone.
+
+Spell names come from the core's `spell_template` (`sql/base/tw_world_spell_template.sql`), packed into
+`internal/spells/names.tsv.gz` by `make spellnames CORE=<tortoise-wow checkout>`. A spell the server's database
+added later has no `name`.
 
 ## Movement
 
@@ -362,7 +384,8 @@ with the same calls as its real-client backend (`chat`, `gm`, `state`, `tail_cha
 | `internal/worldconn` | TCP framing, the 1.12 header cipher, auth session with the addon block |
 | `internal/session` | single-owner session loop: login, ping, chat, addon messages, channels, gossip, names, party, world, actions, combat, raid icons, loot rolls, inventory, equip and use, corpse loot, mounts, logout |
 | `internal/game` | packet codecs for chat, addon messages, channels, gossip, queries, groups, actions, the combat log, raid icons, loot rolls, the loot window, items and mounts |
-| `internal/objects` | update-object parser and the object store: units, and the items in the backpack and bags |
+| `internal/objects` | update-object parser and the object store: units (positions, splines, auras, casts), and the items in the backpack and bags |
+| `internal/spells` | spell names by id, from the core's `spell_template` (`tools/spellnamegen`) |
 | `internal/navmesh` | tile loading and path planning over the core's Detour (cgo); `navfixture` builds synthetic tiles |
 | `internal/events` | ordered event log with cursors |
 | `internal/tbm` | the TortoiseBots addon (TBM) protocol: handshake commands and the `TBM:` reply lines |

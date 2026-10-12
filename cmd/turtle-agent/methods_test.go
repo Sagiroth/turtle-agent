@@ -416,6 +416,20 @@ func TestUnitsAndStatusHealth(t *testing.T) {
 	if out := r.call("units", fmt.Sprintf(`{"name":"wolf","within":%f}`, d3-0.01))["result"].([]any); len(out) != 0 {
 		t.Fatalf("within %v", out)
 	}
+	// Per-unit state (issue #17), and the unit method by name and by guid.
+	if auras, ok := u["auras"].([]any); !ok || len(auras) != 0 || u["stand_state"] != "stand" || u["casting"] != nil || u["in_combat"] != false {
+		t.Fatalf("state %v", u)
+	}
+	one := r.call("unit", `{"name":"wolf"}`)["result"].(map[string]any)
+	if one["guid"] != "0xF13000012B000001" || one["name"] != "Young Wolf" {
+		t.Fatalf("unit by name %v", one)
+	}
+	if one = r.call("unit", `{"guid":"0xF13000012B000001"}`)["result"].(map[string]any); one["name"] != "Young Wolf" {
+		t.Fatalf("unit by guid %v", one)
+	}
+	if out := r.call("unit", `{"name":"bear"}`); out["error"] == nil {
+		t.Fatalf("unit bear %v", out)
+	}
 	if st["health"] != float64(700) || st["max_health"] != float64(800) || st["power"] != float64(10) || st["max_power"] != float64(20) {
 		t.Fatalf("status %v", st)
 	}

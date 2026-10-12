@@ -4,7 +4,7 @@ GOFMT := $(GOROOT_LOCAL)/bin/gofmt
 CORE ?= $(HOME)/tortoise-wow
 export GOTOOLCHAIN := local
 
-.PHONY: test fmt fmt-check vet nocgo build opcodes
+.PHONY: test fmt fmt-check vet nocgo build opcodes spellnames
 
 test: fmt-check vet nocgo
 	$(GO) test -race -count=1 ./...
@@ -27,3 +27,6 @@ build:
 
 opcodes:
 	$(GO) run ./tools/opcodegen -in $(CORE)/src/game/Protocol/Opcodes_1_12_1.h -out internal/opcode/opcodes_gen.go
+
+spellnames:
+	$(GO) run ./tools/spellnamegen -in $(CORE)/sql/base/tw_world_spell_template.sql -out internal/spells/names.tsv.gz

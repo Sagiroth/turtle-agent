@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"time"
@@ -71,6 +72,38 @@ func (s *Session) Units(f objects.Filter) []objects.Unit {
 		}
 	}
 	return out
+}
+
+// Unit is one unit, as Units gives it, by guid (the player itself too) or by name: the
+// nearest living unit whose name contains it, else the nearest such corpse; the player's
+// own name gives the player, at the session's own position (status x/y/z).
+func (s *Session) Unit(g packet.GUID, name string) (objects.Unit, error) {
+	if err := s.inWorld(); err != nil {
+		return objects.Unit{}, err
+	}
+	s.mu.Lock()
+	self := s.self
+	s.mu.Unlock()
+	if g == 0 && name != "" && strings.EqualFold(name, self.Name) {
+		g = self.GUID
+	}
+	g, err := s.pickUnit("unit", g, name)
+	if err != nil {
+		return objects.Unit{}, err
+	}
+	x, y, z, o := s.selfPos()
+	u, ok := s.store.Get(g, x, y, z)
+	if !ok {
+		return objects.Unit{}, fmt.Errorf("unit %v is not in view", g)
+	}
+	if g == self.GUID {
+		// The server never moves the player's own object after its create block; the
+		// session knows where the player is.
+		u.X, u.Y, u.Z, u.O, u.PosAgeMS, u.Moving, u.Distance, u.Distance2D = x, y, z, o, 0, false, 0, 0
+	}
+	u.Name, _ = s.cachedName(g)
+	u.InParty = s.inParty(g)
+	return u, nil
 }
 
 // onUpdate applies the blocks parsed before an error, then reports the error.

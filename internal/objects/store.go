@@ -6,7 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pjerra/turtle-agent/internal/game"
 	"github.com/pjerra/turtle-agent/internal/packet"
+	"github.com/pjerra/turtle-agent/internal/spells"
 )
 
 type ChangeKind uint8
@@ -66,7 +68,33 @@ type Unit struct {
 	Dead       bool        `json:"dead"`
 	Hostile    bool        `json:"hostile"`
 	InParty    bool        `json:"in_party"`
-	Auras      []uint32    `json:"auras,omitempty"`
+	// StandState names byte 0 of UNIT_FIELD_BYTES_1 as the stand_state event does.
+	StandState string `json:"stand_state"`
+	Auras      []Aura `json:"auras"`   // in slot order, never null
+	Casting    *Cast  `json:"casting"` // null when not casting
+}
+
+// Aura is a spell in one of a unit's 48 aura slots (UNIT_FIELD_AURA).
+type Aura struct {
+	Slot    int    `json:"slot"`
+	SpellID uint32 `json:"spell_id"`
+	Name    string `json:"name,omitempty"`
+	Stacks  int    `json:"stacks"`  // proc charges x stacks when the aura has charges (SpellAuras.cpp:7565)
+	Harmful bool   `json:"harmful"` // slots 32-47 (SpellAuraDefines.h:25-26)
+	// RemainingMS is the time left as the server last said (SMSG_UPDATE_AURA_DURATION,
+	// which it sends only for the player's own auras); omitted when unknown or endless.
+	RemainingMS *int64 `json:"remaining_ms,omitempty"`
+}
+
+// Cast is the spell a unit is casting: from SMSG_SPELL_START with a cast time until its
+// SMSG_SPELL_GO or a failure, or the channel in UNIT_CHANNEL_SPELL.
+type Cast struct {
+	SpellID uint32 `json:"spell_id"`
+	Name    string `json:"name,omitempty"`
+	Channel bool   `json:"channel"`
+	// EndsInMS is the time to the cast's end (negative a little past it, while the spell
+	// goes off); a channel's end is not sent to other clients, so it has none.
+	EndsInMS *int64 `json:"ends_in_ms,omitempty"`
 }
 
 type Filter struct {
@@ -84,7 +112,18 @@ type object struct {
 	x, y, z, o float32
 	posAt      time.Time // zero: no position yet
 	track      *track    // the server spline the unit follows, if any
+	cast       *casting
+	auraEnds   map[int]time.Time // aura slot -> when it runs out, the player's own auras only
 }
+
+type casting struct {
+	spell uint32
+	end   time.Time
+}
+
+// castGrace is how long past its end a cast still shows when its SMSG_SPELL_GO did not
+// come (the server sends none for a caster that went out of range meanwhile).
+const castGrace = 2 * time.Second
 
 type Store struct {
 	mu   sync.RWMutex
@@ -166,6 +205,11 @@ func (s *Store) moveObject(o *object, m *Movement) {
 }
 
 func setValues(o *object, vals map[uint16]uint32, ch []Change, report bool) []Change {
+	for k, v := range vals {
+		if k >= UnitAura && k < UnitAura+AuraSlots && v != o.values[k] {
+			delete(o.auraEnds, int(k-UnitAura)) // a new spell in the slot, or none
+		}
+	}
 	idx := make([]int, 0, len(vals))
 	for i := range vals {
 		idx = append(idx, int(i))
@@ -262,6 +306,54 @@ func (o *object) pos(now time.Time) (p [3]float32, face float32, moving bool) {
 		face = o.o
 	}
 	return p, face, moving
+}
+
+// StartCast records SMSG_SPELL_START: g casts spell for castMS. An instant spell (cast
+// time 0) is not a cast; its SMSG_SPELL_GO follows at once.
+func (s *Store) StartCast(g packet.GUID, spell, castMS uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if o, ok := s.objs[g]; ok && castMS > 0 {
+		o.cast = &casting{spell: spell, end: s.now().Add(time.Duration(castMS) * time.Millisecond)}
+	}
+}
+
+// EndCast ends g's cast of spell (SMSG_SPELL_GO, a failure); spell 0 ends any cast.
+func (s *Store) EndCast(g packet.GUID, spell uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if o, ok := s.objs[g]; ok && o.cast != nil && (spell == 0 || o.cast.spell == spell) {
+		o.cast = nil
+	}
+}
+
+// DelayCast moves g's cast end back by ms (SMSG_SPELL_DELAYED, pushback, sent to the
+// caster only).
+func (s *Store) DelayCast(g packet.GUID, ms uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if o, ok := s.objs[g]; ok && o.cast != nil {
+		o.cast.end = o.cast.end.Add(time.Duration(ms) * time.Millisecond)
+	}
+}
+
+// AuraDuration records SMSG_UPDATE_AURA_DURATION for g's aura slot: ms left, or a
+// negative value for an aura without end.
+func (s *Store) AuraDuration(g packet.GUID, slot int, ms int32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.objs[g]
+	if !ok || slot < 0 || slot >= AuraSlots {
+		return
+	}
+	if o.auraEnds == nil {
+		o.auraEnds = map[int]time.Time{}
+	}
+	if ms < 0 {
+		delete(o.auraEnds, slot)
+		return
+	}
+	o.auraEnds[slot] = s.now().Add(time.Duration(ms) * time.Millisecond)
 }
 
 // Clear forgets every object (SMSG_NEW_WORLD).
@@ -384,10 +476,26 @@ func toUnit(o *object, now time.Time, ox, oy, oz float32) Unit {
 	u.Dead = u.MaxHealth > 0 && u.Health == 0
 	u.Hostile = u.Type == "creature" && !u.Dead && u.NPCFlags == 0 &&
 		u.Flags&(UnitFlagSpawning|UnitFlagPlayerControlled|UnitFlagImmuneToPlayer|UnitFlagNotSelectable) == 0
+	u.Auras = []Aura{}
 	for i := uint16(0); i < AuraSlots; i++ {
-		if id := v[UnitAura+i]; id != 0 {
-			u.Auras = append(u.Auras, id)
+		id := v[UnitAura+i]
+		if id == 0 {
+			continue
 		}
+		a := Aura{Slot: int(i), SpellID: id, Name: spells.Name(id), Harmful: i >= PositiveAuraSlots,
+			Stacks: int(v[UnitAuraApps+i/4]>>(8*(i%4))&0xFF) + 1}
+		if end, ok := o.auraEnds[int(i)]; ok {
+			ms := max(end.Sub(now).Milliseconds(), 0)
+			a.RemainingMS = &ms
+		}
+		u.Auras = append(u.Auras, a)
+	}
+	u.StandState = game.StandStateName(v[UnitBytes1] & 0xFF)
+	if c := o.cast; c != nil && now.Before(c.end.Add(castGrace)) {
+		ms := c.end.Sub(now).Milliseconds()
+		u.Casting = &Cast{SpellID: c.spell, Name: spells.Name(c.spell), EndsInMS: &ms}
+	} else if ch := v[UnitChannelSpell]; ch != 0 {
+		u.Casting = &Cast{SpellID: ch, Name: spells.Name(ch), Channel: true}
 	}
 	if o.posAt.IsZero() {
 		u.PosAgeMS, u.Distance, u.Distance2D = -1, -1, -1

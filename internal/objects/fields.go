@@ -18,9 +18,11 @@ const (
 	UnitBytes0       uint16 = 0x24 // race, class, gender, power type (:94; Unit.h:455)
 	UnitFlags        uint16 = 0x2E // (:97; FIELD_UNIT_FIELD_FLAGS = 46 at :345)
 	UnitAura         uint16 = 0x2F // 48 slots of spell ids (:98-99)
+	UnitAuraApps     uint16 = 0x71 // UNIT_FIELD_AURAAPPLICATIONS: a byte per slot, stacks - 1 (:108; SpellAuras.cpp:7565-7574)
 	UnitMountDisplay uint16 = 0x85 // UNIT_FIELD_MOUNTDISPLAYID, non-zero while mounted (:118)
 	UnitBytes1       uint16 = 0x8A // UNIT_FIELD_BYTES_1, byte 0 is the stand state (:123; UnitDefines.h:74-85)
 	UnitDynamicFlags uint16 = 0x8F // (:128; FIELD_UNIT_DYNAMIC_FLAGS = 143 at :346)
+	UnitChannelSpell uint16 = 0x90 // the spell being channelled (:129)
 	UnitNPCFlags     uint16 = 0x93 // (:132; FIELD_UNIT_NPC_FLAGS = 147 at :347)
 )
 

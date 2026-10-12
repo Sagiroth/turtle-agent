@@ -225,3 +225,148 @@ func TestM5ContentFromCapture(t *testing.T) {
 		t.Errorf("last teleport at (%v, %v, %v), want (-1287, -2379.6, 91.7)", last.X, last.Y, last.Z)
 	}
 }
+
+// Every combat packet the server sent in milestones 5 and 6 parses with the source layouts.
+func TestCombatFromCaptures(t *testing.T) {
+	parsers := map[uint16]func([]byte) error{
+		opcode.SMSGAttackerstateupdate:    func(b []byte) error { _, err := ParseAttackerStateUpdate(b); return err },
+		opcode.SMSGSpellnonmeleedamagelog: func(b []byte) error { _, err := ParseSpellNonMeleeDamageLog(b); return err },
+		opcode.SMSGPeriodicauralog:        func(b []byte) error { _, err := ParsePeriodicAuraLog(b); return err },
+		opcode.SMSGSpellheallog:           func(b []byte) error { _, err := ParseSpellHealLog(b); return err },
+		opcode.SMSGSpellenergizelog:       func(b []byte) error { _, err := ParseSpellEnergizeLog(b); return err },
+		opcode.SMSGSpellStart:             func(b []byte) error { _, err := ParseSpellStart(b); return err },
+		opcode.SMSGSpellGo:                func(b []byte) error { _, err := ParseSpellGo(b); return err },
+		opcode.SMSGCastResult:             func(b []byte) error { _, err := ParseCastResult(b); return err },
+		opcode.SMSGSpellFailedOther:       func(b []byte) error { _, err := ParseSpellFailedOther(b); return err },
+		opcode.SMSGSpelllogmiss:           func(b []byte) error { _, err := ParseSpellLogMiss(b); return err },
+		opcode.SMSGPartykilllog:           func(b []byte) error { _, err := ParsePartyKillLog(b); return err },
+	}
+	seen := map[uint16]int{}
+	for _, name := range []string{"m5-attack.twcap", "m6-fight.twcap"} {
+		recs := fixture(t, name)
+		for op, parse := range parsers {
+			for _, body := range capture.Bodies(recs, op) {
+				if err := parse(body); err != nil {
+					t.Fatalf("%s %s % X: %v", name, opcode.Name(op), body, err)
+				}
+				seen[op]++
+			}
+		}
+	}
+	if seen[opcode.SMSGAttackerstateupdate] == 0 || seen[opcode.SMSGSpellGo] == 0 {
+		t.Fatalf("fixtures lack melee or spell packets: %v", seen)
+	}
+}
+
+// Milestone 6 content (the headless MVP fight, Task 30): the player and its two hired bots
+// fought the Barrens Giraffe. The player hit it in melee, each bot dealt damage or healing,
+// the party killed it, and every bot that acted is in the group list, which is what the
+// session's party flag on their events rests on (Session.appendEvent). The test spell,
+// Quel'dorei Meditation (52524, no weapon needed), went off and ticked rage.
+func TestM6FightContentFromCapture(t *testing.T) {
+	recs := fixture(t, "m6-fight.twcap")
+	const player packet.GUID = 0x1FA // Tagentone, as in m5-attack.twcap
+	const meditation = 52524
+
+	group := map[packet.GUID]string{}
+	for _, b := range capture.Bodies(recs, opcode.SMSGGroupList) {
+		g, err := ParseGroupList(b)
+		if err != nil {
+			t.Fatalf("% X: %v", b, err)
+		}
+		for _, m := range g.Members {
+			group[m.GUID] = m.Name
+		}
+	}
+	if len(group) < 2 {
+		t.Fatalf("group lists name %d members, want the 2 bots: %v", len(group), group)
+	}
+
+	var mob packet.GUID
+	for _, b := range capture.Bodies(recs, opcode.SMSGAttackstart) {
+		if a, err := ParseAttackStart(b); err == nil && a.Attacker == player {
+			mob = a.Victim
+		}
+	}
+	if !mob.IsCreature() {
+		t.Fatalf("player's attack target %v is not a creature", mob)
+	}
+
+	playerMelee := 0
+	acted := map[packet.GUID]uint32{} // damage or healing per non-player source
+	for _, b := range capture.Bodies(recs, opcode.SMSGAttackerstateupdate) {
+		m, _ := ParseAttackerStateUpdate(b)
+		if m.Attacker == player && m.Victim == mob && m.Total > 0 {
+			playerMelee++
+		}
+		if m.Attacker != player && m.Victim == mob {
+			acted[m.Attacker] += m.Total
+		}
+	}
+	for _, b := range capture.Bodies(recs, opcode.SMSGSpellnonmeleedamagelog) {
+		d, _ := ParseSpellNonMeleeDamageLog(b)
+		if d.Target == mob {
+			acted[d.Attacker] += d.Damage
+		}
+	}
+	for _, b := range capture.Bodies(recs, opcode.SMSGSpellheallog) {
+		h, _ := ParseSpellHealLog(b)
+		acted[h.Caster] += h.Amount
+	}
+	for _, b := range capture.Bodies(recs, opcode.SMSGPeriodicauralog) {
+		p, _ := ParsePeriodicAuraLog(b)
+		for _, tick := range p.Ticks {
+			if tick.Kind() == "heal" {
+				acted[p.Caster] += tick.Amount
+			}
+		}
+	}
+	if playerMelee == 0 {
+		t.Error("no melee damage from the player on the mob")
+	}
+	bots := 0
+	for g, amount := range acted {
+		if g == player || g == mob || amount == 0 {
+			continue
+		}
+		if _, ok := group[g]; !ok {
+			t.Errorf("%v dealt damage or healing but is not in any group list", g)
+			continue
+		}
+		bots++
+	}
+	if bots < 2 {
+		t.Errorf("%d bots dealt damage or healing, want both: %v (group %v)", bots, acted, group)
+	}
+
+	killed := false
+	for _, b := range capture.Bodies(recs, opcode.SMSGPartykilllog) {
+		k, err := ParsePartyKillLog(b)
+		if err != nil {
+			t.Fatalf("% X: %v", b, err)
+		}
+		_, inGroup := group[k.Killer]
+		killed = killed || (k.Victim == mob && (k.Killer == player || inGroup))
+	}
+	if !killed {
+		t.Error("no SMSG_PARTYKILLLOG for the mob by the party")
+	}
+
+	casts, ticks := 0, 0
+	for _, b := range capture.Bodies(recs, opcode.SMSGSpellGo) {
+		if g, _ := ParseSpellGo(b); g.Caster == player && g.SpellID == meditation {
+			casts++
+		}
+	}
+	for _, b := range capture.Bodies(recs, opcode.SMSGPeriodicauralog) {
+		p, _ := ParsePeriodicAuraLog(b)
+		for _, tick := range p.Ticks {
+			if p.Caster == player && p.SpellID == meditation && tick.Kind() == "energize" && tick.Amount > 0 {
+				ticks++
+			}
+		}
+	}
+	if casts == 0 || ticks == 0 {
+		t.Errorf("test spell %d: %d SMSG_SPELL_GO from the player, %d energize ticks", meditation, casts, ticks)
+	}
+}

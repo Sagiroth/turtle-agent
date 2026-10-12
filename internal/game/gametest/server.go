@@ -1,5 +1,5 @@
-// Package gametest writes combat packets the way the core does, for tests in game and
-// session. It imports only packet, so any test package can use it.
+// Combat packets written the way the core does, for tests in game and session.
+// gametest imports game (see gametest.go), so only external test packages (package game_test) may use it.
 package gametest
 
 import "github.com/pjerra/turtle-agent/internal/packet"

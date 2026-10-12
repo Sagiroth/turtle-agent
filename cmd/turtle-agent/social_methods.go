@@ -28,6 +28,11 @@ type handshakeParams struct {
 	WaitMS int    `json:"wait_ms,omitempty"`
 }
 
+type channelParams struct {
+	Name     string `json:"name"`
+	Password string `json:"password,omitempty"`
+}
+
 type sinceResult struct {
 	Since uint64 `json:"since"`
 }
@@ -58,6 +63,12 @@ func registerSocialMethods(srv *rpc.Server, s *session.Session) {
 		}
 		res.Next = collectTBM(ctx, log, res.Since, waitBound(p.WaitMS, 5000), &res.Status)
 		return res, nil
+	}))
+	srv.Register("join_channel", rpc.Typed(func(ctx context.Context, p channelParams) (empty, error) {
+		return empty{}, rpcErr(s.JoinChannel(ctx, p.Name, p.Password))
+	}))
+	srv.Register("leave_channel", rpc.Typed(func(ctx context.Context, p channelParams) (empty, error) {
+		return empty{}, rpcErr(s.LeaveChannel(ctx, p.Name))
 	}))
 }
 

@@ -230,6 +230,7 @@ func (s *Session) register() {
 	s.registerRaid()
 	s.registerLoot()
 	s.registerItems()
+	s.registerSocial()
 }
 
 func (s *Session) registerCore() {

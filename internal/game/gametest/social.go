@@ -48,3 +48,38 @@ func AddonMessage(self packet.GUID, prefix, text string, tag uint8) []byte {
 func PartyAddonMessage(sender packet.GUID, prefix, text string) []byte {
 	return ChatPacket(game.ChatParty, game.LangAddon, sender, "", 0, "", prefix+"\t"+text, 0)
 }
+
+// ChannelNotice is Channel::MakeNotifyPacket alone (Channel.cpp:883-888): the notices that
+// carry nothing but the channel name (you left, wrong password, not member, muted, …).
+func ChannelNotice(notice uint8, channel string) []byte {
+	return packet.NewWriter().U8(notice).CString(channel).Bytes()
+}
+
+// ChannelYouJoined is Channel::MakeYouJoined (Channel.cpp:902-907).
+func ChannelYouJoined(channel string, flags uint32) []byte {
+	return packet.NewWriter().U8(0x02).CString(channel).U32(flags).U32(0).Bytes()
+}
+
+// ChannelPlayer is a notice about one player: joined, left, password or owner changed,
+// announcements or moderation switched, already member, invite (Channel.cpp:890-900,
+// :937-947, :979-1001, :1040-1050).
+func ChannelPlayer(notice uint8, channel string, player packet.GUID) []byte {
+	return packet.NewWriter().U8(notice).CString(channel).GUID(player).Bytes()
+}
+
+// ChannelName is a notice naming a player by name: player not found, channel owner, not
+// banned, invited, invite banned (Channel.cpp:949-969, :1034-1038, :1072-1082).
+func ChannelName(notice uint8, channel, name string) []byte {
+	return packet.NewWriter().U8(notice).CString(channel).CString(name).Bytes()
+}
+
+// ChannelModeChange is Channel::MakeModeChange (Channel.cpp:971-977).
+func ChannelModeChange(channel string, player packet.GUID, oldFlags, newFlags uint8) []byte {
+	return packet.NewWriter().U8(0x0C).CString(channel).GUID(player).U8(oldFlags).U8(newFlags).Bytes()
+}
+
+// ChannelPlayerBy is a kick, ban or unban of target by source (Channel.cpp:1008-1013,
+// :1020-1032).
+func ChannelPlayerBy(notice uint8, channel string, target, source packet.GUID) []byte {
+	return packet.NewWriter().U8(notice).CString(channel).GUID(target).GUID(source).Bytes()
+}

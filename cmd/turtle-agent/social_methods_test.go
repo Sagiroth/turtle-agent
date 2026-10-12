@@ -114,3 +114,22 @@ func TestTBMHandshakeTimesOut(t *testing.T) {
 		t.Fatal("tbm_handshake did not time out")
 	}
 }
+
+func TestChannelMethods(t *testing.T) {
+	r := newRig(t)
+	if out := r.call("join_channel", `{"name":"tbtest","password":"pw"}`); out["error"] != nil {
+		t.Fatalf("%v", out)
+	}
+	r.expectBody(opcode.CMSGJoinChannel, packet.NewWriter().CString("tbtest").CString("pw").Bytes())
+	if out := r.call("chat", `{"type":"channel","to":"tbtest","text":"hi"}`); out["error"] != nil {
+		t.Fatalf("%v", out)
+	}
+	r.expectBody(opcode.CMSGMessagechat, packet.NewWriter().U32(0x0E).U32(0).CString("tbtest").CString("hi").Bytes())
+	if out := r.call("leave_channel", `{"name":"tbtest"}`); out["error"] != nil {
+		t.Fatalf("%v", out)
+	}
+	r.expectBody(opcode.CMSGLeaveChannel, packet.NewWriter().CString("tbtest").Bytes())
+	if out := r.call("join_channel", `{}`); errCode(out) != rpc.CodeGame {
+		t.Fatalf("%v", out)
+	}
+}

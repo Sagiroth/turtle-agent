@@ -478,16 +478,28 @@ terrain:
   anticheat's bound (a floor met a little above the arc) waits until it does not, at most until 900 ms after the last
   packet (the core flags a moving client silent for over 1000 ms, `SKIPPED_HEARTBEATS`);
 - `landed` says what it landed on: `navmesh` settles z (`z_unknown` false); `water` does not (the agent does not
-  swim: it stands on the water's surface, where the mesh has it); `guess` is the old behaviour.
+  swim: it stands on the water's surface, where the mesh has it); `guess` is the old behaviour. `floor_late` is true
+  when the floor search did not answer in time (below) and the landing is the guess for that reason.
 
 Without a navmesh (no `mmaps_dir`, a build without cgo, no tile under the point) a knockback lands back at the height
 it started at and a teleport stays where the server put it, both with `z_unknown` true. Limits: the mesh has no game
 objects and no walls of its own, so the wall rule is a stand-in for collision; a floor is where the mesh has it, within
 its detail error (a few tenths of a yard); a `walk_to` that ends above the ground does not fall (it sets `z_unknown`);
 a far teleport (`SMSG_NEW_WORLD`) does not fall either; landing in water sends `MSG_MOVE_FALL_LAND`, not the client's
-`MSG_MOVE_START_SWIM`. The floor search runs in the session loop after the knockback (or feather-fall) ack is sent, as
-the server drops an order not acked within 2 s; a flight's first query on an unloaded tile reads that tile (0.5-3 MB),
-and a missing tile is looked up once (until the next `path_to`/`walk_path` plan).
+`MSG_MOVE_START_SWIM`.
+
+The floor search never runs in the session loop, so heartbeats, order acks and pings stay on time while it reads a
+tile (0.5-3 MB) or waits for the planner. After a knockback (or feather-fall) the ack goes out first, as the server
+drops an order not acked within 2 s; the flight then waits up to 300 ms for the trace, sending nothing (the next
+heartbeat is then at most 600 ms after the ack). When the trace has not answered by then, the flight goes straight up
+and down where it began, on ground the server knows, and lands back there (`floor` `guess`, `floor_late` true): the
+plain guess, the arc's x and y at its starting height, would land under the terrain up a slope. `knocked_back` is
+emitted once the landing is known, or when a teleport or another knockback ends the flight first. After a GM teleport the player stands still where
+it was put until the search answers, then falls or settles z as above; an answer that comes after the player has moved
+again (a walk, a knockback, another teleport) is dropped. `path_to`/`walk_path` read their tiles without holding the
+planner, so a floor query waits behind a plan's Detour search only, not its disk reads. A missing tile is looked up
+once (until the next `path_to`/`walk_path` plan). The 300 ms wait and the late fallback are tested against a planner
+that stalls for 3 s; they have not been seen live.
 
 ## Navmesh walking
 

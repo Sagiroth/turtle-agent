@@ -641,9 +641,7 @@ func (s *Session) onTeleportAck(body []byte) error {
 	}
 	s.emit(events.Event{Kind: events.KindSession, Data: map[string]any{"state": "teleported", "x": a.Move.X, "y": a.Move.Y, "z": a.Move.Z}})
 	s.teleported()
-	if err := s.dropToFloor(s.now()); err != nil {
-		return &fatalError{err}
-	}
+	s.dropToFloor()
 	return nil
 }
 

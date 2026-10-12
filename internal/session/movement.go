@@ -78,7 +78,9 @@ func (s *Session) sendMove(op uint16, mi game.MoveInfo, body []byte) error {
 // serverPosition records a position the server put the player at. zKnown is false when
 // the z may be in the air (a GM teleport); the next position from the server settles it.
 func (s *Session) serverPosition(p [3]float32, zKnown bool) {
+	s.resolveFall() // a flight still waiting for its trace announces itself first
 	s.fall = nil
+	s.placed++
 	s.last = lastMove{pos: p, ctime: s.last.ctime}
 	s.mu.Lock()
 	s.pos[0], s.pos[1], s.pos[2] = p[0], p[1], p[2]
@@ -105,42 +107,68 @@ type fallState struct {
 	landPos  [3]float32     // where
 	onFloor  bool           // landPos is on a navmesh floor
 	water    bool           // and that floor is water, where the client would swim
+	frozen   bool           // the current arc began against a wall
 	nextBeat time.Time
+	tracing  uint64     // the trace in flight off the loop (0: none); see Session.traceFall
+	traceBy  time.Time  // when the flight stops waiting for it and keeps the guess
+	late     bool       // a trace came too late: the landing is a guess
+	announce string     // the event state ("knocked_back") emitted once the landing is known
+	annFrom  [3]float32 // and its start position
+	annAt    time.Time  // and time
 }
 
 // arc starts the current arc at from and start with downward speed v0 under the cap term,
-// and finds its landing. frozen keeps it from going across (it already hit a wall). The
-// speed is held to the cap both ways: with MoveSafeFall the server bounds a step up or down
-// by 7 yd/s (Movement.cpp:874-881). A floor query that fails lands it at startZ.
+// and finds its landing (begin, then traced). frozen keeps it from going across (it already
+// hit a wall).
 func (f *fallState) arc(from [3]float32, start time.Time, v0, term float64, frozen bool) {
+	f.begin(from, start, v0, term, frozen)
+	f.traced()
+}
+
+// begin starts the current arc and lands it, for now, back at startZ: a guess, which traced
+// replaces with the navmesh floor the arc meets. The speed is held to the cap both ways:
+// with MoveSafeFall the server bounds a step up or down by 7 yd/s (Movement.cpp:874-881).
+func (f *fallState) begin(from [3]float32, start time.Time, v0, term float64, frozen bool) {
 	f.from, f.start, f.term = from, start, term
 	f.v0 = max(min(v0, term), -term)
+	f.frozen = frozen
+	f.guess()
+}
+
+// guess lands the current arc at startZ, off the navmesh.
+func (f *fallState) guess() {
 	f.stopXY, f.bumpT = math.Inf(1), math.Inf(1)
-	if frozen {
+	if f.frozen {
 		f.stopXY = 0
 	}
-	limit := f.began.Add(maxFlight).Sub(start).Seconds()
 	f.onFloor, f.water = false, false
-	if f.floor != nil {
-		if t, ok := f.trace(limit); ok {
-			f.land = start.Add(time.Duration(t * float64(time.Second)))
-			return
-		}
-	}
-	f.stopXY, f.bumpT = math.Inf(1), math.Inf(1) // undo what the failed trace found
-	if frozen {
-		f.stopXY = 0
-	}
-	t := min(game.FallTimeTo(float64(from[2]-f.startZ), f.v0, term), max(limit, 0))
-	f.land = start.Add(time.Duration(t * float64(time.Second)))
+	t := min(game.FallTimeTo(float64(f.from[2]-f.startZ), f.v0, f.term), max(f.limit(), 0))
+	f.land = f.start.Add(time.Duration(t * float64(time.Second)))
 	f.landPos = f.pos(t)
 }
 
+// limit is how long the current arc may fly: up to maxFlight after the flight began.
+func (f *fallState) limit() float64 { return f.began.Add(maxFlight).Sub(f.start).Seconds() }
+
+// traced lands the current arc on the navmesh floor it meets (trace). It may read tiles and
+// wait for the planner, so the session runs it on a copy off its loop (Session.traceFall).
+// A floor query that fails, or no floor met in time, keeps the guess.
+func (f *fallState) traced() {
+	if f.floor == nil {
+		return
+	}
+	if t, ok := f.trace(f.limit()); ok {
+		f.land = f.start.Add(time.Duration(t * float64(time.Second)))
+		return
+	}
+	f.guess() // undo what the failed trace found
+}
+
 // restart continues the flight from where it is at now, at the speed it has, under a new
-// cap: the fall a feather-fall order changes mid-air.
+// cap: the fall a feather-fall order changes mid-air. Its landing is a guess until traced.
 func (f *fallState) restart(now time.Time, term float64) {
 	t := min(max(now.Sub(f.start), 0), f.land.Sub(f.start)).Seconds()
-	f.arc(f.at(now), now, f.speed(t), term, f.stopXY <= t)
+	f.begin(f.at(now), now, f.speed(t), term, f.stopXY <= t)
 }
 
 // pos is the current arc t seconds after it started, not stopped at the ground; after a
@@ -216,6 +244,7 @@ func (s *Session) onKnockBack(body []byte) error {
 	// navmesh (which may read a tile first), as the server drops a knockback whose ack has
 	// not come within Movement.PendingAckResponseTime (2 s, World.cpp:1348, Unit.cpp:7264).
 	term := fallTerm(s.toggles)
+	s.resolveFall() // a flight still waiting for its trace announces itself first
 	s.fall = &fallState{kb: k, began: now, startZ: from[2], floor: s.floorFunc(), from: from, start: now,
 		v0: max(min(float64(k.ZSpeed), term), -term), term: term, land: now.Add(maxFlight), nextBeat: now.Add(500 * time.Millisecond)}
 	s.mu.Lock()
@@ -226,8 +255,9 @@ func (s *Session) onKnockBack(body []byte) error {
 	if err := s.sendMove(opcode.CMSGMoveKnockBackAck, mi, game.BuildKnockBackAck(k, mi)); err != nil {
 		return &fatalError{err}
 	}
-	s.fall.arc(from, now, float64(k.ZSpeed), term, false)
-	s.emit(events.Event{Kind: events.KindSession, Data: s.fall.describe("knocked_back", from, now)})
+	s.fall.begin(from, now, float64(k.ZSpeed), term, false)
+	s.fall.announce, s.fall.annFrom, s.fall.annAt = "knocked_back", from, now
+	s.traceFall(now)
 	return nil
 }
 
@@ -244,6 +274,17 @@ func (s *Session) tickFall() error {
 		return nil
 	}
 	now := s.now()
+	if f.tracing != 0 {
+		if now.Before(f.traceBy) {
+			return nil // no beat, nor landing, on an arc the trace may still bend
+		}
+		// The planner is busy: keep a guess, and one that comes straight back down where
+		// the arc began, on ground the server knows, rather than the arc's own guess, which
+		// up a slope lands under the terrain (#31). No beat went out meanwhile to say otherwise.
+		f.late, f.frozen = true, true
+		f.guess()
+		s.resolveFall()
+	}
 	if !now.Before(f.land) {
 		p := f.landPos
 		s.mu.Lock()
@@ -265,7 +306,7 @@ func (s *Session) tickFall() error {
 			return err
 		}
 		s.emit(events.Event{Kind: events.KindSession, Data: map[string]any{"state": "landed", "x": p[0], "y": p[1], "z": p[2],
-			"z_unknown": zUnknown, "floor": f.floorKind(), "fall_ms": mi.FallTime}})
+			"z_unknown": zUnknown, "floor": f.floorKind(), "fall_ms": mi.FallTime, "floor_late": f.late}})
 		return nil
 	}
 	if f.land.Sub(now) < landGap {
@@ -329,6 +370,7 @@ func (s *Session) toggleHandler(o toggleOrder) handler {
 		}
 		if f := s.fall; f != nil && o.flag == game.MoveSafeFall { // traced after the ack, as a knockback
 			f.restart(now, fallTerm(s.toggles))
+			s.traceFall(now)
 		}
 		return nil
 	}

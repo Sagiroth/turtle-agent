@@ -56,6 +56,9 @@ func Replay(recs []capture.Record, opts Options) (*events.Log, ReplayReport, err
 	if opts.Log == nil {
 		opts.Log = events.New(math.MaxInt)
 	}
+	// No navmesh: a replay has no loop to hand an off-loop floor search back to (traceFall,
+	// dropToFloor), and the capture does not hold the mesh the live run had.
+	opts.Planner = nil
 	s := New(worldconn.NewOffline(), opts)
 	var clock time.Time
 	s.clockFn = func() time.Time { return clock }

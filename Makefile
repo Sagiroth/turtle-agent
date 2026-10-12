@@ -4,7 +4,7 @@ GOFMT := $(GOROOT_LOCAL)/bin/gofmt
 CORE ?= $(HOME)/tortoise-wow
 export GOTOOLCHAIN := local
 
-.PHONY: test fuzz fmt fmt-check vet nocgo build opcodes spellnames tbm-contract
+.PHONY: test fuzz fmt fmt-check vet nocgo build opcodes spellnames tbm-contract addon-host
 
 test: fmt-check vet nocgo
 	$(GO) test -race -count=1 ./...
@@ -49,3 +49,8 @@ spellnames:
 # EVENTS="a.json b.json" replays the TBM: lines of those saved events replies instead of the fixtures.
 tbm-contract:
 	GO=$(GO) tools/tbmcontract/run.sh $(foreach e,$(EVENTS),--events $(e))
+
+# The addon host's end-to-end tests against the real addon (README "Addon host"). `make test` runs them when the addon
+# is cached and lua5.1 is installed; this target fetches the addon first and fails instead of skipping.
+addon-host:
+	TBM_ADDON_DIR="$$(tools/tbmcontract/fetch.sh)" TBM_ADDON_HOST_STRICT=1 $(GO) test -race -count=1 -run 'AddonHost|TestHost' ./cmd/turtle-agent ./internal/addonhost

@@ -257,6 +257,11 @@ Python (`urllib`): read the token file, strip it, and add `"Authorization": "Bea
 | `tbm_buttons` | `tab` (Fight, Camp, Party, Roster, Guild, Raid, BotPanel; default all) | `addon_commit`, `send_delay_ms`, `poll_after_cmd_ms`, `action_timeout_ms`, `buttons[]` (`name`, `label`, `tab`, `command`, `bot_command`, `args`, `optional`, `scope`, `toggle`, `needs_enemy`, `pull_seconds`, `reply`, `intent`, `ok`, `fail`, `follow_up`, `mini_bar`, `requires_cap`, `multi`, `source`) |
 | `tbm_click` | `button` (`Fight.AoE`), `args` (`state`, `bot`, `name`, `mark`, `seconds`, `bag`, `slot`, …), `transport` (auto, chat, addon), `wait_ms` (default 8000), `force`, `follow_up` | `since`, `next`, `button`, `scope`, `sent` (`transport`, `text`, `channel`, `prefix`), `transport_reason`, `refreshed`, `reply` (`kind` ack, err, text, inventory, snapshot or timeout; `ok`, `line`, `ack`, `acks`, `err`, `lines`), `follow_up` (the roster response) |
 | `tbm_send` | `command` (with or without `.bot`), `transport`, `wait_ms` | like `tbm_click` without `button` and `scope`: the reply is the first ACK/ERR or roster response |
+| `addon_start` | `dir` (the addon checkout; default `$TBM_ADDON_DIR`, then `.cache/tbmcontract/addon-<pinned commit>`), `lua` (default lua5.1), `clock` (real, the default, or manual) | `dir`, `version` (the .toc version), `files`, `clock`, `sent` (what the addon sent while loading) |
+| `addon_stop` | | |
+| `addon_click` | `button` (a `tbm_buttons` name or label), or `tab` + `label` for any widget; `bot` (BotPanel; the Party row), `name`/`names` (Roster and Guild rows to tick), `mark` (CC marks row), `row`, `view` (BotPanel Gear, Bags, Behaviour), `bag` + `slot` (BotPanel items), `before`, `force`, `wait_ms` (real clock; default 8000, 0 = no wait) | `clicked` (each widget pressed and `/tbm` typed), `sent[]` (`mono_ms`, `kind` addon, chat or target, `channel`, `prefix`, `text`, `to`, `error`), `reply` (server lines the addon got), `timed_out`, `state` (as `addon_state`) |
+| `addon_state` | | `server` (`version`, `caps`, `transport` PARTY or null for chat), `window` (`shown`, `mode`, `tab`, `scope`), `status`, `switches[]` (`key`, `text`, `lamp` green, grey or gold, `state` on, off, mixed or unknown, `enabled`), `bots` (BOTSTATE by name), `roster[]`, `roster_shown[]` (Roster tab open), `claimed[]`, `cc_marks`, `party_rows[]` (Party tab open), `bot_panel` (open: `bot`, `view`, `title`, `sub`, `money`, `state`, `inventory`, `behaviour[]`), `raid` (Raid tab open), `last_ack`, `last_error`, `chat[]` (what reached the chat frame), `lua_errors[]`, `clock`, `sent[]` (last 50), `host` |
+| `addon_tick` | `ms` (1-120000) | `clock` (the addon's `GetTime()`), `sent[]` |
 | `join_channel` / `leave_channel` | `name`, `password` / `name` | |
 | `gossip_hello` | `guid`, `wait_ms` | `since`, `event`: the first answer within `wait_ms`: the menu (`gossip`), `gossip_complete`, or what the NPC opens at once (`quest_list`, `quest_details`, `quest_request_items`, `quest_offer_reward`, `vendor_list`, `trainer_list`) |
 | `gossip_select` | `guid`, `option`, `code` (coded options only), `wait_ms` | `since`, `event` (next menu, `gossip_complete`, or the list or quest panel the option opens) |
@@ -662,6 +667,62 @@ bin/turtle-agent fleet --config fleet.json --reconnect 3   # each child logs in 
 - Exit code: 0 only when every child exited 0; 9 when any child exited non-zero, was killed or could not be launched, or when
   the fleet is not fully in world after `--wait` (default 2 m; it then stops every child). The last line says how many failed.
 
+## Addon host
+
+The addon host runs the real TortoiseBotsManager addon (Lua 5.1) next to the agent, wired to the live session, so a
+test clicks its buttons and reads what it shows instead of a person doing it in the game client. Layout and pixels
+still need the real client; everything the addon decides (transport, toggles, lamps, roster rows, CC marks, the bot
+panel, the ACK/ERR it keeps) runs from the addon's own code.
+
+```sh
+tools/tbmcontract/fetch.sh            # once: the addon at the pinned commit, into .cache/ (or set TBM_ADDON_DIR)
+r addon_start '{}'                    # loads the addon; it sends its handshake (".bot help") as on login
+r addon_click '{"button":"Fight.AoE"}' # /tbm, the Fight tab, then the switch's own OnClick; waits for the ACK
+r addon_state '{}' | jq '.switches'   # [{"key":"aoe","text":"AoE Off","lamp":"grey","state":"off",...}, ...]
+```
+
+- How it runs: `addon_start` extracts `internal/addonhost/lua/` (the host, a small JSON codec and the 1.12 widget
+  mock shared with the TBM contract test) to a temp directory and starts `lua5.1 host.lua <addon dir>`, which loads
+  the `.toc` files in order and fires `ADDON_LOADED`, `PLAYER_LOGIN` and `PLAYER_ENTERING_WORLD`. The agent and the
+  sidecar speak one JSON object per line over stdin/stdout. A sidecar rather than a Go Lua VM: the addon runs on the
+  C Lua 5.1 the contract test uses, the module keeps no dependencies, and an addon error or endless loop cannot take
+  the agent down (a call that does not answer in 10 s kills the sidecar; `addon_stop`, then `addon_start` again).
+  The sidecar exits with the agent. Saved variables start empty, like a fresh install.
+- Into the addon: every `system` event as `CHAT_MSG_SYSTEM` (the raw text), `addon` events as `CHAT_MSG_ADDON`
+  (prefix, text, the channel upper-cased, sender), whispers to the player as `CHAT_MSG_WHISPER`, and `in_world` or
+  `new_world` as `PLAYER_ENTERING_WORLD`. The player, target, party1-4 and raid1-40 units come from `status`,
+  `unit` and `party`: a change fires `PARTY_MEMBERS_CHANGED` (and `RAID_ROSTER_UPDATE` in a raid) at the place of
+  the group event in the log, so the addon drops its transport verdict before it reads the next roster, as the
+  client does; a target change fires `PLAYER_TARGET_CHANGED`, a party member's death `UNIT_HEALTH`. Not known to the
+  agent, so not shown to the addon: classes of other units (`UnitClass` returns nothing), ghosts (reported dead),
+  item names (`GetItemInfo` returns nothing, the bot panel shows question marks), trades (`TRADE_SHOW`).
+- Out of the addon: `SendAddonMessage` goes out as an addon message on its channel, `SendChatMessage` as chat of
+  its type (a `.bot` line as say, which the server runs), `TargetUnit`/`TargetByName` as a `target`. These are the
+  same send paths as `addon_send`, `chat` and `target`; the host reads the session only through the event log and
+  its read-only views, so the session loop stays the single owner of the connection. Each send is in `sent`, with
+  the error when the agent could not send it. `GuildUninvite` and `StaticPopup_Show` are not provided (the addon
+  checks for them), so releasing a claimed bot from the Guild tab does nothing.
+- Clicks are a player's: `addon_click` types `/tbm full` when the window is closed (which polls the roster, as in
+  the game), clicks the tab, then the widget whose text is the label (exactly, else the one that starts with it:
+  `AoE` finds `AoE Off`) among the visible ones in that view. A greyed-out button is refused (`force` calls its
+  `OnClick` anyway). Roster and Guild buttons tick exactly the rows of `name`/`names` first (only rows on screen,
+  seven on the Roster tab); `Fight.CCAssign`/`Fight.CCClear` open the marks panel (`CC Mark`) and press Next or X
+  in the row of `mark` (Next gives the mark to the next online bot, as in the game, not to a bot you name); BotPanel
+  buttons open the bot's panel (`/tbm bags <bot>`, which asks for its inventory), its `view`, and for items click
+  the item at `bag`/`slot` and then Equip, Unequip or Give to me. Any other widget: `tab` and `label` (and `row`,
+  e.g. the Party tab's role buttons: `{"tab":"Party","bot":"Gorm","label":"Tank"}`).
+- The addon throttles its own sends (one per 0.35 s) and queues the rest, so a click right after another send leaves
+  a little later, from the queue. With the real clock (default) the host ticks the addon's `OnUpdate` every 100 ms
+  and `addon_click` waits until the addon sent something and the server's reply arrived (ACK/ERR, the end of an
+  inventory or roster, or any line for text replies) or `wait_ms` ran out; nothing sent within 1 s ends the wait
+  (the click only changed the window). `clock: manual` stops the clock: only `addon_tick` advances `GetTime()` and
+  runs `OnUpdate` (in 100 ms steps), events are fed on every call, and `addon_click` does not wait. The tests use it.
+- The addon's periodic work runs as in the game: a roster poll 1 s after loading (its last poll is "never") and 3.5 s
+  after entering the world, every 8 s while the window is open (20 s closed), and 1.4 s after a non-action command.
+- `make addon-host` fetches the addon and runs the end-to-end tests (hire a bot, the addon shows it, click AoE, the
+  ACK turns the lamp grey and the next roster agrees); `make test` runs them too when the addon is cached and
+  `lua5.1` is installed, and skips them otherwise.
+
 ## TBM contract test
 
 `make tbm-contract` checks that the TortoiseBots server module and its TortoiseBotsManager addon (TBM) still
@@ -682,7 +743,7 @@ make tbm-contract EVENTS="run1/events.json"      # replay the TBM: lines of a sa
 `EVENTS` takes what the `events` RPC returns, saved to a file (a bare array, `{"events": [...]}` or the whole reply).
 `tools/tbmlines` extracts the lines; it reads `data.raw` when present, because the colour-stripped `text` has lost the
 `|r` of fields such as `|ready`. The addon is downloaded at the commit pinned in `tools/tbmcontract/fetch.sh` into
-`.cache/` (ignored, never vendored); bump the commit there on purpose. The mock in `tools/tbmcontract/mock.lua` is copied
+`.cache/` (ignored, never vendored); bump the commit there on purpose. The mock in `internal/addonhost/lua/mock.lua` (shared with the addon host) is copied
 from the addon's own `tests/regression.lua` (MIT). Without `lua5.1` or network the target skips with a message
 (`TBM_CONTRACT_STRICT=1` makes that an error); it is not part of `make test`. `TBM_ADDON_DIR=/path` uses your own
 checkout of the addon instead (read only, the pin is bypassed, and a directory without the `.toc` is refused rather
@@ -720,6 +781,7 @@ you set).
 | `internal/events` | ordered event log with cursors |
 | `internal/tbm` | the TortoiseBots addon (TBM) protocol: handshake commands, the `TBM:` reply lines, the generated button table, the transport rule and reply matching (`tools/tbmbuttongen` writes the table) |
 | `tools/tbmlines`, `tools/tbmcontract` | extract `TBM:` lines from an events file; replay them through the real TBM addon (Lua) |
+| `internal/addonhost` | the addon host: the lua5.1 sidecar that runs the real TBM addon on the 1.12 widget mock, and the events it gets |
 | `internal/capture` | packet capture files and the secret scan |
 | `internal/rpc`, `internal/netutil` | loopback JSON-RPC server |
 | `cmd/turtle-agent` | the CLI (`login`, `fleet`, capture tools including `capture events`) |

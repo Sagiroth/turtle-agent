@@ -29,7 +29,8 @@ spell on an enemy-faction player) and compare the text.
 
 The agent still simulates no fall onto terrain. After a GM teleport, a walk that changed height or a knockback
 landing (assumed back at the starting height), `status.z_unknown` is true and stays so until the server moves the
-player itself: a spline on it (fear, charge), a teleport, or a reconnect. The core sends no other position of its own.
+player itself with a spline on it (fear, charge), or until a reconnect. A teleport keeps it true, because its z is
+a guess too. The core sends no other position of its own.
 
 1. Teleport to a Z about 20 yards above the ground, wait, and compare `status.z` (and `z_unknown`) with the ground;
    then walk a few yards and read the server log for OVERSPEED_Z (expect none: walk steps are held to the bound).

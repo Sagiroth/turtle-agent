@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pjerra/turtle-agent/internal/config"
+	"github.com/pjerra/turtle-agent/internal/rpc"
 )
 
 type fakeChild struct {
@@ -377,5 +379,43 @@ func TestFleetLaterFailureNotHiddenByEarlierCleanExit(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "Healtwo failed") {
 		t.Errorf("stderr:\n%s", errOut.String())
+	}
+}
+
+func TestFleetTokenAndStatusHeader(t *testing.T) {
+	dir := t.TempDir()
+	settings := filepath.Join(dir, "settings.json")
+	if tok := fleetToken(config.Settings{}, settings, "127.0.0.1:8771"); tok != "" {
+		t.Fatalf("no file yet: %q", tok)
+	}
+	if _, err := rpc.WriteTokenFile(rpc.TokenFile(settings, 8771), "child-one-token-0123"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rpc.WriteTokenFile(rpc.TokenFile(settings, 8772), "child-two-token-0123"); err != nil {
+		t.Fatal(err)
+	}
+	if a, b := fleetToken(config.Settings{}, settings, "127.0.0.1:8771"), fleetToken(config.Settings{}, settings, "[::1]:8772"); a != "child-one-token-0123" || b != "child-two-token-0123" {
+		t.Fatalf("one token per child: %q %q", a, b)
+	}
+	if tok := fleetToken(config.Settings{RPCToken: "shared-token-0123456"}, settings, "127.0.0.1:8771"); tok != "shared-token-0123456" {
+		t.Fatalf("shared token: %q", tok)
+	}
+	if tok := fleetToken(config.Settings{RPCAuth: "off"}, settings, "127.0.0.1:8771"); tok != "" {
+		t.Fatalf("auth off: %q", tok)
+	}
+
+	srv := rpc.NewServer()
+	srv.SetToken("child-one-token-0123")
+	srv.Register("status", rpc.Typed(func(ctx context.Context, _ struct{}) (map[string]string, error) {
+		return map[string]string{"state": "in_world"}, nil
+	}))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	if st, err := rpcStatus(context.Background(), addr, "child-one-token-0123"); err != nil || st != "in_world" {
+		t.Fatalf("with token: %q %v", st, err)
+	}
+	if _, err := rpcStatus(context.Background(), addr, ""); err == nil {
+		t.Fatal("status answered without a token")
 	}
 }

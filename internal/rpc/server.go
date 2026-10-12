@@ -10,6 +10,7 @@ package rpc
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -62,12 +63,52 @@ func Typed[P, R any](fn func(ctx context.Context, p P) (R, error)) Method {
 	}
 }
 
+// Server routes calls. It fails closed: until SetToken or DisableAuth is called, Handler
+// answers every request with 401.
 type Server struct {
 	mu      sync.RWMutex
 	methods map[string]Method
+	auth    authMode
+	token   [sha256.Size]byte // SHA-256 of the bearer token (authToken)
 }
 
+type authMode uint8
+
+const (
+	authClosed authMode = iota // nothing configured: refuse everything
+	authToken
+	authOff
+)
+
 func NewServer() *Server { return &Server{methods: map[string]Method{}} }
+
+// SetToken requires "Authorization: Bearer <token>" on every call.
+func (s *Server) SetToken(token string) {
+	s.mu.Lock()
+	s.token, s.auth = sha256.Sum256([]byte(token)), authToken
+	s.mu.Unlock()
+}
+
+// DisableAuth lets every request through that passes the loopback, Host and Origin checks
+// (settings "rpc_auth": "off").
+func (s *Server) DisableAuth() {
+	s.mu.Lock()
+	s.auth = authOff
+	s.mu.Unlock()
+}
+
+func (s *Server) authorized(r *http.Request) bool {
+	s.mu.RLock()
+	mode, tok := s.auth, s.token
+	s.mu.RUnlock()
+	switch mode {
+	case authOff:
+		return true
+	case authToken:
+		return tokenMatch(r.Header.Get("Authorization"), tok)
+	}
+	return false
+}
 
 func (s *Server) Register(name string, m Method) {
 	s.mu.Lock()
@@ -140,7 +181,8 @@ type response struct {
 	Error   *Error          `json:"error,omitempty"`
 }
 
-// Handler serves POST /rpc for local processes; browser-origin requests are refused.
+// Handler serves POST /rpc for local processes; browser-origin requests are refused and
+// every call needs the bearer token (SetToken) unless DisableAuth was called.
 // One request object per POST: JSON-RPC batches (arrays) are not supported and get
 // Invalid Request.
 func (s *Server) Handler() http.Handler {
@@ -162,6 +204,12 @@ func (s *Server) Handler() http.Handler {
 		}
 		if origin || fetch || !netutil.IsLoopback(host) {
 			http.Error(w, "local process requests only", http.StatusForbidden)
+			return
+		}
+		if !s.authorized(r) {
+			// No detail: not which part was wrong, not that a token exists.
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		if media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || media != "application/json" {

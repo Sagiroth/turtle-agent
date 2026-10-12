@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -67,6 +68,35 @@ func checkCapture(path, account, password string) error {
 		return fmt.Errorf("capture: %w", capture.ErrSecretTooShort)
 	}
 	return nil
+}
+
+// rpcAuthSetup picks the RPC bearer token: none with rpc_auth "off", the settings file's
+// rpc_token, or a fresh random one written (0600) to rpc-<port>.token next to the settings
+// file, where fleet and local clients read it. It reports where the token is, never the
+// token. The returned func removes the generated file.
+func rpcAuthSetup(st config.Settings, cfgPath string, ln net.Listener, stderr io.Writer) (token string, remove func(), err error) {
+	remove = func() {}
+	switch {
+	case !st.AuthOn():
+		fmt.Fprintln(stderr, `rpc: authentication is OFF ("rpc_auth": "off"); any local process can drive the character`)
+		return "", remove, nil
+	case st.RPCToken != "":
+		fmt.Fprintln(stderr, `rpc: calls need the settings file's "rpc_token" (Authorization: Bearer)`)
+		return st.RPCToken, remove, nil
+	}
+	tcp, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		return "", remove, errors.New("listener is not TCP")
+	}
+	if token, err = rpc.NewToken(); err != nil {
+		return "", remove, err
+	}
+	path := rpc.TokenFile(cfgPath, tcp.Port)
+	if remove, err = rpc.WriteTokenFile(path, token); err != nil {
+		return "", func() {}, err
+	}
+	fmt.Fprintf(stderr, "rpc: calls need the token in %s (Authorization: Bearer)\n", path)
+	return token, remove, nil
 }
 
 // sessionOptions are the session options of the first login and of every reconnect, so
@@ -148,6 +178,12 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return exitUsage
 	}
 	defer ln.Close() // every early return; Serve closes it too once it runs
+	rpcToken, removeToken, err := rpcAuthSetup(st, *cfgPath, ln, stderr)
+	if err != nil {
+		fmt.Fprintln(stderr, "rpc:", err)
+		return exitUsage
+	}
+	defer removeToken()
 
 	if *capPath != "" {
 		if err := checkCapture(*capPath, account, password); err != nil {
@@ -250,6 +286,11 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			character: character, log: log, stderr: stderr, redact: s.Redact, planner: planner}
 	}
 	srv := rpc.NewServer()
+	if rpcToken == "" {
+		srv.DisableAuth()
+	} else {
+		srv.SetToken(rpcToken)
+	}
 	registerMethodsFor(srv, cur.Load)
 	rctx, stopRPC := context.WithCancel(context.Background())
 	served := make(chan error, 1)

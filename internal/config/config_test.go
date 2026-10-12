@@ -53,6 +53,10 @@ func TestRejectsBadSettings(t *testing.T) {
 		"public rpc":    `{"realmd":"h:1","accounts":{"a":"b"},"rpc":"0.0.0.0:8765"}`,
 		"no accounts":   `{"realmd":"h:1","accounts":{}}`,
 		"empty pw":      `{"realmd":"h:1","accounts":{"a":""}}`,
+		"bad rpc_auth":  `{"realmd":"h:1","accounts":{"a":"b"},"rpc_auth":"yes"}`,
+		"short token":   `{"realmd":"h:1","accounts":{"a":"b"},"rpc_token":"short"}`,
+		"space token":   `{"realmd":"h:1","accounts":{"a":"b"},"rpc_token":"has a space in it, long"}`,
+		"token and off": `{"realmd":"h:1","accounts":{"a":"b"},"rpc_auth":"off","rpc_token":"0123456789abcdef"}`,
 	} {
 		if _, err := Load(writeSettings(t, 0o600, body)); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -108,5 +112,25 @@ func TestMmapsDir(t *testing.T) {
 	_, err = Load(writeSettings(t, 0o600, fmt.Sprintf(`{"realmd":"h:1","accounts":{"a":"b"},"mmaps_dir":%q}`, filepath.Join(dir, "none"))))
 	if err == nil || !strings.Contains(err.Error(), "mmaps_dir") {
 		t.Fatalf("missing folder: %v", err)
+	}
+}
+
+func TestRPCAuthSettings(t *testing.T) {
+	for body, want := range map[string]bool{
+		`{"realmd":"h:1","accounts":{"a":"b"}}`:                                true,
+		`{"realmd":"h:1","accounts":{"a":"b"},"rpc_auth":"on"}`:                true,
+		`{"realmd":"h:1","accounts":{"a":"b"},"rpc_auth":"off"}`:               false,
+		`{"realmd":"h:1","accounts":{"a":"b"},"rpc_token":"0123456789abcdef"}`: true,
+	} {
+		s, err := Load(writeSettings(t, 0o600, body))
+		if err != nil || s.AuthOn() != want {
+			t.Errorf("%s: on=%v err=%v, want on=%v", body, s.AuthOn(), err, want)
+		}
+	}
+	s, _ := Load(writeSettings(t, 0o600, `{"realmd":"h:1","accounts":{"a":"b"},"rpc_token":"0123456789abcdef"}`))
+	for _, out := range []string{fmt.Sprintf("%v", s), fmt.Sprintf("%#v", s)} {
+		if strings.Contains(out, "0123456789abcdef") {
+			t.Fatalf("token leaked: %s", out)
+		}
 	}
 }

@@ -24,10 +24,16 @@ type Spot struct {
 }
 
 type Settings struct {
-	Realmd    string            `json:"realmd"`
-	Realm     string            `json:"realm,omitempty"`
-	WorldAddr string            `json:"world_addr,omitempty"`
-	RPC       string            `json:"rpc,omitempty"`
+	Realmd    string `json:"realmd"`
+	Realm     string `json:"realm,omitempty"`
+	WorldAddr string `json:"world_addr,omitempty"`
+	RPC       string `json:"rpc,omitempty"`
+	// RPCAuth is "on" (the default) or "off". On, every RPC call must carry a bearer token:
+	// RPCToken from this file, else a random one the agent writes to rpc-<port>.token next
+	// to the settings file. Off is a transition switch and leaves the RPC open to every
+	// local process.
+	RPCAuth   string            `json:"rpc_auth,omitempty"`
+	RPCToken  string            `json:"rpc_token,omitempty"`
 	Accounts  map[string]string `json:"accounts"`
 	Bots      []string          `json:"bots,omitempty"`
 	TestSpell uint32            `json:"test_spell,omitempty"`
@@ -38,6 +44,12 @@ type Settings struct {
 }
 
 const DefaultRPC = "127.0.0.1:8765"
+
+// MinTokenLen is the shortest rpc_token accepted; the generated ones are 43 characters.
+const MinTokenLen = 16
+
+// AuthOn reports whether RPC calls need a token (everything but rpc_auth "off").
+func (s Settings) AuthOn() bool { return s.RPCAuth != "off" }
 
 func DefaultPath() string {
 	home, err := os.UserHomeDir()
@@ -95,6 +107,24 @@ func (s Settings) validate() error {
 	if _, _, err := netutil.CheckLoopbackAddr(s.RPC); err != nil {
 		return fmt.Errorf(`"rpc" %w`, err)
 	}
+	switch s.RPCAuth {
+	case "", "on", "off":
+	default:
+		return errors.New(`"rpc_auth" must be "on" or "off"`)
+	}
+	if s.RPCToken != "" {
+		if s.RPCAuth == "off" {
+			return errors.New(`"rpc_token" is set but "rpc_auth" is "off"`)
+		}
+		if len(s.RPCToken) < MinTokenLen {
+			return fmt.Errorf(`"rpc_token" must be at least %d characters`, MinTokenLen)
+		}
+		for _, c := range s.RPCToken { // it travels in a header: visible ASCII, no space
+			if c <= ' ' || c > '~' {
+				return errors.New(`"rpc_token" may hold visible ASCII characters only (no spaces)`)
+			}
+		}
+	}
 	if s.MmapsDir != "" {
 		if info, err := os.Stat(s.MmapsDir); err != nil || !info.IsDir() {
 			return fmt.Errorf(`"mmaps_dir" %s is not a folder (copy the server's data/mmaps files there)`, s.MmapsDir)
@@ -136,7 +166,14 @@ func (s Settings) OnlyAccount() (string, error) {
 
 // String keeps passwords and account names out of %v, %+v and %s formatting.
 func (s Settings) String() string {
-	return fmt.Sprintf("Settings{realmd=%s realm=%q rpc=%s accounts=%d passwords=redacted}", s.Realmd, s.Realm, s.RPC, len(s.Accounts))
+	return fmt.Sprintf("Settings{realmd=%s realm=%q rpc=%s rpc_auth=%s accounts=%d passwords=redacted}", s.Realmd, s.Realm, s.RPC, s.rpcAuth(), len(s.Accounts))
+}
+
+func (s Settings) rpcAuth() string {
+	if s.AuthOn() {
+		return "on"
+	}
+	return "off"
 }
 
 // GoString keeps passwords out of %#v.

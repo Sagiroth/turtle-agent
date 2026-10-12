@@ -21,6 +21,7 @@ import (
 
 	"github.com/pjerra/turtle-agent/internal/config"
 	"github.com/pjerra/turtle-agent/internal/netutil"
+	"github.com/pjerra/turtle-agent/internal/rpc"
 	"github.com/pjerra/turtle-agent/internal/session"
 )
 
@@ -151,7 +152,9 @@ func fleetCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		start: func(m fleetMember, w io.Writer) (fleetChild, error) {
 			return startProcess(exe, *settingsPath, m, w)
 		},
-		status: rpcStatus,
+		status: func(ctx context.Context, addr string) (string, error) {
+			return rpcStatus(ctx, addr, fleetToken(st, *settingsPath, addr))
+		},
 	}
 	return runFleet(ctx, members, deps, fleetOpts{stagger: *stagger, poll: 500 * time.Millisecond, wait: *wait, stopGrace: 60 * time.Second}, stdout, stderr)
 }
@@ -400,8 +403,32 @@ func (c *procChild) Kill()                 { _ = c.cmd.Process.Kill() }
 func (c *procChild) Done() <-chan struct{} { return c.done }
 func (c *procChild) Code() int             { return c.code }
 
+// fleetToken is the bearer token for the child on addr: none with rpc_auth "off", the
+// settings file's rpc_token (shared by every child), or else the one that child generated
+// into rpc-<port>.token next to the settings file. A child that has not written its file
+// yet gives "", its 401 reads as "starting", and the next poll tries again.
+func fleetToken(st config.Settings, settingsPath, addr string) string {
+	if !st.AuthOn() {
+		return ""
+	}
+	if st.RPCToken != "" {
+		return st.RPCToken
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return ""
+	}
+	tok, _ := rpc.ReadTokenFile(rpc.TokenFile(settingsPath, n))
+	return tok
+}
+
 // rpcStatus calls the agent's JSON-RPC status method and returns the session state.
-func rpcStatus(ctx context.Context, addr string) (string, error) {
+// A non-empty token goes out as the bearer token.
+func rpcStatus(ctx context.Context, addr, token string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/rpc",
@@ -410,6 +437,9 @@ func rpcStatus(ctx context.Context, addr string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err

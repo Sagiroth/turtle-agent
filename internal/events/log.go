@@ -47,6 +47,17 @@ const (
 	KindChannelNotify  = "channel_notify"
 	KindGossip         = "gossip"          // SMSG_GOSSIP_MESSAGE: an NPC's menu
 	KindGossipComplete = "gossip_complete" // SMSG_GOSSIP_COMPLETE: the menu closed
+	// The loot window of a corpse (or a container opened with use_item), data.guid in source.
+	KindLootOpen       = "loot_open"        // SMSG_LOOT_RESPONSE: the window with its money and items
+	KindLootError      = "loot_error"       // SMSG_LOOT_RESPONSE refused: data.reason
+	KindLootTaken      = "loot_taken"       // SMSG_LOOT_REMOVED: a slot left the window
+	KindLootMoney      = "loot_money"       // SMSG_LOOT_CLEAR_MONEY: the window's money was taken
+	KindLootMoneyShare = "loot_money_share" // SMSG_LOOT_MONEY_NOTIFY: this player's share of split money
+	KindLootClosed     = "loot_closed"      // SMSG_LOOT_RELEASE_RESPONSE
+	// Self state changes seen in the player's own update fields.
+	KindMount       = "mount"        // UNIT_FIELD_MOUNTDISPLAYID went to or from 0: data.mounted
+	KindMountResult = "mount_result" // SMSG_MOUNTRESULT and SMSG_DISMOUNTRESULT: data.result
+	KindStandState  = "stand_state"  // the stand state changed (sit while eating or drinking): data.state
 )
 
 // ChatKinds is what the chat_log method returns.

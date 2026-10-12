@@ -1,6 +1,10 @@
 package game
 
-import "github.com/pjerra/turtle-agent/internal/packet"
+import (
+	"fmt"
+
+	"github.com/pjerra/turtle-agent/internal/packet"
+)
 
 // Core cites in this file are tortoise-wow upstream/1181dev 5784fb0.
 
@@ -32,4 +36,93 @@ func ParseInventoryChangeFailure(body []byte) (InventoryChangeFailure, error) {
 		r.U8() // bag subclass
 	}
 	return f, done(r, "SMSG_INVENTORY_CHANGE_FAILURE")
+}
+
+// BuildUseItem is CMSG_USE_ITEM: u8 bag, u8 slot, u8 spell count (read and ignored,
+// SpellHandler.cpp:37-42), then the spell's targets as SpellCastTargets::read takes them
+// (Spell.cpp:180-228): a u16 mask and, for a unit, its packed guid. A zero target uses the
+// self mask, which the core fills with the caster (Spell.cpp:182-190).
+func BuildUseItem(bag, slot uint8, target packet.GUID) []byte {
+	w := packet.NewWriter().U8(bag).U8(slot).U8(0)
+	if target == 0 {
+		return w.U16(TargetFlagSelf).Bytes()
+	}
+	return w.U16(TargetFlagUnit).PackedGUID(target).Bytes()
+}
+
+// BuildCancelAura is CMSG_CANCEL_AURA: u32 spell id of the aura to remove
+// (SpellHandler.cpp:428-431). Dismounting a mount aura is this packet; 1.12 has no
+// CMSG_CANCEL_MOUNT_AURA.
+func BuildCancelAura(spell uint32) []byte { return packet.NewWriter().U32(spell).Bytes() }
+
+// MountResultName names the u32 of SMSG_MOUNTRESULT (UnitMountResult, UnitDefines.h:579-592).
+func MountResultName(v uint32) string {
+	switch v {
+	case 0:
+		return "invalid_mountee"
+	case 1:
+		return "too_far_away"
+	case 2:
+		return "already_mounted"
+	case 3:
+		return "not_mountable"
+	case 4:
+		return "not_your_pet"
+	case 5:
+		return "other"
+	case 6:
+		return "looting"
+	case 7:
+		return "race_cant_mount"
+	case 8:
+		return "shapeshifted"
+	case 9:
+		return "forced_dismount"
+	case 10:
+		return "ok"
+	}
+	return fmt.Sprintf("unknown(%d)", v)
+}
+
+// DismountResultName names the u32 of SMSG_DISMOUNTRESULT (UnitDismountResult,
+// UnitDefines.h:594-600).
+func DismountResultName(v uint32) string {
+	switch v {
+	case 0:
+		return "no_pet"
+	case 1:
+		return "not_mounted"
+	case 2:
+		return "not_your_pet"
+	case 3:
+		return "ok"
+	}
+	return fmt.Sprintf("unknown(%d)", v)
+}
+
+// ParseResultCode reads the one u32 of SMSG_MOUNTRESULT and SMSG_DISMOUNTRESULT
+// (Player.cpp:20213-20226).
+func ParseResultCode(body []byte, name string) (uint32, error) {
+	r := packet.NewReader(body)
+	v := r.U32()
+	return v, done(r, name)
+}
+
+// StandStateName names the stand state, byte 0 of UNIT_FIELD_BYTES_1 (UnitDefines.h:74-85).
+func StandStateName(v uint32) string {
+	switch v {
+	case 0:
+		return "stand"
+	case 1:
+		return "sit"
+	case 2, 4, 5, 6:
+		return "sit_chair"
+	case 3:
+		return "sleep"
+	case 7:
+		return "dead"
+	case 8:
+		return "kneel"
+	}
+	return fmt.Sprintf("unknown(%d)", v)
 }

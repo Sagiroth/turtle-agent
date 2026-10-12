@@ -14,6 +14,8 @@ const (
 	ChangeCreated ChangeKind = iota + 1
 	ChangeHealth
 	ChangeAura
+	ChangeMount // UNIT_FIELD_MOUNTDISPLAYID changed: Old and New are the display ids
+	ChangeStand // the stand state (byte 0 of UNIT_FIELD_BYTES_1) changed: Old and New are the states
 )
 
 // DefaultLimit is the Units limit when the filter sets none.
@@ -146,6 +148,10 @@ func setValues(o *object, vals map[uint16]uint32, ch []Change, report bool) []Ch
 			ch = append(ch, Change{GUID: o.guid, Kind: ChangeHealth, Old: old, New: v})
 		case k >= UnitAura && k < UnitAura+AuraSlots:
 			ch = append(ch, Change{GUID: o.guid, Kind: ChangeAura, Slot: int(k - UnitAura), Old: old, New: v})
+		case k == UnitMountDisplay:
+			ch = append(ch, Change{GUID: o.guid, Kind: ChangeMount, Old: old, New: v})
+		case k == UnitBytes1 && old&0xFF != v&0xFF:
+			ch = append(ch, Change{GUID: o.guid, Kind: ChangeStand, Old: old & 0xFF, New: v & 0xFF})
 		}
 	}
 	return ch
@@ -212,6 +218,16 @@ func (s *Store) Entry(g packet.GUID) uint32 {
 		return o.values[FieldEntry]
 	}
 	return g.Entry()
+}
+
+// Field is the update field idx of g as last sent, 0 when g or the field is unknown.
+func (s *Store) Field(g packet.GUID, idx uint16) uint32 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if o, ok := s.objs[g]; ok {
+		return o.values[idx]
+	}
+	return 0
 }
 
 // Owners returns the charmer, summoner and creator of g (zero when unset or unknown), so
@@ -329,6 +345,34 @@ func (s *Store) Backpack(player packet.GUID) []Item {
 	}
 	return out
 }
+
+// Bags lists the items inside the player's four bags (inventory slots 19-22), bag by bag
+// in slot order, from each bag's CONTAINER_FIELD_SLOT_1 fields. A bag whose create block
+// has not arrived holds nothing yet.
+func (s *Store) Bags(player packet.GUID) []Item {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.objs[player]
+	if !ok {
+		return nil
+	}
+	var out []Item
+	for bag := BagFirst; bag < BagEnd; bag++ {
+		c, ok := s.objs[guidAt(p.values, PlayerInvSlotHead+2*uint16(bag))]
+		if !ok {
+			continue
+		}
+		for slot := uint32(0); slot < c.values[ContainerNumSlots] && slot < maxBagSlots; slot++ {
+			if it, ok := s.item(bag, uint8(slot), guidAt(c.values, ContainerSlot1+2*uint16(slot))); ok {
+				out = append(out, it)
+			}
+		}
+	}
+	return out
+}
+
+// maxBagSlots bounds a bag's slot count: a container holds at most 36 items.
+const maxBagSlots = 36
 
 // ItemAt is the item at bag/slot as CMSG_AUTOEQUIP_ITEM addresses it: bag 255 with an
 // inventory slot up to the backpack's last (38), or a bag slot 19-22 with a slot inside

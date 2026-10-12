@@ -22,8 +22,8 @@ func (s *Session) Inventory() []objects.Item {
 	return s.store.Backpack(s.selfGUID())
 }
 
-// EquipRef picks the item to equip: the first backpack item with Entry, or Bag/Slot
-// (Bag defaults to the backpack, 255).
+// EquipRef picks an item: the first item with Entry in the backpack or the bags, or
+// Bag/Slot (Bag defaults to the backpack, 255).
 type EquipRef struct {
 	Entry uint32
 	Bag   *uint8
@@ -53,16 +53,22 @@ func (s *Session) Equip(ctx context.Context, ref EquipRef) (objects.Item, error)
 	return v.(objects.Item), nil
 }
 
-// pickItem finds ref: the first backpack item with the entry, or the item at bag/slot.
+// Items lists every item in the backpack and the bags, backpack first.
+func (s *Session) Items() []objects.Item {
+	return append(s.store.Backpack(s.selfGUID()), s.store.Bags(s.selfGUID())...)
+}
+
+// pickItem finds ref: the first item with the entry, in the backpack and then the bags, or
+// the item at bag/slot.
 // An empty slot is an error, not a CMSG_AUTOEQUIP_ITEM the server would drop.
 func (s *Session) pickItem(ref EquipRef) (objects.Item, error) {
 	if ref.Slot == nil {
-		for _, it := range s.Inventory() {
+		for _, it := range s.Items() {
 			if it.Entry == ref.Entry {
 				return it, nil
 			}
 		}
-		return objects.Item{}, fmt.Errorf("item %d is not in the backpack", ref.Entry)
+		return objects.Item{}, fmt.Errorf("item %d is not in the backpack or the bags", ref.Entry)
 	}
 	bag := objects.BackpackBag
 	if ref.Bag != nil {

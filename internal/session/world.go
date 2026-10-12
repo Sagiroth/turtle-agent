@@ -83,7 +83,18 @@ func (s *Session) onUpdate(blocks []objects.Block, err error) error {
 // a death, an aura slot losing or gaining a spell an aura_removed or aura_applied.
 func (s *Session) applyBlocks(blocks []objects.Block) {
 	s.seedRunSpeed(blocks)
-	for _, c := range s.store.Apply(blocks) {
+	changes := s.store.Apply(blocks)
+	self := s.selfGUID()
+	var selfAuras []uint32 // positive auras the player gained in this update: a mount's is among them
+	for _, c := range changes {
+		if c.GUID == self && c.Kind == objects.ChangeAura && c.New != 0 && c.Slot < objects.PositiveAuraSlots {
+			selfAuras = append(selfAuras, c.New)
+		}
+	}
+	for _, c := range changes {
+		if c.GUID == self {
+			s.selfChanges(c, selfAuras)
+		}
 		switch c.Kind {
 		case objects.ChangeCreated:
 			if c.GUID.IsPlayer() || c.GUID.IsCreature() {

@@ -95,6 +95,10 @@ type rollParams struct {
 	Choice   string      `json:"choice"` // need, greed or pass
 }
 
+type inventoryParams struct {
+	Bags bool `json:"bags,omitempty"` // the items in the four bags too
+}
+
 type equipParams struct {
 	ItemEntry uint32 `json:"item_entry,omitempty"`
 	Bag       *uint8 `json:"bag,omitempty"`
@@ -199,8 +203,11 @@ func registerMethodsFor(srv *rpc.Server, cur func() *session.Session) {
 		res, err := cur().Roll(ctx, session.RollRef{ID: p.RollID, Slot: p.ItemSlot, Looted: p.Looted}, p.Choice)
 		return res, rpcErr(err)
 	}))
-	srv.Register("inventory", rpc.Typed(func(ctx context.Context, _ empty) ([]objects.Item, error) {
+	srv.Register("inventory", rpc.Typed(func(ctx context.Context, p inventoryParams) ([]objects.Item, error) {
 		inv := cur().Inventory()
+		if p.Bags {
+			inv = cur().Items()
+		}
 		if inv == nil {
 			inv = []objects.Item{}
 		}
@@ -212,6 +219,7 @@ func registerMethodsFor(srv *rpc.Server, cur func() *session.Session) {
 	}))
 	registerSocialMethods(srv, cur)
 	registerGroupMethods(srv, cur)
+	registerItemMethods(srv, cur)
 }
 
 // readEvents long-polls up to waitMS (at most 25 s) until a matching event exists. A

@@ -492,13 +492,18 @@ and a missing tile is looked up once (until the next `path_to`/`walk_path` plan)
 ## Navmesh walking
 
 `walk_to` walks in a straight line and knows nothing of walls. `walk_path` plans on the navmesh the server's own
-PathFinder uses (the core's `data/mmaps`), then walks the corners one straight walk at a time, with the same
-movement packets and the same checks as `walk_to` (see [Movement](#movement)): a client time that only runs forward,
+PathFinder uses (the core's `data/mmaps`), then runs the whole path as one walk, as a client does: one
+`MSG_MOVE_START_FORWARD`, a `MSG_MOVE_SET_FACING` at each corner with `MOVEFLAG_FORWARD` still set and the position the
+walk has reached on the new leg, heartbeats every 500 ms (read on the session's 100 ms tick) and one `MSG_MOVE_STOP` at
+the goal; it stops early only when the server moves or roots the player, the call is cancelled, or a partial path
+ends short of the goal (it then plans on from there). The core holds a
+facing packet to the same distance-for-time bound as a heartbeat (`Movement.cpp`, no check of its own), which a point on
+the path reached at the run speed keeps. It uses the same checks as `walk_to` (see [Movement](#movement)): a client time that only runs forward,
 the run speed the server has set, each step held to the anticheat's bound, no walking while rooted or in the air. Between corners the heartbeats carry the height of the ground (the mesh is sampled every 4 yd), so a
 straight leg over a hill does not cut through it. The path starts and ends on the floor under the points asked for,
 not at their height. Each leg moves along its 3D length at the run speed, so no beat changes height by more than the
 speed allows (the anticheat's z check), even up the steepest walkable slope; a packet's height is also held within
-that of the one before, should a ground sample land on another floor. Arriving at a corner on the mesh floor clears
+that of the one before, should a ground sample land on another floor. Arriving at the path's end on the mesh floor clears
 `status.z_unknown`.
 
 When the server moves the player mid-walk (fear, a scripted move, a teleport on the same map), knocks it back or
@@ -516,8 +521,8 @@ end, as the tiles round it may reach further, up to 32 times. The report says ho
 A goal more than 7 yd from the mesh (in the air, say) gives `partial`, as in the server's PathFinder, with the path
 ending on the floor nearest it.
 
-`trace` lists each `plan` (status, points, length), each `walk` (one segment, `from`, `to`, and the error that ended
-it early) and each `interrupted`, with `t_ms` since the call began.
+`trace` lists each `plan` (status, points, length), each `walk` (the walk along that plan's path, `from`, `to` its
+end, and the error that ended it early) and each `interrupted`, with `t_ms` since the call began.
 
 **Tiles.** Copy the server's `data/mmaps/NNN.mmap` and the map's `NNNyyxx.mmtile` files into `mmaps_dir`; the
 wow-play-harness tile cache folder (one subfolder per server) works as it is. Tiles load on demand: a map with up to 16

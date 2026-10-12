@@ -72,7 +72,7 @@ func kinds(r WalkReport) string {
 	return strings.Join(ks, ",")
 }
 
-func TestWalkPathWalksEachSegmentAndArrives(t *testing.T) {
+func TestWalkPathTurnsAtTheCornerAndArrives(t *testing.T) {
 	f := &fakePlanner{replies: []func(from, to navmesh.Vec3) navmesh.Path{via}}
 	h := walkHarness(t, f)
 	goal := navmesh.Vec3{me.X + 4, me.Y + 3, me.Z}
@@ -84,28 +84,129 @@ func TestWalkPathWalksEachSegmentAndArrives(t *testing.T) {
 		}
 		done <- r
 	}()
-	// Segment 1 faces east (along +x, orientation 0), segment 2 north (+y, pi/2).
+	// Leg 1 faces east (along +x, orientation 0), leg 2 north (+y, pi/2): one start, a
+	// facing on the second leg with Forward still set, one stop at the goal.
 	if mi := moveInfo(h.expect(opcode.MSGMoveStartForward).Body); mi.X != me.X || math.Abs(float64(mi.O)) > 1e-3 {
 		t.Fatalf("first start %+v", mi)
 	}
-	if mi := moveInfo(h.expect(opcode.MSGMoveStop).Body); mi.X != me.X+4 || mi.Y != me.Y {
-		t.Fatalf("stop at the corner %+v", mi)
+	mark := len(h.srv.Skipped())
+	if mi := moveInfo(h.expect(opcode.MSGMoveSetFacing).Body); mi.Flags&game.MoveForward == 0 || mi.X != me.X+4 ||
+		mi.Y < me.Y || math.Abs(float64(mi.O)-math.Pi/2) > 1e-3 {
+		t.Fatalf("facing at the corner %+v", mi)
 	}
-	if mi := moveInfo(h.expect(opcode.MSGMoveStartForward).Body); mi.X != me.X+4 || math.Abs(float64(mi.O)-math.Pi/2) > 1e-3 {
-		t.Fatalf("second start %+v", mi)
-	}
-	if mi := moveInfo(h.expect(opcode.MSGMoveStop).Body); mi.X != goal[0] || mi.Y != goal[1] {
+	if mi := moveInfo(h.expect(opcode.MSGMoveStop).Body); mi.X != goal[0] || mi.Y != goal[1] || math.Abs(float64(mi.O)-math.Pi/2) > 1e-3 {
 		t.Fatalf("stop at the goal %+v", mi)
+	}
+	for _, p := range h.srv.Skipped()[mark:] {
+		if p.Op == opcode.MSGMoveStop || p.Op == opcode.MSGMoveStartForward {
+			t.Fatalf("%s at the corner", opcode.Name(p.Op))
+		}
 	}
 	r := <-done
 	if r.Result != "arrived" || r.DistLeft > 0.01 || r.Replans != 0 || math.Abs(float64(r.Walked-7)) > 0.01 ||
-		kinds(r) != "plan,walk,walk" || r.Trace[0].Status != "complete" || len(r.Trace[0].Points) != 3 {
+		kinds(r) != "plan,walk" || r.Trace[0].Status != "complete" || len(r.Trace[0].Points) != 3 {
 		t.Fatalf("%+v", r)
 	}
 	if st := h.s.Status(); st.X != goal[0] || st.Y != goal[1] {
 		t.Fatalf("status %+v", st)
 	}
 	h.logout()
+}
+
+// A path with four corners is run as a client runs it: one MSG_MOVE_START_FORWARD, a
+// MSG_MOVE_SET_FACING at each corner with Forward still set and the position on the path,
+// heartbeats in between, one MSG_MOVE_STOP at the goal. Every packet keeps within the
+// anticheat's bound after the one before, and no gap reaches its 1000 ms limit.
+func TestWalkPathRunsThroughCorners(t *testing.T) {
+	zig := func(from, to navmesh.Vec3) navmesh.Path {
+		pts := []navmesh.Vec3{from, {from[0] + 6, from[1], from[2]}, {from[0] + 6, from[1] + 5, from[2] + 1},
+			{from[0] + 1, from[1] + 9, from[2] + 1}, {from[0] + 1, from[1] + 13, from[2]}, to}
+		return navmesh.Path{Status: navmesh.Complete, Engine: "fake", Points: pts, Ground: make([][]navmesh.Vec3, len(pts)-1)}
+	}
+	f := &fakePlanner{replies: []func(from, to navmesh.Vec3) navmesh.Path{zig}}
+	h := start(t, Options{Planner: f})
+	h.enterWorld() // 7 yd/s: 26 yd in about 3.8 s
+	mark := len(h.srv.Skipped())
+	goal := navmesh.Vec3{me.X + 5, me.Y + 14, me.Z}
+	done := make(chan WalkReport, 1)
+	go func() { r, _ := h.s.WalkPath(context.Background(), goal[0], goal[1], goal[2]); done <- r }()
+	stop, err := h.srv.Expect(opcode.MSGMoveStop, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := <-done
+	if r.Result != "arrived" || kinds(r) != "plan,walk" {
+		t.Fatalf("%+v", r)
+	}
+	path := zig(navmesh.Vec3{me.X, me.Y, me.Z}, goal).Points
+	pts := make([][3]float32, len(path))
+	copy(pts, path)
+	type move struct {
+		op uint16
+		mi game.MoveInfo
+	}
+	var moves []move
+	for _, p := range append(h.srv.Skipped()[mark:], stop) {
+		switch p.Op {
+		case opcode.MSGMoveStartForward, opcode.MSGMoveHeartbeat, opcode.MSGMoveSetFacing, opcode.MSGMoveStop:
+			moves = append(moves, move{p.Op, moveInfo(p.Body)})
+		}
+	}
+	count := map[uint16]int{}
+	leg := 0
+	for i, m := range moves {
+		count[m.op]++
+		if (m.op == opcode.MSGMoveStartForward) != (i == 0) || (m.op == opcode.MSGMoveStop) != (i == len(moves)-1) {
+			t.Fatalf("packet %d is %s", i, opcode.Name(m.op))
+		}
+		if m.op != opcode.MSGMoveStop && m.mi.Flags&game.MoveForward == 0 {
+			t.Fatalf("packet %d (%s) without MoveForward: %+v", i, opcode.Name(m.op), m.mi)
+		}
+		p := navmesh.Vec3{m.mi.X, m.mi.Y, m.mi.Z}
+		at := along(pts, p)
+		if q := pointAlong(pts, at); dist3(p, q) > 0.05 {
+			t.Fatalf("packet %d (%s) at %v is off the path", i, opcode.Name(m.op), p)
+		}
+		if m.op == opcode.MSGMoveSetFacing {
+			leg++
+			a, b := pts[leg], pts[leg+1]
+			if want := game.Facing(a[0], a[1], b[0], b[1]); math.Abs(float64(m.mi.O-want)) > 1e-3 {
+				t.Fatalf("facing %d is %.3f, want %.3f along leg %d", count[m.op], m.mi.O, want, leg)
+			}
+		}
+		if i == 0 {
+			continue
+		}
+		prev := moves[i-1].mi
+		dt := float64(m.mi.Time-prev.Time) / 1000
+		if dt > 0.75 { // the 500 ms beat read on the session's 100 ms tick, plus slack for -race; the bound is 1 s
+			t.Fatalf("packet %d (%s) %.3f s after the one before", i, opcode.Name(m.op), dt)
+		}
+		if dxy := math.Hypot(float64(m.mi.X-prev.X), float64(m.mi.Y-prev.Y)); dxy > 7*dt+stepMargin {
+			t.Fatalf("packet %d (%s): %.2f yd in %.3f s", i, opcode.Name(m.op), dxy, dt)
+		}
+		if dz := math.Abs(float64(m.mi.Z - prev.Z)); dz > 7*dt+stepMargin {
+			t.Fatalf("packet %d (%s): z %.2f in %.3f s", i, opcode.Name(m.op), dz, dt)
+		}
+	}
+	if count[opcode.MSGMoveStartForward] != 1 || count[opcode.MSGMoveStop] != 1 || count[opcode.MSGMoveSetFacing] != 4 ||
+		count[opcode.MSGMoveHeartbeat] < 3 {
+		t.Fatalf("packets %v", count)
+	}
+	if last := moves[len(moves)-1].mi; last.X != goal[0] || last.Y != goal[1] {
+		t.Fatalf("stopped at %+v", last)
+	}
+	if math.Abs(float64(r.Walked)-float64(along(pts, goal))) > 0.01 {
+		t.Fatalf("walked %.2f", r.Walked)
+	}
+	h.logout()
+}
+
+// pointAlong is the point d yards along the polyline pts.
+func pointAlong(pts [][3]float32, d float32) navmesh.Vec3 {
+	w := newWalk(pts, 1, time.Time{}, nil)
+	w.base = float64(d)
+	return w.at(time.Time{})
 }
 
 // The planner's ground samples set the heartbeat heights between corners.

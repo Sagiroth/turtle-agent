@@ -7,7 +7,9 @@ import (
 	"math"
 	"time"
 
+	"github.com/pjerra/turtle-agent/internal/game"
 	"github.com/pjerra/turtle-agent/internal/navmesh"
+	"github.com/pjerra/turtle-agent/internal/opcode"
 )
 
 // Planner plans a path on the navmesh (navmesh.Planner; a fake in tests).
@@ -52,7 +54,8 @@ type WalkReport struct {
 }
 
 // TraceStep is one step of a walk_path: "plan" (Status, Points, Length, Text the reason),
-// "walk" (one straight segment From -> To; Text the error that ended it early) or
+// "walk" (the walk along a plan's path, From -> its end To; Text the error that ended it
+// early) or
 // "interrupted" (Text why, From where the server left the player).
 type TraceStep struct {
 	TMS    int64          `json:"t_ms"`
@@ -89,9 +92,9 @@ func (s *Session) PathTo(ctx context.Context, x, y, z float32) (PathInfo, error)
 	return PathInfo{Map: m, From: from, To: to, Path: p}, nil
 }
 
-// WalkPath plans a path on the navmesh and walks it, one straight walk per segment. A
-// server move (fear, a scripted move, a same-map teleport) or a root ends the segment
-// early: walk_path waits until the server lets go, plans again from where the player is
+// WalkPath plans a path on the navmesh and walks it as one walk, turning at the corners
+// without stopping, as a client does. A server move (fear, a scripted move, a same-map
+// teleport) or a root ends the walk early: walk_path waits until the server lets go, plans again from where the player is
 // and walks on. The error is for what ends the call itself (no navmesh, a planner error,
 // a lost connection, a cancelled request); every other outcome is in the report.
 func (s *Session) WalkPath(ctx context.Context, x, y, z float32) (WalkReport, error) {
@@ -143,17 +146,12 @@ func (s *Session) WalkPath(ctx context.Context, x, y, z float32) (WalkReport, er
 		}
 		_, planned := s.where()
 		interrupted := false
-		for i := 1; i < len(path.Points) && !interrupted; i++ {
-			b := path.Points[i]
-			var g []navmesh.Vec3
-			if i-1 < len(path.Ground) {
-				g = path.Ground[i-1]
-			}
-			_, before := s.where()
+		if len(path.Points) > 1 {
+			pts, corners := polyline(planned, path)
 			s.mu.Lock()
 			s.walkEnd = nil
 			s.mu.Unlock()
-			err := s.walkStraight(ctx, b, walkOpts{via: g, onMesh: true})
+			err := s.walkStraight(ctx, pts[len(pts)-1], walkOpts{via: pts[1 : len(pts)-1], corners: corners, onMesh: true})
 			_, after := s.where()
 			// A server move (fear, charge, teleport) is not walked: count up to where the walk was stopped.
 			walkedTo := after
@@ -164,8 +162,8 @@ func (s *Session) WalkPath(ctx context.Context, x, y, z float32) (WalkReport, er
 				}
 				s.mu.Unlock()
 			}
-			rep.Walked += dist3(before, walkedTo)
-			st := TraceStep{Kind: "walk", From: &before, To: &b}
+			rep.Walked += along(pts, walkedTo)
+			st := TraceStep{Kind: "walk", From: &planned, To: &pts[len(pts)-1]}
 			if err != nil {
 				st.Text = err.Error()
 			}
@@ -267,4 +265,119 @@ func (s *Session) waitFree(ctx context.Context) error {
 func dist3(a, b navmesh.Vec3) float32 {
 	dx, dy, dz := float64(a[0]-b[0]), float64(a[1]-b[1]), float64(a[2]-b[2])
 	return float32(math.Sqrt(dx*dx + dy*dy + dz*dz))
+}
+
+// polyline is a planned path as one walk from the player's position: each leg's ground
+// samples, then its end. corners are the indexes in the points between the ends (the walk's
+// via) where a leg ends and the next begins.
+func polyline(from navmesh.Vec3, path navmesh.Path) (pts [][3]float32, corners []int) {
+	pts = [][3]float32{from}
+	for i := 1; i < len(path.Points); i++ {
+		if i-1 < len(path.Ground) {
+			pts = append(pts, path.Ground[i-1]...)
+		}
+		pts = append(pts, path.Points[i])
+		if i < len(path.Points)-1 {
+			corners = append(corners, len(pts)-2)
+		}
+	}
+	return pts, corners
+}
+
+// along is how far along the polyline pts the point nearest p is (3D yards from pts[0]).
+func along(pts [][3]float32, p navmesh.Vec3) float32 {
+	best, at, cum := math.Inf(1), 0.0, 0.0
+	for i := 1; i < len(pts); i++ {
+		a, b := pts[i-1], pts[i]
+		seg := dist3f(a, b)
+		t := 0.0
+		if seg > 1e-9 {
+			for k := range 3 {
+				t += float64(p[k]-a[k]) * float64(b[k]-a[k])
+			}
+			t = min(max(t/(seg*seg), 0), 1)
+		}
+		q := [3]float32{a[0] + (b[0]-a[0])*float32(t), a[1] + (b[1]-a[1])*float32(t), a[2] + (b[2]-a[2])*float32(t)}
+		if d := dist3f(q, p); d < best {
+			best, at = d, cum+t*seg
+		}
+		cum += seg
+	}
+	return float32(at)
+}
+
+// minTurn (radians) is the least change of facing at a corner worth a MSG_MOVE_SET_FACING.
+const minTurn = 0.01
+
+// setCorners splits the walk into legs that end at the given indexes in its via (pts[1:])
+// and at its end, and faces it along the first.
+func (w *walkState) setCorners(corners []int) {
+	w.ends = w.ends[:0]
+	for _, c := range corners {
+		if e := c + 1; e > 0 && e < len(w.pts)-1 && (len(w.ends) == 0 || e > w.ends[len(w.ends)-1]) {
+			w.ends = append(w.ends, e)
+		}
+	}
+	w.ends = append(w.ends, len(w.pts)-1)
+	w.leg = 0
+	w.o = game.Facing(w.pts[0][0], w.pts[0][1], w.to[0], w.to[1]) // kept by a first leg straight up
+	w.o = w.facing(0)
+}
+
+// legAt is the leg the walk is on after d yards.
+func (w *walkState) legAt(d float64) int {
+	for k, e := range w.ends {
+		if d < w.cum[e] {
+			return k
+		}
+	}
+	return len(w.ends) - 1
+}
+
+// facing is the direction of leg k, corner to corner; w.o for a leg straight up or down.
+func (w *walkState) facing(k int) float32 {
+	a := w.pts[0]
+	if k > 0 {
+		a = w.pts[w.ends[k-1]]
+	}
+	b := w.pts[w.ends[k]]
+	if math.Hypot(float64(b[0]-a[0]), float64(b[1]-a[1])) < 1e-3 {
+		return w.o
+	}
+	return game.Facing(a[0], a[1], b[0], b[1])
+}
+
+// tickTurn turns a walk that has passed a corner since its last packet, as a client running
+// a path does: MSG_MOVE_SET_FACING with MoveForward still set, from where the walk has got
+// to on the new leg, no stop and start. The server holds it to the bounds of any movement
+// packet (Movement.cpp:521-605: the run speed times the client-time gap since the last
+// packet, checked by checkStep; no other check for a facing), which a point reached along
+// the path at the run speed keeps, as the straight line to it is no longer than the path.
+// The next heartbeat comes 500 ms after it. It reports whether it sent (or aborted the walk).
+func (s *Session) tickTurn(w *walkState, now time.Time) (bool, error) {
+	leg := w.legAt(w.walked(now))
+	if leg == w.leg {
+		return false, nil
+	}
+	o := w.facing(leg)
+	w.leg = leg
+	d := math.Abs(float64(o - w.o))
+	if d > math.Pi {
+		d = 2*math.Pi - d
+	}
+	w.o = o
+	if w.arrived(now) || d < minTurn { // the stop carries the last leg's facing
+		return false, nil
+	}
+	w.nextBeat = now.Add(500 * time.Millisecond)
+	s.syncWalk(now)
+	s.mu.Lock()
+	s.pos[3] = o
+	mi := s.moveInfoAt(s.currentFlags(), now)
+	s.mu.Unlock()
+	if err := s.checkStep(mi); err != nil {
+		s.walk = nil
+		return true, s.abortWalk(w, err)
+	}
+	return true, s.sendMove(opcode.MSGMoveSetFacing, mi, game.BuildMovement(mi))
 }

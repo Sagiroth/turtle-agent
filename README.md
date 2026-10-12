@@ -12,6 +12,9 @@ vendors, trainers and quests, and an ordered event log of chat, combat, marks, r
 It was built to test server-side bots ([TortoiseBots](https://github.com/Sagiroth/TortoiseBots)) on a private test
 server: log in, hire or invite bots, start a fight, then read back the combat log and what each bot did.
 
+Testing TortoiseBots with it? Follow the maintainer's vision in [docs/TORTOISEBOTS-VISION.md](docs/TORTOISEBOTS-VISION.md)
+and the rules for agents in [AGENTS.md](AGENTS.md).
+
 > Use it only on servers you run or are allowed to test on. It has no Warden emulation and does no rendering or
 > inventory management beyond listing the bags, using and equipping items, taking corpse loot, and buying and selling.
 

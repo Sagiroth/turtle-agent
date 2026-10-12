@@ -270,3 +270,70 @@ func TestMountEndsOnCastFailure(t *testing.T) {
 	}
 	h.logout()
 }
+
+// A vanilla mount item is a bridle: its use teaches the mount spell and uses the item up, with no
+// cast after it. The agent casts the spell it taught, mounts by it and reports it as learned_spell.
+func TestMountCastsTheSpellABridleTeaches(t *testing.T) {
+	ctx := context.Background()
+	h := start(t, Options{})
+	h.enterWorld()
+	h.send(opcode.SMSGUpdateObject, ownInventory(map[uint8]packet.GUID{25: swordGUID}, map[packet.GUID][2]uint32{swordGUID: {5655, 1}}))
+	waitFor(t, func() bool { return len(h.s.Inventory()) == 1 })
+	done := make(chan MountInfo, 1)
+	go func() {
+		info, err := h.s.Mount(ctx, MountRef{Item: EquipRef{Entry: 5655}}, 3*time.Second)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- info
+	}()
+	h.expect(opcode.CMSGUseItem)
+	h.send(opcode.SMSGLearnedSpell, packet.NewWriter().U32(6648).Bytes())
+	if p := h.expect(opcode.CMSGCastSpell); string(p.Body) != string(game.BuildCastSpell(6648, 0)) {
+		t.Fatalf("% X", p.Body)
+	}
+	h.send(opcode.SMSGMountresult, gametest.ResultCode(10))
+	mountUp(h, 2405, 6648)
+	if info := <-done; !info.Mounted || info.DisplayID != 2405 || info.Via != "item" || info.Learned != 6648 || info.Result != "ok" {
+		t.Fatalf("%+v", info)
+	}
+	if l := ofKind(h.s.Log(), events.KindSpellLearned); len(l) != 1 || l[0].SpellID != 6648 {
+		t.Fatalf("%+v", l)
+	}
+	h.logout()
+}
+
+// The taught spell's cast can be refused like any cast: the call says what was taught and why.
+func TestMountReportsARefusedBridleSpell(t *testing.T) {
+	ctx := context.Background()
+	h := start(t, Options{})
+	h.enterWorld()
+	h.send(opcode.SMSGUpdateObject, ownInventory(map[uint8]packet.GUID{25: swordGUID}, map[packet.GUID][2]uint32{swordGUID: {5655, 1}}))
+	waitFor(t, func() bool { return len(h.s.Inventory()) == 1 })
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.s.Mount(ctx, MountRef{Item: EquipRef{Entry: 5655}}, 3*time.Second)
+		done <- err
+	}()
+	h.expect(opcode.CMSGUseItem)
+	h.send(opcode.SMSGLearnedSpell, packet.NewWriter().U32(6648).Bytes())
+	h.expect(opcode.CMSGCastSpell)
+	h.send(opcode.SMSGCastResult, packet.NewWriter().U32(6648).U8(2).U8(66).Bytes())
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "taught spell 6648") || !strings.Contains(err.Error(), "SpellCastResult 66") {
+		t.Fatalf("%v", err)
+	}
+	h.logout()
+}
+
+// A use that teaches two spells leaves the choice to the caller: the agent casts neither.
+func TestBridleTeachingTwoSpellsCastsNothing(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	h.send(opcode.SMSGLearnedSpell, packet.NewWriter().U32(6648).Bytes())
+	h.send(opcode.SMSGLearnedSpell, packet.NewWriter().U32(6649).Bytes())
+	waitFor(t, func() bool { return len(ofKind(h.s.Log(), events.KindSpellLearned)) == 2 })
+	if _, err := h.s.castLearned(context.Background(), 0, 0, 0); err == nil || !strings.Contains(err.Error(), "taught 2 spells") || !strings.Contains(err.Error(), "6649") {
+		t.Fatalf("%v", err)
+	}
+	h.logout()
+}

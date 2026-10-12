@@ -68,6 +68,7 @@ const (
 	KindTrainerList    = "trainer_list"    // SMSG_TRAINER_LIST
 	KindTrainerTrained = "trainer_trained" // SMSG_TRAINER_BUY_SUCCEEDED
 	KindTrainerFailed  = "trainer_failed"  // SMSG_TRAINER_BUY_FAILED
+	KindSpellLearned   = "spell_learned"   // SMSG_LEARNED_SPELL: a spell the server taught the player, spell_id
 	// Quests: the panels an NPC opens, and the result of each accept, hand-in and abandon.
 	KindQuestList         = "quest_list"          // SMSG_QUESTGIVER_QUEST_LIST
 	KindQuestDetails      = "quest_details"       // SMSG_QUESTGIVER_QUEST_DETAILS

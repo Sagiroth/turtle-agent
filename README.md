@@ -250,7 +250,7 @@ Python (`urllib`): read the token file, strip it, and add `"Authorization": "Bea
 | `loot` | `guid` or `name` (nearest dead unit), `wait_ms` (default 3000); no params: the open window | the window: `guid`, `type`, `money`, `items[]` (`slot`, `item_entry`, `count`, `display_id`, `random_property`, `slot_type`) |
 | `loot_take` | `slot`, or `all`; `money`; `wait_ms` (default 3000) | `taken`, `left`, `skipped` (slot numbers), `money` (copper asked for), `window` (what remains, null once closed) |
 | `loot_close` | `wait_ms` (default 3000) | |
-| `mount` | `item_entry` or `slot` (and `bag`), or `spell_id`; `wait_ms` (default 8000) | `mounted`, `display_id`, `via` (item, spell), `result` |
+| `mount` | `item_entry` or `slot` (and `bag`), or `spell_id`; `wait_ms` (default 8000) | `mounted`, `display_id`, `via` (item, spell), `result`, `learned_spell` (a bridle's spell, when the agent cast it) |
 | `dismount` | `spell_id` (only when the mount aura is unknown), `wait_ms` (default 3000) | `mounted`, `display_id` |
 | `addon_send` | `prefix`, `text`, `channel` (party, raid, guild, officer, raid_leader, raid_warning, battleground, battleground_leader, channel), `to` (channel name) | |
 | `tbm` | `command` (a `.bot` command without `.bot`), `via` (chat, the default, or addon) | `since` |
@@ -386,10 +386,16 @@ speed change. `dismount` cancels the mount aura with `CMSG_CANCEL_AURA` (1.12 ha
 remembers the one new buff that appeared in the same update as the mount display; with several, or after a login while
 mounted, `dismount` asks for `spell_id`.
 
+A vanilla mount item is a bridle: its use teaches the mount spell and uses the item up, with no cast (`use_item` on it does not
+mount you). When the use teaches one spell (`spell_learned`) and no mount, failure or refusal follows, `mount` casts that spell on
+yourself, as the spellbook does, and the reply carries `learned_spell`; `wait_ms` covers both casts. A use that teaches several
+spells errors and casts nothing: pass the mount's `spell_id`. The agent has no item data, so it cannot tell a mount item from
+another item that teaches a spell, and it casts whatever was taught: use `mount` with mount items only.
+
 Run live (m910q, build 17, #61): `use_item` food and drink (Food and Drink aura, `stand_state` sit), `loot` (by name, `too_far`
-refusal, `loot_take` one slot, `all` and `money`), `mount` by spell and `dismount`. A vanilla mount item (a bridle) is not a mount
-but a use-to-learn item: `use_item` teaches the mount spell and the item is consumed, so `mount` with an `item_entry` ends in
-the "not mounted" error (turtle-agent#64); learn it, then `mount` with the `spell_id`. The packets of the trainer list, the quest
+refusal, `loot_take` one slot, `all` and `money`), `mount` by spell and `dismount`. A vanilla mount item (a bridle) is a use-to-learn item:
+`use_item` teaches the mount spell and the item is consumed. So `mount` with an `item_entry` ended in the "not mounted" error in
+that run (turtle-agent#64). The learned-spell cast above is not run live yet, so mount by `spell_id` until it is. The packets of the trainer list, the quest
 panels, the loot window and the forced run speed are tested against bytes from that run
 (`internal/game/realpackets_live_test.go`).
 
@@ -454,6 +460,7 @@ refusal event. These packets follow vanilla 1.12 as the core sends them (`ItemHa
 | `trainer_list` | the trainer; `trainer_type` (0 class, 1 mounts, 2 tradeskills, 3 pets), `greeting`, `declared` (only when the core's header counted more spells than it wrote), `spells[]` (`spell_id`, `state` learnable, unavailable or known, `cost`, `level`, `req_skill`, `req_skill_value`, `req_spell_1`, `req_spell_2`, `primary_profession`) |
 | `trainer_trained` | the trainer; `spell_id` |
 | `trainer_failed` | the trainer; `spell_id`, `code`, `reason` (`unavailable`, `not_enough_money`, `not_enough_skill`) |
+| `spell_learned` | the player; `spell_id`. SMSG_LEARNED_SPELL: a spell the server taught (an item's learn effect, such as a bridle's mount spell, or a quest). The #61 run got none for `train` (turtle-agent#62) |
 | `quest_list` | the NPC; `greeting`, `quests[]` (`id`, `icon`, `level`, `title`) |
 | `quest_details` | the NPC; `quest_id`, `title`, `details`, `objectives`, `can_accept`, `choices[]`, `rewards[]` (`item_entry`, `count`), `money` (signed: negative is what you pay), `reward_spell` |
 | `quest_request_items` | the NPC; `quest_id`, `title`, `text`, `money` asked, `items[]` asked, `completable` |

@@ -57,3 +57,30 @@ func TestM2ChatFromCapture(t *testing.T) {
 		}
 	}
 }
+
+// Every group packet from milestone 3 parses; the populated list carries the bots.
+func TestM3PartyFromCapture(t *testing.T) {
+	recs := fixture(t, "m3-party.twcap")
+	most := 0
+	for _, body := range capture.Bodies(recs, opcode.SMSGGroupList) {
+		g, err := ParseGroupList(body)
+		if err != nil {
+			t.Fatalf("% X: %v", body, err)
+		}
+		if len(g.Members) > most {
+			most = len(g.Members)
+		}
+	}
+	if most < 2 {
+		t.Fatalf("largest group list had %d members, want 2", most)
+	}
+	stats := append(capture.Bodies(recs, opcode.SMSGPartyMemberStats), capture.Bodies(recs, opcode.SMSGPartyMemberStatsFull)...)
+	if len(stats) == 0 {
+		t.Fatal("no member stats captured")
+	}
+	for _, body := range stats {
+		if _, err := ParsePartyMemberStats(body); err != nil {
+			t.Fatalf("% X: %v", body, err)
+		}
+	}
+}

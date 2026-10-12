@@ -322,3 +322,61 @@ func TestZeroHighByteKeyEndToEnd(t *testing.T) {
 	}
 	h.logout()
 }
+
+// Fix round 1: packets that arrived before the server closed the socket are still handled,
+// so a final SMSG_LOGOUT_COMPLETE (or system message) queued behind the close is not lost.
+func TestPacketsBeforeCloseAreHandled(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	done := make(chan error, 1)
+	go func() { done <- h.s.Logout(context.Background()) }()
+	h.expect(opcode.CMSGLogoutRequest)
+	// Hold the owner loop so the packets and the read error are all queued when it resumes.
+	entered, release := make(chan struct{}), make(chan struct{})
+	go h.s.do(context.Background(), func() (any, error) { close(entered); <-release; return nil, nil })
+	<-entered
+	const n = 20
+	for i := 0; i < n; i++ {
+		h.send(opcode.SMSGInitWorldStates, []byte{1, 2, 3})
+	}
+	h.send(opcode.SMSGLogoutResponse, packet.NewWriter().U32(0).U8(1).Bytes())
+	h.send(opcode.SMSGLogoutComplete, nil)
+	h.srv.Close()
+	time.Sleep(50 * time.Millisecond) // let the reader see the close before the loop resumes
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("logout err = %v", err)
+	}
+	if err := <-h.run; err != nil {
+		t.Fatalf("run err = %v", err)
+	}
+	if st := h.s.Status(); st.State != StatusLoggedOut || st.Unknown["SMSG_INIT_WORLD_STATES"] != n {
+		t.Fatalf("%+v", st)
+	}
+}
+
+// Fix round 1: the next ping is scheduled from the moment the ping went out, not from a
+// tick that may be stale after a loop stall, so pings never arrive under 27 s apart
+// (WorldSocket.cpp:413-433).
+func TestPingScheduledFromSendTime(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	before := time.Now()
+	stale := before.Add(-10 * time.Second)
+	v, err := h.s.do(context.Background(), func() (any, error) {
+		h.s.nextPing = stale
+		if err := h.s.onTick(stale); err != nil {
+			return nil, err
+		}
+		return [2]time.Time{h.s.nextPing, h.s.pingSent}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := v.([2]time.Time)
+	if got[0].Before(before.Add(h.s.opts.PingInterval)) || got[1].Before(before) {
+		t.Fatalf("next ping %s, ping sent %s; want both from after %s", got[0], got[1], before)
+	}
+	h.expect(opcode.CMSGPing)
+	h.logout()
+}

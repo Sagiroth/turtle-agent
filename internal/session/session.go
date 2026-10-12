@@ -62,7 +62,7 @@ type Options struct {
 	Character     string        // character name, case-insensitive
 	Log           *events.Log   // nil: a new 100000-event log
 	Logger        io.Writer     // diagnostics such as parse errors with hex dumps; nil: discarded
-	PingInterval  time.Duration // 0: 30 s (the server flags pings under 27 s, WorldSocket.cpp:413)
+	PingInterval  time.Duration // 0: 30 s; under 27 s is test-only: the server kicks for overspeed pings (WorldSocket.cpp:413-433)
 	PongTimeout   time.Duration // 0: 90 s
 	LogoutTimeout time.Duration // 0: 30 s
 }
@@ -181,9 +181,15 @@ func (s *Session) registerCore() {
 	s.handlers[opcode.SMSGAddonInfo] = func([]byte) error { return nil }
 }
 
+// Ready closes once SMSG_LOGIN_VERIFY_WORLD arrives. It never closes when login fails
+// (missing character, SMSG_CHARACTER_LOGIN_FAILED, disconnect), so callers also select
+// on Done.
 func (s *Session) Ready() <-chan struct{} { return s.ready }
-func (s *Session) Done() <-chan struct{}  { return s.done }
-func (s *Session) Log() *events.Log       { return s.log }
+
+// Done closes when Run returns.
+func (s *Session) Done() <-chan struct{} { return s.done }
+
+func (s *Session) Log() *events.Log { return s.log }
 
 func (s *Session) State() Status {
 	s.mu.Lock()
@@ -243,13 +249,17 @@ func (s *Session) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return s.end(ctx.Err())
 		case err := <-readErr:
+			// The reader queued every packet it read before the error, so a final
+			// SMSG_LOGOUT_COMPLETE or system message sent just before the close is still handled.
+			for len(packets) > 0 {
+				if stop, err := s.handle(<-packets); stop {
+					return err
+				}
+			}
 			return s.connLost(err)
 		case p := <-packets:
-			if err := s.dispatch(p); err != nil {
-				return s.end(err)
-			}
-			if s.finished {
-				return nil
+			if stop, err := s.handle(p); stop {
+				return err
 			}
 		case r := <-s.reqs:
 			v, err := r.fn()
@@ -260,6 +270,14 @@ func (s *Session) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// handle dispatches one packet; stop reports that Run must return err (nil after logout).
+func (s *Session) handle(p worldconn.Packet) (stop bool, err error) {
+	if err := s.dispatch(p); err != nil {
+		return true, s.end(err)
+	}
+	return s.finished, nil
 }
 
 // do runs fn on the owner goroutine and returns its result.
@@ -333,16 +351,19 @@ func (s *Session) onTick(now time.Time) error {
 		}
 		if !s.nextPing.IsZero() && !now.Before(s.nextPing) {
 			s.pingSeq++
-			if !s.pongWait { // the timeout runs from the oldest unanswered ping
-				s.pingSent, s.pongWait = now, true
-			}
-			s.nextPing = now.Add(s.opts.PingInterval)
 			s.mu.Lock()
 			latency := s.latency
 			s.mu.Unlock()
 			if err := s.conn.WritePacket(opcode.CMSGPing, packet.NewWriter().U32(s.pingSeq).U32(latency).Bytes()); err != nil {
 				return err
 			}
+			// Schedule from the send, not from the tick: a tick read late after a loop stall
+			// would put the next ping under the server's 27 s floor (WorldSocket.cpp:413-433).
+			sent := time.Now()
+			if !s.pongWait { // the timeout runs from the oldest unanswered ping
+				s.pingSent, s.pongWait = sent, true
+			}
+			s.nextPing = sent.Add(s.opts.PingInterval)
 		}
 	}
 	if s.logout != nil && now.After(s.logoutDeadline) {

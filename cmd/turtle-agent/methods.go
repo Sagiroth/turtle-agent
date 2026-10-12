@@ -168,6 +168,14 @@ func registerMethodsFor(srv *rpc.Server, cur func() *session.Session) {
 	srv.Register("walk_to", rpc.Typed(func(ctx context.Context, p walkParams) (empty, error) {
 		return empty{}, rpcErr(cur().WalkTo(ctx, p.X, p.Y, p.Z))
 	}))
+	srv.Register("path_to", rpc.Typed(func(ctx context.Context, p walkParams) (session.PathInfo, error) {
+		info, err := cur().PathTo(ctx, p.X, p.Y, p.Z)
+		return info, rpcErr(err)
+	}))
+	srv.Register("walk_path", rpc.Typed(func(ctx context.Context, p walkParams) (session.WalkReport, error) {
+		r, err := cur().WalkPath(ctx, p.X, p.Y, p.Z)
+		return r, rpcErr(err)
+	}))
 	srv.Register("teleport", rpc.Typed(func(ctx context.Context, p pointParams) (empty, error) {
 		m := -1
 		if p.Map != nil {

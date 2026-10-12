@@ -16,6 +16,7 @@ import (
 	"github.com/pjerra/turtle-agent/internal/capture"
 	"github.com/pjerra/turtle-agent/internal/config"
 	"github.com/pjerra/turtle-agent/internal/events"
+	"github.com/pjerra/turtle-agent/internal/navmesh"
 	"github.com/pjerra/turtle-agent/internal/rpc"
 	"github.com/pjerra/turtle-agent/internal/session"
 	"github.com/pjerra/turtle-agent/internal/worldconn"
@@ -63,6 +64,19 @@ func checkCapture(path, account, password string) error {
 		return fmt.Errorf("capture: %w", capture.ErrSecretTooShort)
 	}
 	return nil
+}
+
+// sessionOptions are the session options of the first login and of every reconnect, so
+// both get the same redaction (the account names the server may echo, the password) and
+// the same navmesh planner. A nil planner leaves path_to and walk_path answering that
+// mmaps_dir is not set.
+func sessionOptions(character string, log *events.Log, stderr io.Writer, accounts []string, password string,
+	planner *navmesh.Planner) session.Options {
+	o := session.Options{Character: character, Log: log, Logger: stderr, Redact: accounts, RedactAnywhere: []string{password}}
+	if planner != nil { // a nil *Planner in the interface would not read as nil
+		o.Planner = planner
+	}
+	return o
 }
 
 // dialWorld keys the world connection with Ticket.KeyBytes(), the unpadded form the
@@ -192,8 +206,13 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	log := events.New(100000)
 	// The server can echo the account name back (a .pinfo reply): events and the stderr
 	// log never carry it, nor the password (ruling P10, review I3).
-	s := session.New(conn, session.Options{Character: character, Log: log, Logger: stderr,
-		Redact: []string{ticket.Account, account}, RedactAnywhere: []string{password}})
+	var planner *navmesh.Planner
+	if st.MmapsDir != "" {
+		planner = navmesh.NewPlanner(st.MmapsDir)
+		defer planner.Close()
+		fmt.Fprintf(stderr, "navmesh: tiles from %s\n", st.MmapsDir)
+	}
+	s := session.New(conn, sessionOptions(character, log, stderr, []string{ticket.Account, account}, password, planner))
 	runErr := make(chan error, 1)
 	go func() { runErr <- s.Run(context.Background()) }()
 	select {
@@ -224,7 +243,7 @@ func loginCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	var rc *reconnector
 	if *reconnects > 0 {
 		rc = &reconnector{total: *reconnects, window: window, st: st, account: account, password: password,
-			character: character, log: log, stderr: stderr, redact: s.Redact}
+			character: character, log: log, stderr: stderr, redact: s.Redact, planner: planner}
 	}
 	srv := rpc.NewServer()
 	registerMethodsFor(srv, cur.Load)

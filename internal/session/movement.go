@@ -1,7 +1,6 @@
 package session
 
 import (
-	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -151,7 +150,7 @@ func (s *Session) onKnockBack(body []byte) error {
 		return nil
 	}
 	now := time.Now()
-	s.stopWalk(errors.New("knocked back by the server; walk stopped"), false)
+	s.stopWalk(errKnockedBack, false)
 	from := s.last.pos
 	s.fall = &fallState{kb: k, began: now, groundZ: from[2], nextBeat: now.Add(500 * time.Millisecond)}
 	s.fall.arc(from, now, float64(k.ZSpeed), fallTerm(s.toggles))

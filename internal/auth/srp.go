@@ -14,6 +14,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1" // required by the WoW SRP6 protocol
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"slices"
@@ -46,6 +47,15 @@ type Proof struct {
 	M2 [20]byte // the server proof we expect
 	K  [40]byte // session key, full width
 }
+
+// String redacts the secrets: K is the session key and M1/M2 are derived from it, so
+// only the public A is shown. fmt uses it for %v, %+v and %s.
+func (p Proof) String() string {
+	return fmt.Sprintf("auth.Proof{A:%x M1:<redacted> M2:<redacted> K:<redacted>}", p.A)
+}
+
+// GoString is String for %#v.
+func (p Proof) GoString() string { return p.String() }
 
 // KeyBytes is K as the server's BigNumber::AsByteArray() renders it. The world server
 // hashes this form into CMSG_AUTH_SESSION and keys the header cipher with it

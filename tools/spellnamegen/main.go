@@ -1,5 +1,7 @@
-// Command spellnamegen writes internal/spells/names.tsv.gz from the core's
-// sql/base/tw_world_spell_template.sql: one "id<TAB>name" line per spell, in id order.
+// Command spellnamegen writes internal/spells/names.tsv.gz and internal/spells/mounts.txt.gz from
+// the core's sql/base/tw_world_spell_template.sql. names.tsv.gz has one "id<TAB>name" line per
+// spell, in id order. mounts.txt.gz has the id of each spell that applies SPELL_AURA_MOUNTED in
+// one of its effects, one per line in id order.
 package main
 
 import (
@@ -19,17 +21,25 @@ import (
 func main() {
 	in := flag.String("in", "", "tw_world_spell_template.sql")
 	out := flag.String("out", "", "names.tsv.gz to write")
+	mounts := flag.String("mounts", "", "mounts.txt.gz to write")
 	flag.Parse()
-	if *in == "" || *out == "" {
-		fmt.Fprintln(os.Stderr, "usage: spellnamegen -in tw_world_spell_template.sql -out names.tsv.gz")
+	if *in == "" || *out == "" || *mounts == "" {
+		fmt.Fprintln(os.Stderr, "usage: spellnamegen -in tw_world_spell_template.sql -out names.tsv.gz -mounts mounts.txt.gz")
 		os.Exit(2)
 	}
 	src, err := os.ReadFile(*in)
+	var names, list []byte
 	if err == nil {
-		var b []byte
-		if b, err = Generate(src); err == nil {
-			err = os.WriteFile(*out, b, 0o644)
-		}
+		names, err = Generate(src)
+	}
+	if err == nil {
+		list, err = GenerateMounts(src)
+	}
+	if err == nil {
+		err = os.WriteFile(*out, names, 0o644)
+	}
+	if err == nil {
+		err = os.WriteFile(*mounts, list, 0o644)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "spellnamegen:", err)
@@ -39,59 +49,119 @@ func main() {
 
 var insert = regexp.MustCompile("INSERT INTO `spell_template` \\(([^)]*)\\) VALUES")
 
-// Generate reads every INSERT INTO spell_template of the dump and returns the gzipped
-// table. Each INSERT names its columns, so the entry and name columns are looked up per
-// statement.
-func Generate(src []byte) ([]byte, error) {
-	names := map[uint64]string{}
+// auraNames are the aura type columns of the three effects. SPELL_AURA_MOUNTED is 78
+// (SpellAuraDefines.h:216).
+var auraNames = []string{"effectApplyAuraName1", "effectApplyAuraName2", "effectApplyAuraName3"}
+
+const auraMounted = "78"
+
+// table is what the dump says about each spell: its name, and whether an effect applies
+// SPELL_AURA_MOUNTED. A later row for an id replaces an earlier one.
+type table struct {
+	names  map[uint64]string
+	mounts map[uint64]bool
+}
+
+// parse reads every INSERT INTO spell_template of the dump. Each INSERT names its columns, so
+// the entry, name and aura columns are looked up per statement.
+func parse(src []byte) (table, error) {
+	t := table{names: map[uint64]string{}, mounts: map[uint64]bool{}}
 	locs := insert.FindAllSubmatchIndex(src, -1)
 	if len(locs) == 0 {
-		return nil, errors.New("no INSERT INTO `spell_template`")
+		return t, errors.New("no INSERT INTO `spell_template`")
 	}
 	for _, loc := range locs {
 		cols := strings.Split(strings.ReplaceAll(string(src[loc[2]:loc[3]]), "`", ""), ",")
-		entry, name := -1, -1
+		at := map[string]int{}
 		for i, c := range cols {
-			switch strings.TrimSpace(c) {
-			case "entry":
-				entry = i
-			case "name":
-				name = i
-			}
+			at[strings.TrimSpace(c)] = i
 		}
-		if entry < 0 || name < 0 {
-			return nil, errors.New("an INSERT without entry or name")
+		entry, hasEntry := at["entry"]
+		name, hasName := at["name"]
+		aura := make([]int, 0, len(auraNames))
+		hasAura := true
+		for _, c := range auraNames {
+			i, ok := at[c]
+			hasAura = hasAura && ok
+			aura = append(aura, i)
+		}
+		if !hasEntry || !hasName || !hasAura {
+			return t, errors.New("an INSERT without entry, name or effectApplyAuraName1-3")
 		}
 		rows, err := tuples(src[loc[1]:])
 		if err != nil {
-			return nil, err
+			return t, err
 		}
 		for _, r := range rows {
 			if len(r) != len(cols) {
-				return nil, fmt.Errorf("a row of %d values for %d columns", len(r), len(cols))
+				return t, fmt.Errorf("a row of %d values for %d columns", len(r), len(cols))
 			}
 			id, err := strconv.ParseUint(r[entry], 10, 32)
 			if err != nil {
-				return nil, fmt.Errorf("entry %q: %w", r[entry], err)
+				return t, fmt.Errorf("entry %q: %w", r[entry], err)
 			}
 			if n := strings.TrimSpace(r[name]); n != "" {
-				names[id] = strings.NewReplacer("\t", " ", "\n", " ", "\r", " ").Replace(n)
+				t.names[id] = strings.NewReplacer("\t", " ", "\n", " ", "\r", " ").Replace(n)
 			}
+			mounted := false
+			for _, i := range aura {
+				if strings.TrimSpace(r[i]) == auraMounted {
+					mounted = true
+				}
+			}
+			t.mounts[id] = mounted
 		}
 	}
-	ids := make([]uint64, 0, len(names))
-	for id := range names {
+	return t, nil
+}
+
+// Generate returns names.tsv.gz: a header, then the "id<TAB>name" lines in id order, gzipped.
+func Generate(src []byte) ([]byte, error) {
+	t, err := parse(src)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]uint64, 0, len(t.names))
+	for id := range t.names {
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	var tsv bytes.Buffer
 	fmt.Fprintf(&tsv, "# generated by tools/spellnamegen from tw_world_spell_template.sql (sha256 %x); DO NOT EDIT\n", sha256.Sum256(src))
 	for _, id := range ids {
-		fmt.Fprintf(&tsv, "%d\t%s\n", id, names[id])
+		fmt.Fprintf(&tsv, "%d\t%s\n", id, t.names[id])
 	}
+	return gzipped(tsv.Bytes())
+}
+
+// GenerateMounts returns mounts.txt.gz: a header, then the id of each spell that applies
+// SPELL_AURA_MOUNTED in one of its effects, one per line in id order, gzipped.
+func GenerateMounts(src []byte) ([]byte, error) {
+	t, err := parse(src)
+	if err != nil {
+		return nil, err
+	}
+	var ids []uint64
+	for id, mounted := range t.mounts {
+		if mounted {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var txt bytes.Buffer
+	fmt.Fprintf(&txt, "# generated by tools/spellnamegen from tw_world_spell_template.sql (sha256 %x): spells with SPELL_AURA_MOUNTED (78) in an effect; DO NOT EDIT\n", sha256.Sum256(src))
+	for _, id := range ids {
+		fmt.Fprintf(&txt, "%d\n", id)
+	}
+	return gzipped(txt.Bytes())
+}
+
+func gzipped(b []byte) ([]byte, error) {
 	var gz bytes.Buffer
 	w, _ := gzip.NewWriterLevel(&gz, gzip.BestCompression)
-	w.Write(tsv.Bytes())
+	if _, err := w.Write(b); err != nil {
+		return nil, err
+	}
 	if err := w.Close(); err != nil {
 		return nil, err
 	}

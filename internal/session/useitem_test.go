@@ -270,3 +270,131 @@ func TestMountEndsOnCastFailure(t *testing.T) {
 	}
 	h.logout()
 }
+
+// Bridle packets from the live run of #61 (tests/ta61/agent.cap; #N is the record index).
+var (
+	// #4321 SMSG_LEARNED_SPELL: the mount spell 6648, taught when the use's cast (46499) ended.
+	learned6648 = []byte{0xf8, 0x19, 0x00, 0x00}
+	// #2708 SMSG_LEARNED_SPELL: spell 2383 (Find Herbs), which is no mount.
+	learned2383 = []byte{0x4f, 0x09, 0x00, 0x00}
+	// #2709 SMSG_LEARNED_SPELL: spell 2366 (Herb Gathering), in the same update tick as #2708.
+	learned2366 = []byte{0x3e, 0x09, 0x00, 0x00}
+)
+
+// A vanilla mount item is a bridle: its use teaches the mount spell and uses the item up, with no
+// cast after it. The agent casts the spell it taught, mounts by it and reports it as learned_spell.
+func TestMountCastsTheSpellABridleTeaches(t *testing.T) {
+	ctx := context.Background()
+	h := start(t, Options{})
+	h.enterWorld()
+	h.send(opcode.SMSGUpdateObject, ownInventory(map[uint8]packet.GUID{25: swordGUID}, map[packet.GUID][2]uint32{swordGUID: {5655, 1}}))
+	waitFor(t, func() bool { return len(h.s.Inventory()) == 1 })
+	done := make(chan MountInfo, 1)
+	go func() {
+		info, err := h.s.Mount(ctx, MountRef{Item: EquipRef{Entry: 5655}}, 3*time.Second)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- info
+	}()
+	h.expect(opcode.CMSGUseItem)
+	h.send(opcode.SMSGLearnedSpell, learned6648)
+	if p := h.expect(opcode.CMSGCastSpell); string(p.Body) != string(game.BuildCastSpell(6648, 0)) {
+		t.Fatalf("% X", p.Body)
+	}
+	h.send(opcode.SMSGMountresult, gametest.ResultCode(10))
+	mountUp(h, 2405, 6648)
+	if info := <-done; !info.Mounted || info.DisplayID != 2405 || info.Via != "item" || info.Learned != 6648 || info.Result != "ok" {
+		t.Fatalf("%+v", info)
+	}
+	if l := ofKind(h.s.Log(), events.KindSpellLearned); len(l) != 1 || l[0].SpellID != 6648 {
+		t.Fatalf("%+v", l)
+	}
+	h.logout()
+}
+
+// The taught spell's cast can be refused like any cast: the call says what was taught and why.
+func TestMountReportsARefusedBridleSpell(t *testing.T) {
+	ctx := context.Background()
+	h := start(t, Options{})
+	h.enterWorld()
+	h.send(opcode.SMSGUpdateObject, ownInventory(map[uint8]packet.GUID{25: swordGUID}, map[packet.GUID][2]uint32{swordGUID: {5655, 1}}))
+	waitFor(t, func() bool { return len(h.s.Inventory()) == 1 })
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.s.Mount(ctx, MountRef{Item: EquipRef{Entry: 5655}}, 3*time.Second)
+		done <- err
+	}()
+	h.expect(opcode.CMSGUseItem)
+	h.send(opcode.SMSGLearnedSpell, learned6648)
+	h.expect(opcode.CMSGCastSpell)
+	h.send(opcode.SMSGCastResult, packet.NewWriter().U32(6648).U8(2).U8(66).Bytes())
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "taught spell 6648") || !strings.Contains(err.Error(), "SpellCastResult 66") {
+		t.Fatalf("%v", err)
+	}
+	h.logout()
+}
+
+// bridleUse starts a mount by the bridle 5655 in the backpack and waits for its use to be sent.
+func bridleUse(t *testing.T, h *harness) <-chan error {
+	t.Helper()
+	h.enterWorld()
+	h.send(opcode.SMSGUpdateObject, ownInventory(map[uint8]packet.GUID{25: swordGUID}, map[packet.GUID][2]uint32{swordGUID: {5655, 1}}))
+	waitFor(t, func() bool { return len(h.s.Inventory()) == 1 })
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.s.Mount(context.Background(), MountRef{Item: EquipRef{Entry: 5655}}, 3*time.Second)
+		done <- err
+	}()
+	h.expect(opcode.CMSGUseItem)
+	return done
+}
+
+// notSent fails the test when the client sends op within a short wait.
+func (h *harness) notSent(op uint16) {
+	h.t.Helper()
+	if p, err := h.srv.Expect(op, 300*time.Millisecond); err == nil {
+		h.t.Fatalf("sent %s: % X", opcode.Name(op), p.Body)
+	}
+}
+
+// A use that teaches two spells leaves the choice to the caller: the agent casts neither. The
+// second learn comes 50 ms after the first and is still counted (the quiet window).
+func TestBridleTeachingTwoSpellsCastsNothing(t *testing.T) {
+	h := start(t, Options{})
+	done := bridleUse(t, h)
+	h.send(opcode.SMSGLearnedSpell, learned6648)
+	time.Sleep(50 * time.Millisecond)
+	h.send(opcode.SMSGLearnedSpell, learned2366)
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "taught 2 spells") || !strings.Contains(err.Error(), "2366") {
+		t.Fatalf("%v", err)
+	}
+	h.notSent(opcode.CMSGCastSpell)
+	h.logout()
+}
+
+// A bridle that taught a spell which is not a mount is not cast: the call names the spell.
+func TestBridleTeachingANonMountCastsNothing(t *testing.T) {
+	h := start(t, Options{})
+	done := bridleUse(t, h)
+	h.send(opcode.SMSGLearnedSpell, learned2383)
+	err := <-done
+	if te, ok := err.(*TaughtError); !ok || te.Spell != 2383 || !strings.Contains(err.Error(), "not a mount spell") {
+		t.Fatalf("%v", err)
+	}
+	h.notSent(opcode.CMSGCastSpell)
+	h.logout()
+}
+
+// A learn that comes after the wait ran out is not cast: the call has already answered.
+func TestLearnAfterTheWaitIsNotCast(t *testing.T) {
+	h := start(t, Options{})
+	h.enterWorld()
+	h.send(opcode.SMSGLearnedSpell, learned6648)
+	waitFor(t, func() bool { return len(ofKind(h.s.Log(), events.KindSpellLearned)) == 1 })
+	if _, err := h.s.castLearned(context.Background(), 0, 0, 0, time.Now().Add(-time.Second)); err == nil || !strings.Contains(err.Error(), "wait ran out") {
+		t.Fatalf("%v", err)
+	}
+	h.notSent(opcode.CMSGCastSpell)
+	h.logout()
+}

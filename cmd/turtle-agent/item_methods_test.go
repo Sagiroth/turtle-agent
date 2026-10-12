@@ -113,6 +113,22 @@ func TestLootMethods(t *testing.T) {
 	}
 }
 
+// A bridle that taught a spell which is no mount: the error names the spell as data.learned_spell,
+// and the agent casts nothing (the real learn bytes, agent.cap #2708).
+func TestMountNamesABridleSpellItDidNotCast(t *testing.T) {
+	r := newRig(t)
+	r.giveSelf(0x4000000000000003, 5655, nil)
+	up := r.callAsync("mount", `{"item_entry":5655,"wait_ms":3000}`)
+	r.expectBody(opcode.CMSGUseItem, game.BuildUseItem(255, 23, 0))
+	r.srv.Send(opcode.SMSGLearnedSpell, []byte{0x4f, 0x09, 0x00, 0x00}) // spell 2383
+	out := <-up
+	e, _ := out["error"].(map[string]any)
+	data, _ := e["data"].(map[string]any)
+	if errCode(out) != rpc.CodeGame || data["learned_spell"] != float64(2383) {
+		t.Fatalf("%v", out)
+	}
+}
+
 func TestMountMethods(t *testing.T) {
 	r := newRig(t)
 	r.giveSelf(0x4000000000000003, 13317, nil)

@@ -357,8 +357,8 @@ func (s *Session) onQuestUpdateItem(body []byte) error {
 	if err != nil {
 		return err
 	}
-	// The packet names the item and the new count, not the quest.
-	s.emit(events.Event{Kind: events.KindQuestUpdate, Data: map[string]any{"update": "item", "item_entry": u.Item, "count": u.Count}})
+	// The packet names the item and the amount just added (not the total held), not the quest.
+	s.emit(events.Event{Kind: events.KindQuestUpdate, Data: map[string]any{"update": "item", "item_entry": u.Item, "added": u.Added}})
 	return nil
 }
 

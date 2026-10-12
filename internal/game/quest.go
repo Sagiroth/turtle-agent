@@ -254,13 +254,14 @@ func ParseQuestID(body []byte, name string) (uint32, error) {
 	return v, done(r, name)
 }
 
-// QuestUpdateItem is SMSG_QUESTUPDATE_ADD_ITEM: the required item and the count now held
-// (Player::SendQuestUpdateAddItem, Player.cpp:16496-16509). It does not name the quest.
-type QuestUpdateItem struct{ Item, Count uint32 }
+// QuestUpdateItem is SMSG_QUESTUPDATE_ADD_ITEM: the required item and the amount just
+// added, not the total held (Player::SendQuestUpdateAddItem sends newItemCount -
+// curItemCount, Player.cpp:15946, 16496-16509). It does not name the quest.
+type QuestUpdateItem struct{ Item, Added uint32 }
 
 func ParseQuestUpdateItem(body []byte) (QuestUpdateItem, error) {
 	r := packet.NewReader(body)
-	u := QuestUpdateItem{Item: r.U32(), Count: r.U32()}
+	u := QuestUpdateItem{Item: r.U32(), Added: r.U32()}
 	return u, done(r, "SMSG_QUESTUPDATE_ADD_ITEM")
 }
 

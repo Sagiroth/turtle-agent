@@ -83,7 +83,6 @@ func (s *Session) onUpdate(blocks []objects.Block, err error) error {
 // a death, an aura slot losing or gaining a spell an aura_removed or aura_applied.
 func (s *Session) applyBlocks(blocks []objects.Block) {
 	s.seedRunSpeed(blocks)
-	s.settleFromBlocks(blocks)
 	for _, c := range s.store.Apply(blocks) {
 		switch c.Kind {
 		case objects.ChangeCreated:
@@ -140,26 +139,13 @@ func (s *Session) onMonsterMove(body []byte) error {
 
 // serverMoved puts the player where the server moved it, ending a running walk without a
 // stop packet and a knockback flight without a landing: the server owns the movement now,
-// and its position settles a z the agent could only guess.
+// and its position settles a z the agent could only guess. Live, that is a spline on the
+// player (fear, charge) or the rare heartbeat the server sends the player itself
+// (Unit::SendHeartBeat(true), Unit.cpp:537-549); the core never sends the player its own
+// movement block, nor relays its own MSG_MOVE_* back.
 func (s *Session) serverMoved(p [3]float32) {
 	s.stopWalk(errors.New("moved by the server"), false)
 	s.serverPosition(p, true)
-}
-
-// settleFromBlocks takes the player's position from its own movement block, the server's
-// view (Object.cpp:268-269, :415-449), when no walk or flight of the agent's runs. The
-// player's create blocks only echo the login or teleport position and settle nothing.
-func (s *Session) settleFromBlocks(blocks []objects.Block) {
-	self := s.selfGUID()
-	for _, b := range blocks {
-		if b.Type != objects.BlockMovement || b.GUID != self || b.Move == nil || !b.Move.HasPosition ||
-			b.Move.Info.Flags&game.MoveOnTransport != 0 {
-			continue
-		}
-		if s.walk == nil && s.fall == nil && time.Now().After(s.splineUntil) {
-			s.serverPosition([3]float32{b.Move.X, b.Move.Y, b.Move.Z}, true)
-		}
-	}
 }
 
 // onCompressedMoves runs each bundled packet through the handler table.

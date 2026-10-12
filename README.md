@@ -162,9 +162,10 @@ Every walk and facing packet is checked against the server anticheat's distance 
 has the player. The client time never runs backwards and is never 0.
 
 `status.z_unknown` is true when the z is a guess: after a GM teleport (which may leave the player in the air), after a
-walk that changed height, and after a knockback landing (the agent assumes the ground is at the starting height). The
-next position the server sends for the player (a server-driven move, a relayed move or its own movement block) settles
-x, y and z, and the next walk starts from there. Keep walks short and on flat ground.
+walk that changed height, and after a knockback landing (the agent assumes the ground is at the starting height). It
+sticks until the server moves the player itself: a server spline (fear or charge) or a teleport settles x, y and z (a
+teleport's z is again a guess), and a reconnect starts from the server's saved position. The core sends the player no
+other position of its own. Keep walks short and on flat ground.
 
 ## Fleet: several players at once
 

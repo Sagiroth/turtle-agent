@@ -11,8 +11,6 @@ import (
 	"github.com/pjerra/turtle-agent/internal/events"
 	"github.com/pjerra/turtle-agent/internal/game"
 	"github.com/pjerra/turtle-agent/internal/game/gametest"
-	"github.com/pjerra/turtle-agent/internal/objects"
-	"github.com/pjerra/turtle-agent/internal/objects/objtest"
 	"github.com/pjerra/turtle-agent/internal/opcode"
 	"github.com/pjerra/turtle-agent/internal/packet"
 	"github.com/pjerra/turtle-agent/internal/worldconn"
@@ -113,11 +111,10 @@ func TestKnockBackAckFlightAndLanding(t *testing.T) {
 	if st := h.s.Status(); !st.ZUnknown {
 		t.Fatalf("landing z is a guess: %+v", st)
 	}
-	// The server's next position for the player settles the z.
-	w := packet.NewWriter().PackedGUID(me.GUID)
-	game.WriteMoveInfo(w, game.MoveInfo{X: lm.X, Y: lm.Y, Z: me.Z - 2.5})
-	h.send(opcode.MSGMoveHeartbeat, w.Bytes())
+	// The server's next position for the player, a spline on it, settles the z.
+	h.send(opcode.SMSGMonsterMove, selfSpline([3]float32{lm.X, lm.Y, lm.Z}, [3]float32{lm.X, lm.Y, me.Z - 2.5}, 1))
 	waitFor(t, func() bool { st := h.s.Status(); return st.Z == me.Z-2.5 && !st.ZUnknown })
+	time.Sleep(20 * time.Millisecond) // the spline has run
 	if err := h.s.WalkTo(ctx, lm.X+2, lm.Y, me.Z-2.5); err != nil {
 		t.Fatal(err)
 	}
@@ -176,11 +173,11 @@ func TestKnockBackForOthersIgnored(t *testing.T) {
 	}
 }
 
-// selfMovement is the player's own UPDATETYPE_MOVEMENT block (Object.cpp:268-269, :415-449).
-func selfMovement(x, y, z float32) []byte {
-	w := objtest.Header(1).U8(uint8(objects.BlockMovement)).GUID(me.GUID)
-	objtest.Living(w, 0x20, game.MoveInfo{X: x, Y: y, Z: z}, nil)
-	return w.Bytes()
+// selfSpline is SMSG_MONSTER_MOVE for the player, a fear or charge ending at dest after
+// ms milliseconds (MoveSplineInit.cpp:134-156, packet_builder.cpp:45-152).
+func selfSpline(from, dest [3]float32, ms uint32) []byte {
+	return packet.NewWriter().PackedGUID(me.GUID).F32(from[0]).F32(from[1]).F32(from[2]).U32(1).U8(0).U32(0x100).U32(ms).U32(1).
+		F32(dest[0]).F32(dest[1]).F32(dest[2]).Bytes()
 }
 
 // Item 4: a walk that climbs steeply is timed on its 3D length, so no step changes height
@@ -219,8 +216,9 @@ func TestSteepWalkStaysInsideTheZBound(t *testing.T) {
 	h.logout()
 }
 
-// Review M13: after a GM teleport the z may be in the air; the next position from the
-// server (here the player's own movement block) settles it, and the next walk starts there.
+// Review M13: after a GM teleport the z may be in the air and stays a guess; the core sends
+// no movement block for the player, so the next server spline on it (a fear or charge)
+// settles it, and the next walk starts at the spline's end.
 func TestTeleportZSettlesOnTheNextServerPosition(t *testing.T) {
 	ctx := context.Background()
 	h := start(t, Options{})
@@ -241,12 +239,13 @@ func TestTeleportZSettlesOnTheNextServerPosition(t *testing.T) {
 	if st := h.s.Status(); st.Z != 30 || !st.ZUnknown {
 		t.Fatalf("after .go xyz %+v", st)
 	}
-	h.send(opcode.SMSGUpdateObject, selfMovement(1, 2, 24.5))
-	waitFor(t, func() bool { st := h.s.Status(); return st.Z == 24.5 && !st.ZUnknown })
-	if err := h.s.WalkTo(ctx, 3, 2, 24.5); err != nil {
+	h.send(opcode.SMSGMonsterMove, selfSpline([3]float32{1, 2, 30}, [3]float32{4, 2, 24.5}, 50))
+	waitFor(t, func() bool { st := h.s.Status(); return st.Z == 24.5 && st.X == 4 && !st.ZUnknown })
+	time.Sleep(80 * time.Millisecond) // the spline has run
+	if err := h.s.WalkTo(ctx, 6, 2, 24.5); err != nil {
 		t.Fatal(err)
 	}
-	if mi := readMove(h.expect(opcode.MSGMoveStartForward).Body); mi.Z != 24.5 || mi.X != 1 {
+	if mi := readMove(h.expect(opcode.MSGMoveStartForward).Body); mi.Z != 24.5 || mi.X != 4 {
 		t.Fatalf("walk starts at %+v", mi)
 	}
 	h.expect(opcode.MSGMoveStop)

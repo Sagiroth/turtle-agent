@@ -50,6 +50,7 @@ Ctrl-C logs out cleanly. If the server refuses the logout (in combat), the agent
 
 ```
 turtle-agent login [--config FILE] [--capture FILE] [--stay DURATION] [--rpc ADDR] <account> <character>
+turtle-agent fleet --config FILE [--settings FILE] [--stagger DURATION] [--wait DURATION]
 turtle-agent scrub-check [--config FILE] <capture>...
 turtle-agent capture-stats <capture>
 turtle-agent version
@@ -65,6 +66,7 @@ turtle-agent version
 | 6 | the server closed the connection |
 | 7 | `scrub-check` found a secret in a capture |
 | 8 | the server kept refusing the logout |
+| 9 | `fleet`: a child failed, or not every character reached the world in time |
 
 `--capture` records every decrypted packet to a file (opened exclusively, mode 0600). The auth session body and
 Warden packets are never written, and any packet holding the account name, password or session key is redacted.
@@ -100,6 +102,36 @@ auras, deaths, kills, party changes and session state. Cursors are exclusive; `d
 Text the server echoes back (for example the account name in a GM reply) is redacted before it reaches events, logs
 or replies.
 
+## Fleet: several players at once
+
+`turtle-agent fleet` starts one `login` process per entry of a fleet file, for example a 5-player dungeon party or both
+battleground sides, each with its own RPC port.
+
+```json
+{
+  "members": [
+    { "account": "TANKACC",   "character": "Tankone", "rpc": "127.0.0.1:8771" },
+    { "account": "HEALACC",   "character": "Healtwo", "rpc": "127.0.0.1:8772" }
+  ]
+}
+```
+
+```sh
+bin/turtle-agent fleet --config fleet.json            # settings from ~/.config/turtle-agent/settings.json
+bin/turtle-agent fleet --config fleet.json --settings other.json --stagger 3s --wait 3m
+```
+
+- `account` is a key into the settings file's `accounts`; passwords stay there, are read by each child, and never appear in the
+  fleet file, on a command line or in output. Every account in the fleet file must exist in the settings file.
+- `rpc` must be a loopback address with a fixed port (no port 0), and ports and characters must be distinct. The
+  supervisor polls each port's `status` method.
+- Children start `--stagger` apart (default 2 s, realmd throttles logins). When all are `in_world` the supervisor prints a
+  table of character, RPC address and state; each child's log goes to stderr with a `[Character]` prefix.
+- Ctrl-C (or SIGTERM) sends one interrupt to every child so they all log out cleanly; a child that has not exited after 60 s
+  is killed.
+- A child that exits non-zero, or a fleet that is not fully in world after `--wait` (default 2 m), stops the others and
+  makes `fleet` exit 9. It exits 0 only when every child exited 0.
+
 ## Python
 
 The companion test harness (wow-play-harness, not public yet) has a `HeadlessClient` that wraps this API
@@ -118,7 +150,7 @@ with the same calls as its real-client backend (`chat`, `gm`, `state`, `tail_cha
 | `internal/events` | ordered event log with cursors |
 | `internal/capture` | packet capture files and the secret scan |
 | `internal/rpc`, `internal/netutil` | loopback JSON-RPC server |
-| `cmd/turtle-agent` | the CLI |
+| `cmd/turtle-agent` | the CLI (`login`, `fleet`, capture tools) |
 
 Design and implementation plan: `docs/superpowers/`.
 

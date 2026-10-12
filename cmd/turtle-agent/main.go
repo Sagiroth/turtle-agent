@@ -24,6 +24,7 @@ const (
 	// exitLogoutRefused: the server still refused the logout (in combat) when the retries
 	// ran out; the agent closed the socket and the character may stay in world.
 	exitLogoutRefused = 8
+	// exitFleet (fleet.go) is 9: a fleet child failed or the fleet never got into world.
 )
 
 func main() {
@@ -54,6 +55,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "login":
 		return loginCmd(ctx, args[1:], stdout, stderr)
+	case "fleet":
+		return fleetCmd(ctx, args[1:], stdout, stderr)
 	case "scrub-check":
 		return scrubCmd(args[1:], stdout, stderr)
 	case "capture-stats":
@@ -70,6 +73,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 func usage(w io.Writer) {
 	fmt.Fprintln(w, `usage:
   turtle-agent login [--config FILE] [--capture FILE] [--stay DURATION] [--rpc ADDR] <account> <character>
+  turtle-agent fleet --config FILE [--settings FILE] [--stagger DURATION] [--wait DURATION]
   turtle-agent scrub-check [--config FILE] <capture>...
   turtle-agent capture-stats <capture>
   turtle-agent version`)

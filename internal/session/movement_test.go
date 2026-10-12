@@ -356,7 +356,7 @@ func TestFeatherFallMidFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmi, _ := ackMove(t, ff, 41)
-	if fmi.Flags != game.MoveJumping|game.MoveSafeFall || fmi.Z <= me.Z {
+	if fmi.Flags != game.MoveJumping|game.MoveFallingFar|game.MoveSafeFall || fmi.Z <= me.Z { // past the apex (0.78 s)
 		t.Fatalf("feather-fall ack in the air %+v", fmi)
 	}
 	steps := []game.MoveInfo{ack, fmi}

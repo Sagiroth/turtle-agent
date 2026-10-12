@@ -365,3 +365,26 @@ func TestFloorsListsTheSurfacesAtAPoint(t *testing.T) {
 		t.Fatal("no folder, no error")
 	}
 }
+
+// A missing tile is looked up once; the next Plan forgets it, so a tile copied in later counts.
+func TestFloorsRememberMissingTilesUntilThePlan(t *testing.T) {
+	dir := navfixture.WriteDir(t, fixtureMap, navfixture.LCorridor(0))
+	p := NewPlanner(dir)
+	defer p.Close()
+	if fl, err := p.Floors(fixtureMap, -588, 12, -50, 50); err != nil || fl != nil {
+		t.Fatalf("%v %v", fl, err)
+	}
+	far := navfixture.BuildTile([]navfixture.Poly{navfixture.Square(-590, 10, -586, 14, 0)}, nil, 0, -2)
+	if err := os.WriteFile(filepath.Join(dir, tileFile(fixtureMap, -588, 12)), far, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if fl, _ := p.Floors(fixtureMap, -588, 12, -50, 50); fl != nil {
+		t.Fatalf("missing tile looked up again: %v", fl)
+	}
+	if _, err := p.Plan(fixtureMap, Vec3{12, 12, 0}, Vec3{48, 48, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if fl, err := p.Floors(fixtureMap, -588, 12, -50, 50); err != nil || len(fl) != 1 || fl[0].Z != 0 {
+		t.Fatalf("after a plan: %v %v", fl, err)
+	}
+}

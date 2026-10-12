@@ -53,31 +53,63 @@ func highest(fl []navmesh.Floor, lo, hi float32) (navmesh.Floor, bool) {
 }
 
 // trace flies the current arc against the navmesh, a sample every traceStep, up to limit
-// seconds, and sets the landing: the first floor the arc meets between two samples (or,
-// going across, one that rose under it by no more than a slope climbs in a step). A floor
-// above that, with no floor under the arc, is a wall the arc ran into: the flight stops
-// going across where it was and drops from there, as the client slides down a wall. It
-// says false when the arc meets no floor in time, or a query fails.
+// seconds, and sets the landing. Between two samples the arc lands on a floor it came down
+// onto, or one that rose under it by no more than a slope climbs in a step (rise) from the
+// ground it was over. A surface that appears above the arc out of reach of that ground is
+// an obstacle. Going up into it, or through it from below, with a floor under the arc, is a
+// ceiling: the flight stops going across and drops from rest, as the client's does after a
+// bump. Any other obstacle, and a surface above the arc with no floor under it, is a wall:
+// the flight stops going across and flies on up and down, as the client slides along a wall. It says false when
+// the arc meets no floor in time, or a query fails.
 func (f *fallState) trace(limit float64) (float64, bool) {
 	rise := float32(float64(f.kb.XYSpeed)*traceStep*1.5) + 0.5 // a 56° slope, and the mesh's error
 	prev := f.pos(0)
+	fl, err := f.floor(prev[0], prev[1], prev[2]-fallReach, prev[2]+standSlack)
+	if err != nil {
+		return 0, false
+	}
+	ground := float32(-math.MaxFloat32) // the highest floor under the last sample
+	if g, ok := highest(fl, -math.MaxFloat32, prev[2]+standSlack); ok {
+		ground = g.Z
+	}
 	for i := 1; float64(i-1)*traceStep < limit; {
-		t := min(float64(i)*traceStep, limit)
+		t, t0 := min(float64(i)*traceStep, limit), float64(i-1)*traceStep
 		p := f.pos(t)
 		top := max(prev[2], p[2]) + rise
 		fl, err := f.floor(p[0], p[1], p[2]-fallReach, p[2]+wallReach)
 		if err != nil {
 			return 0, false
 		}
+		across := f.stopXY > t && f.kb.XYSpeed != 0
+		up := p[2] > prev[2]
+		obstacle := false
 		if g, ok := highest(fl, p[2]-0.01, top); ok {
-			f.landOn(g, max(t-traceStep, 0), t, prev[2], rise)
-			return f.land.Sub(f.start).Seconds(), true
-		}
-		if f.stopXY > t && f.kb.XYSpeed != 0 && len(fl) > 0 && fl[0].Z > top {
-			if _, under := highest(fl, -math.MaxFloat32, top); !under {
-				f.stopXY = max(t-traceStep, 0) // into a wall: check this sample again, without going across
-				continue
+			if g.Z <= prev[2]+0.01 || g.Z <= ground+rise {
+				f.landOn(g, t0, t, prev[2], rise)
+				return f.land.Sub(f.start).Seconds(), true
 			}
+			obstacle = true
+		}
+		if g, ok := highest(fl, prev[2]+0.01, p[2]-0.01); ok && up && g.Z > ground+rise {
+			obstacle = true // gone up through it from below
+		}
+		if !obstacle && across && len(fl) > 0 && fl[0].Z > top {
+			_, under := highest(fl, -math.MaxFloat32, top)
+			obstacle = !under
+		}
+		_, under := highest(fl, -math.MaxFloat32, p[2]-0.01)
+		switch {
+		case obstacle && up && under && f.bumpT > t:
+			f.bumpT, f.stopXY = t0, min(f.stopXY, t0) // a ceiling: check this sample again
+			continue
+		case obstacle && across:
+			f.stopXY = t0 // a wall: check this sample again
+			continue
+		}
+		if g, ok := highest(fl, -math.MaxFloat32, p[2]+0.01); ok {
+			ground = g.Z
+		} else {
+			ground = -math.MaxFloat32
 		}
 		prev = p
 		i++

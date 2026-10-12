@@ -263,3 +263,33 @@ func TestKnockBackLandsOnASlope(t *testing.T) {
 	waitFor(t, func() bool { st := h.s.Status(); return !st.Falling && st.Z == lm.Z && !st.ZUnknown })
 	h.logout()
 }
+
+// A knockback that goes up into a bridge from below bumps its head: it stops going across,
+// drops from rest under the bridge and lands on the ground, never on the bridge's top.
+func TestFlightBumpsIntoACeiling(t *testing.T) {
+	bridge := func(x, y float32) []float32 {
+		if y >= 2 && y <= 12 {
+			return []float32{0, 3}
+		}
+		return []float32{0}
+	}
+	f := flight(bridge, [3]float32{0, 0, 0}, game.KnockBack{Sin: 1, XYSpeed: 8, ZSpeed: -15})
+	if !f.onFloor || f.landPos[2] != 0 || f.bumpT > 1 || f.stopXY > f.bumpT {
+		t.Fatalf("landed at %v after %.2f s, bump at %.2f, stopped across at %.2f", f.landPos, f.seconds(), f.bumpT, f.stopXY)
+	}
+	for tt := 0.0; tt < f.seconds(); tt += 0.01 {
+		if p := f.pos(tt); p[1] >= 2 && p[2] > 3 {
+			t.Fatalf("through the bridge at %.2f s: %v", tt, p)
+		}
+	}
+	// Without a floor under it, a surface above is a wall even on the way up: no bump.
+	cliff := func(x, y float32) []float32 {
+		if y >= 3 {
+			return []float32{20}
+		}
+		return []float32{0}
+	}
+	if f := flight(cliff, [3]float32{0, 0, 0}, game.KnockBack{Sin: 1, XYSpeed: 8, ZSpeed: -9.5}); f.bumpT < 10 || f.stopXY > 1 {
+		t.Fatalf("cliff: bump at %.2f, stopped across at %.2f", f.bumpT, f.stopXY)
+	}
+}

@@ -1,6 +1,7 @@
 package game
 
 import (
+	"encoding/hex"
 	"testing"
 
 	"github.com/pjerra/turtle-agent/internal/packet"
@@ -59,5 +60,26 @@ func TestMoveInfoTruncated(t *testing.T) {
 	ReadMoveInfo(r)
 	if r.Err() == nil {
 		t.Fatal("truncated jump data accepted")
+	}
+}
+
+// Golden bytes (struct.pack '<IIffffIffff' / '<IIffffI'): a heartbeat on the way down
+// carries MoveJumping|MoveFallingFar, the fall time and the four jump floats; the landing
+// carries no flags and the fall time, and no jump floats.
+func TestFallPacketsGoldenBytes(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		m    MoveInfo
+		want string
+	}{
+		{"falling heartbeat", MoveInfo{Flags: MoveJumping | MoveFallingFar, Time: 1234, X: 1.5, Y: -2.25, Z: 30, O: 0.5,
+			FallTime: 750, JumpZSpeed: -9.5, JumpCos: 0, JumpSin: 1, JumpXYSpeed: 8},
+			"00600000d20400000000c03f000010c00000f0410000003fee020000000018c1000000000000803f00000041"},
+		{"fall land", MoveInfo{Time: 2000, X: 1.5, Y: 5, Z: 10, O: 0.5, FallTime: 1440},
+			"00000000d00700000000c03f0000a040000020410000003fa0050000"},
+	} {
+		if got := hex.EncodeToString(BuildMovement(c.m)); got != c.want {
+			t.Errorf("%s:\n got %s\nwant %s", c.name, got, c.want)
+		}
 	}
 }

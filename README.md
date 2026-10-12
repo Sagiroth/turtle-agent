@@ -300,7 +300,10 @@ terrain:
 - the physics are the core's (gravity 19.29 yd/s², terminal speed 60.148 yd/s, 7 yd/s under feather fall,
   `Movement/spline/util.cpp`, `Movement.cpp:874-881`); the arc is sampled every 50 ms against every navmesh surface
   under it (ground, water, steep slopes), and lands where it meets one: sooner and higher up a slope, later and lower
-  down one. A surface above the arc with none under it is a wall: the flight stops going across there and drops;
+  down one. A surface that appears above the arc, out of a slope's reach from the ground it was over, is an obstacle:
+  going up into it (or through it from below) with ground under it is a ceiling, and the flight stops going across and
+  drops from rest; otherwise, and for a surface above the arc with none under it, it is a wall: the flight stops going
+  across there and flies on up and down;
 - a GM teleport (`.go xyz`, `.summon`) that leaves the player above the floor falls to it from rest. The fall opens
   with a heartbeat at the teleport's position, as the server keeps the player's movement flags across a teleport and
   checks the next packet against them. A floor up to 0.5 yd above or 0.05 yd below the teleport's z counts as standing
@@ -309,7 +312,8 @@ terrain:
   landing carries the time fallen, so the server can deal fall damage as for a client (`Player::HandleFall`: 14.57 yd
   or more below the highest point, at least 1229 ms in the air, no feather fall);
 - the heartbeat due within 150 ms of the landing is left out, and a landing step that would still break the
-  anticheat's bound (a floor met a little above the arc) waits until it does not, at most 1 s;
+  anticheat's bound (a floor met a little above the arc) waits until it does not, at most until 900 ms after the last
+  packet (the core flags a moving client silent for over 1000 ms, `SKIPPED_HEARTBEATS`);
 - `landed` says what it landed on: `navmesh` settles z (`z_unknown` false); `water` does not (the agent does not
   swim: it stands on the water's surface, where the mesh has it); `guess` is the old behaviour.
 
@@ -317,8 +321,10 @@ Without a navmesh (no `mmaps_dir`, a build without cgo, no tile under the point)
 it started at and a teleport stays where the server put it, both with `z_unknown` true. Limits: the mesh has no game
 objects and no walls of its own, so the wall rule is a stand-in for collision; a floor is where the mesh has it, within
 its detail error (a few tenths of a yard); a `walk_to` that ends above the ground does not fall (it sets `z_unknown`);
-a far teleport (`SMSG_NEW_WORLD`) does not fall either. The floor search runs in the session loop: a flight's first
-query on an unloaded tile reads that tile (0.5-3 MB) before the ack is sent.
+a far teleport (`SMSG_NEW_WORLD`) does not fall either; landing in water sends `MSG_MOVE_FALL_LAND`, not the client's
+`MSG_MOVE_START_SWIM`. The floor search runs in the session loop after the knockback (or feather-fall) ack is sent, as
+the server drops an order not acked within 2 s; a flight's first query on an unloaded tile reads that tile (0.5-3 MB),
+and a missing tile is looked up once (until the next `path_to`/`walk_path` plan).
 
 ## Navmesh walking
 

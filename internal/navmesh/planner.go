@@ -82,9 +82,10 @@ type Planner struct {
 }
 
 type mapMesh struct {
-	eng   *engine
-	tiles map[string]*loaded
-	tick  uint64
+	eng     *engine
+	tiles   map[string]*loaded
+	missing map[string]bool // tile files Floors found missing; Plan forgets them
+	tick    uint64
 }
 
 type loaded struct {
@@ -139,6 +140,7 @@ func (p *Planner) Plan(mapID uint32, from, to Vec3) (Path, error) {
 	if err != nil {
 		return Path{}, err
 	}
+	m.missing = nil
 	var path Path
 	for _, margin := range []int{1, 3} {
 		if err := p.load(m, wantTiles(names, mapID, from, to, margin, p.max)); err != nil {
@@ -162,8 +164,9 @@ type Floor struct {
 // Floors lists the navmesh surfaces at (x, y) from height lo to hi, highest first: ground,
 // water, lava, slime and too-steep slopes alike, as a falling body lands on any of them. It
 // loads the one tile under the point when it is not loaded yet; a point whose tile file is
-// missing has no floors. The mesh is the server's, so a floor is where the server's
-// pathing has the ground (within the mesh's detail error); it holds no game objects.
+// missing has no floors (remembered until the next Plan, which reads the folder again). The
+// mesh is the server's, so a floor is where the server's pathing has the ground (within the
+// mesh's detail error); it holds no game objects.
 func (p *Planner) Floors(mapID uint32, x, y, lo, hi float32) ([]Floor, error) {
 	if p.dir == "" {
 		return nil, errors.New(`navmesh: no tiles folder; set "mmaps_dir" in the settings file`)
@@ -175,8 +178,15 @@ func (p *Planner) Floors(mapID uint32, x, y, lo, hi float32) ([]Floor, error) {
 		return nil, err
 	}
 	name := tileFile(mapID, x, y)
+	if m.missing[name] {
+		return nil, nil
+	}
 	if m.tiles[name] == nil {
 		if _, err := os.Stat(filepath.Join(p.dir, name)); errors.Is(err, os.ErrNotExist) {
+			if m.missing == nil {
+				m.missing = map[string]bool{}
+			}
+			m.missing[name] = true
 			return nil, nil
 		}
 	}

@@ -77,7 +77,7 @@ func (e *engine) nearest(p, ext Vec3) (Vec3, bool) {
 
 // floors lists the surface heights at (x, y) between lo and hi with their polygon flags.
 func (e *engine) floors(x, y, lo, hi float32) ([]Floor, error) {
-	const most = 32
+	const most = 64 // nd_floors queries at most 64 polygons, so none is cut
 	p := Vec3{x, y, 0}
 	var z [most]float32
 	var fl [most]C.ushort
